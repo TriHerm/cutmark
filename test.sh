@@ -4,9 +4,19 @@
 # so point it there.
 set -euo pipefail
 cd "$(dirname "$0")"
+# Only a --filter or --skip picks the tests; other flags (build.sh passes --quiet) keep the full run.
+FULL=1
+[[ " $* " == *" --filter "* || " $* " == *" --skip "* ]] && FULL=""
+# A full run waits its turn: one at a time on this Mac (scripts/test-queue.sh).
+source scripts/test-queue.sh
+if [[ -n "$FULL" ]]; then queue_wait; fi
+# The tree this run tests, to remember when it passes. Only the private repo: the public copy has no git.
+TREE=""
+if [[ -n "$FULL" && -f scripts/public/check-public-build.sh ]]; then TREE="$(tree_now)"; fi
 # Without the Claude chat id: a suite started inside a Claude session must not write seen-rules files
 # (2026-10-10). Tests that need an id set it themselves.
-env -u CLAUDE_CODE_SESSION_ID python3 -m unittest discover -q -s mcp/tests || { echo "MCP tests failed"; exit 1; }
+# In parallel processes: one by one they took 280 s (mcp/tests/run_parallel.py).
+env -u CLAUDE_CODE_SESSION_ID python3 mcp/tests/run_parallel.py || { echo "MCP tests failed"; exit 1; }
 DEV=/Library/Developer/CommandLineTools/Library/Developer
 run() {
   if [[ -d "$DEV/Frameworks/Testing.framework" ]] && ! xcode-select -p | grep -q Xcode.app; then
@@ -21,8 +31,7 @@ run() {
 # too busy for their timing, and they failed the public release (2026-10-06) though each passes
 # alone. A full run leaves them out, then runs them by themselves, one at a time.
 TIMED='aSteerShowsNoErrorAndGoesOn|theNextArticleUsesALoadedPage|theHiddenDockedChatSkipsStreamedWords|effectPlaysAtItsSecond|resetWhileRunningKeepsTheNewAsk|watcherSeesAWrite'
-# Only a --filter or --skip picks the tests; other flags (build.sh passes --quiet) keep the split.
-if [[ " $* " == *" --filter "* || " $* " == *" --skip "* ]]; then
+if [[ -z "$FULL" ]]; then
   run "$@"
 else
   run --skip "$TIMED" "$@"
@@ -33,5 +42,7 @@ else
   if [[ -f scripts/public/check-public-build.sh && "${TAKES_SKIP_PUBLIC:-}" != 1 ]]; then
     echo "The public copy..."
     scripts/public/check-public-build.sh
+    # Every check passed on this tree: build.sh install does not run them again.
+    if [[ -n "$TREE" ]]; then passed_mark "$TREE"; fi
   fi
 fi

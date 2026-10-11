@@ -186,6 +186,27 @@ enum Store {
         while d.count > movesMax, let k = d.keys.sorted().first { d[k] = nil }
         guard let data = try? JSONSerialization.data(withJSONObject: d, options: [.prettyPrinted, .sortedKeys]) else { return }
         try? data.write(to: root.appending(path: movesFile), options: .atomic)
+        planFollowMove(root, a, b)
+    }
+
+    /// A Plan board card follows its session to the new folder (a card on the old path showed no
+    /// picture after a move, 2026-10-11). One card per session: a card already on `b` wins.
+    static func planFollowMove(_ root: URL, _ a: String, _ b: String) {
+        let file = root.appending(path: "_library/plan.json")
+        guard let data = try? Data(contentsOf: file),
+              var d = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let videos = d["videos"] as? [[String: Any]],
+              videos.contains(where: { $0["session"] as? String == a }) else { return }
+        let hasB = videos.contains { $0["session"] as? String == b }
+        d["videos"] = videos.compactMap { v -> [String: Any]? in
+            guard v["session"] as? String == a else { return v }
+            if hasB { return nil }
+            var v = v
+            v["session"] = b
+            return v
+        }
+        guard let out = try? JSONSerialization.data(withJSONObject: d, options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? out.write(to: file, options: .atomic)
     }
 
     /// The folder an old path moved to (up to 20 steps), or nil.

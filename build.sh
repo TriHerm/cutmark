@@ -9,6 +9,14 @@ cd "$(dirname "$0")"
 # all of main at that time, and a later one never drops work. `./build.sh` alone builds anything.
 if [[ "${1:-}" == "install" && "${ANY_BRANCH:-}" != 1 ]]; then
   git fetch -q origin main
+  # The same commit as the Takes that runs or waits: an Update with nothing in it (2026-10-11).
+  for have in ~/Applications/Takes.app ~/Applications/.update.noindex/Takes.app; do
+    was="$(/usr/libexec/PlistBuddy -c 'Print :BuildStamp' "$have/Contents/Info.plist" 2>/dev/null | cut -d' ' -f1)" || was=""
+    if [[ -n "$was" && "$was" == "$(git rev-parse --short HEAD)" && "${FRESH_INSTALL:-}" != 1 ]]; then
+      echo "Nothing new to stage: Takes already has $was (installed or waiting as the update)."
+      exit 0
+    fi
+  done
   if ! git diff --quiet HEAD -- Sources mcp assets Package.swift Info.plist build.sh; then
     echo "Not installed: commit your changes first (install builds only what is on main)." >&2; exit 1
   fi
@@ -27,8 +35,14 @@ fi
 if [[ "${1:-}" == "install" && "${SKIP_TESTS:-}" == 1 && -f scripts/public/check-public-build.sh ]]; then
   scripts/public/check-public-build.sh || exit 1
 fi
-# Tests first, so a regression never reaches ~/Applications. SKIP_TESTS=1 skips them.
-[[ "${SKIP_TESTS:-}" == 1 ]] || ./test.sh --quiet
+# Tests first, so a regression never reaches ~/Applications. SKIP_TESTS=1 skips them. A full
+# ./test.sh that passed on this exact tree (here or in another worktree) counts: the same run
+# twice took 10 more minutes (2026-10-11).
+source scripts/test-queue.sh
+if [[ "${SKIP_TESTS:-}" == 1 ]]; then :
+elif passed_has "$(tree_now)"; then echo "Tests passed on this tree already: not run again."
+else ./test.sh --quiet
+fi
 swift build -c release
 # A .noindex folder: Spotlight skips it, so macOS never registers this copy and never opens it
 # in place of ~/Applications/Takes.app (old copies kept opening, 2026-10-01).
@@ -36,6 +50,7 @@ APP=build.noindex/Takes.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/Takes "$APP/Contents/MacOS/Takes"
+cp .build/release/takes-faces "$APP/Contents/MacOS/takes-faces"
 cp mcp/takes_mcp.py "$APP/Contents/Resources/takes_mcp.py"
 cp mcp/clean_voice.py "$APP/Contents/Resources/clean_voice.py"
 cp mcp/prepare_take.py "$APP/Contents/Resources/prepare_take.py"
@@ -43,6 +58,7 @@ cp assets/Takes.icns "$APP/Contents/Resources/Takes.icns"
 mkdir -p "$APP/Contents/Resources/Fonts" && cp assets/fonts/*.ttf "$APP/Contents/Resources/Fonts/"
 mkdir -p "$APP/Contents/Resources/Onboarding" && cp assets/onboarding/creator.jpg "$APP/Contents/Resources/Onboarding/"
 mkdir -p "$APP/Contents/Resources/Article"
+mkdir -p "$APP/Contents/Resources/Agents" && cp assets/agents/*.svg assets/agents/*.png "$APP/Contents/Resources/Agents/"
 mkdir -p "$APP/Contents/Resources/Brand" && cp assets/brand/mascot-512.png "$APP/Contents/Resources/Brand/mascot.png" && cp assets/brand/mascot-body-512.png "$APP/Contents/Resources/Brand/mascot-body.png"
 cp Info.plist "$APP/Contents/Info.plist"
 # The search helper (embed/, ⌘K by meaning). MLX needs Xcode and its Metal toolchain, which
@@ -114,10 +130,12 @@ KC="$HOME/Library/Keychains/takes-signing.keychain-db"
 if [[ -f "$KC" && -f "$HOME/.config/takes/keychain-pass" ]]; then
   security unlock-keychain -p "$(cat "$HOME/.config/takes/keychain-pass")" "$KC"
   [[ -f "$APP/Contents/MacOS/takes-embed" ]] && codesign --force --sign "Takes Local Signing" --keychain "$KC" --identifier de.marvinaziz.takes.embed "$APP/Contents/MacOS/takes-embed"
+  codesign --force --sign "Takes Local Signing" --keychain "$KC" --identifier de.marvinaziz.takes.faces "$APP/Contents/MacOS/takes-faces"
   codesign --force --sign "Takes Local Signing" --keychain "$KC" --identifier de.marvinaziz.takes "$APP"
 else
   echo "No signing certificate: run scripts/setup-signing.sh once to keep permissions across installs."
   [[ -f "$APP/Contents/MacOS/takes-embed" ]] && codesign --force --sign - --identifier de.marvinaziz.takes.embed "$APP/Contents/MacOS/takes-embed"
+  codesign --force --sign - --identifier de.marvinaziz.takes.faces "$APP/Contents/MacOS/takes-faces"
   codesign --force --sign - --identifier de.marvinaziz.takes "$APP"
 fi
 echo "Built $APP"

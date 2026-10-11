@@ -344,6 +344,33 @@ def record_move(old, new):
     with open(path + ".tmp", "w") as f:
         json.dump(d, f, indent=1, ensure_ascii=False)
     os.replace(path + ".tmp", path)
+    plan_follow_move(r, a, b)
+
+
+def plan_follow_move(r, a, b):
+    """A Plan board card follows its session to the new folder (a card on the old path showed no
+    picture after a move, 2026-10-11). One card per session: a card already on b wins."""
+    path = os.path.join(r, LIB, "plan.json")
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return
+    videos = d.get("videos") if isinstance(d, dict) else None
+    if not isinstance(videos, list) or not any(isinstance(v, dict) and v.get("session") == a for v in videos):
+        return
+    has_b = any(isinstance(v, dict) and v.get("session") == b for v in videos)
+    out = []
+    for v in videos:
+        if isinstance(v, dict) and v.get("session") == a:
+            if has_b:
+                continue
+            v = dict(v, session=b)
+        out.append(v)
+    d["videos"] = out
+    with open(path + ".tmp", "w") as f:
+        json.dump(d, f, indent=2, sort_keys=True)
+    os.replace(path + ".tmp", path)
 
 
 def follow_moves(path, r=None):
@@ -1955,14 +1982,27 @@ def apply_lesson(d, s, c, r, notes=None):
         raise ValueError("Comment %s: lesson is a rule id from get_rules, 'new' with rule={area, text}, "
                          "or 'one-off' (not '%s')." % (c["id"], lesson))
     need_writable(d, rule["area"])
-    c["lesson"] = rule["id"]
-    # The rule was there before the user wrote the comment: the same mistake again.
+    # The rule was there before the user wrote the comment: the same mistake again, but only when the
+    # edit broke what the rule says (missed). A new ask or taste near the rule ("add some logos" under
+    # "show real logos") is no repeat: 11 of the first 50 repeats were those (2026-10-11).
     made, at = parse_iso(rule.get("made", "")), parse_iso((c.get("at") or "")[:19] + "Z")
-    if made and at and made < at:
+    old = bool(made and at and made < at)
+    if old and not isinstance(r.get("missed"), bool):
+        raise ValueError("Comment %s came after rule %s: give missed=true when the edit broke what the rule says, "
+                         "missed=false when the comment asks for something new or is taste near it." % (c["id"], rule["id"]))
+    c["lesson"] = rule["id"]
+    c.pop("request", None)
+    if old and r["missed"]:
         c["repeat"] = True
         if ref not in rule.setdefault("repeats", []):
             rule["repeats"].append(ref)
-    elif ref not in rule.setdefault("from", []):
+        return rule["id"]
+    c.pop("repeat", None)
+    if old:
+        c["request"] = True
+    if ref in (rule.get("repeats") or []):
+        rule["repeats"].remove(ref)
+    if ref not in rule.setdefault("from", []):
         rule["from"].append(ref)
     return rule["id"]
 
@@ -2041,6 +2081,9 @@ BUILTIN = {
     "picture_drift": {"chroma": 3.0, "sat": 0.85, "blur": 1.3, "same": 0.5},
     "words":         {"edge": 0.08, "twice": 0.5},
     "regression":    {"margin": 0.05, "cut": 0.15, "cut_share": 0.6},
+    # face height / height of the card the face sits in. Edits the user passed: median 0.30, 90% under
+    # 0.48; the two he called too tight ("zoom out", "crop me better"): 0.52-0.54 (2026-10-11).
+    "framing":       {"tight": 0.5, "min_face": 0.25, "min_card": 0.5, "frames": 2, "samples": 16},
 }
 CHECK_BUDGET = 60   # seconds for all built-ins in one call; what is not done by then skips
 CHECK_TIMEOUT = 60  # seconds for one built-in
@@ -2057,7 +2100,7 @@ NOT_FOUND = "Takes could not find this edit in %s (heavy music, another take or 
 GIVEN_SHARE = 0.25  # a source argument still needs this share of the edit's sound found in it
 OUT_OF_TIME = "Out of time. Run check_edit again; the second run is faster."
 LABELS = {"streams": "Extra track", "frozen_video": "Frozen picture", "echo": "Echo", "words": "Missing words",
-          "regression": "Fix undone"}
+          "regression": "Fix undone", "framing": "Framed too tight"}
 
 
 class Skip(Exception):
@@ -3195,6 +3238,123 @@ def chk_picture_drift(ctx):
     return (value, [], "The picture is " + end, extra)
 
 
+# ---------- framing ----------
+# The user: "zoom out a little and center me", "make sure to crop me better" (2026-10-11). The faces come
+# from takes-faces (Apple Vision, Sources/TakesFaces) in Takes.app. A face is judged inside the card it
+# sits in: the nearest straight edges around it where most pixels change at once (a card on a
+# background, a split line), else the frame. Only "too tight" is checked: off centre failed 17 of 72
+# edits he passed, as a face beside text on purpose reads the same.
+FACE_W = 180  # the grey frame the card edges are found in
+
+
+def faces_helper():
+    here = os.path.dirname(os.path.abspath(__file__))
+    for p in (os.environ.get("TAKES_FACES"), os.path.join(here, "..", "MacOS", "takes-faces"),
+              os.path.join(here, "..", ".build", "release", "takes-faces"),
+              os.path.join(here, "..", ".build", "debug", "takes-faces"),
+              os.path.expanduser("~/Applications/Takes.app/Contents/MacOS/takes-faces"),
+              "/Applications/Takes.app/Contents/MacOS/takes-faces"):
+        if p and os.access(p, os.X_OK):
+            return os.path.realpath(p)
+    return None
+
+
+def face_boxes(images):
+    """{image: [[x, y, w, h], ...]} in 0...1, y from the top. None without the helper."""
+    helper = faces_helper()
+    if not helper or not images:
+        return None
+    r = subprocess.run([helper] + list(images), capture_output=True, text=True, timeout=120)
+    out = {}
+    for line in (r.stdout or "").splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        out[d.get("path")] = d.get("faces") or []
+    return out
+
+
+def face_card(g, w, h, box):
+    """(left, top, right, bottom) of the card around a face box, in grey-frame pixels."""
+    x0, y0, x1, y1 = (int(v) for v in (box[0] * w, box[1] * h, (box[0] + box[2]) * w, (box[1] + box[3]) * h))
+    x0, y0, x1, y1 = max(0, x0), max(0, y0), min(w - 1, x1), min(h - 1, y1)
+
+    def edge(pairs):
+        pairs = list(pairs)
+        return pairs and sum(1 for a, b in pairs if abs(a - b) > 18) >= 0.85 * len(pairs)
+    cols = range(x0, max(x0 + 1, x1))
+    top = next((y for y in range(y0, 0, -1) if edge((g[y * w + x], g[(y - 1) * w + x]) for x in cols)), 0)
+    bottom = next((y + 1 for y in range(y1, h - 1) if edge((g[y * w + x], g[(y + 1) * w + x]) for x in cols)), h)
+    rows = range(max(top, y0), max(max(top, y0) + 1, min(bottom, y1 + (y1 - y0))))
+    left = next((x for x in range(x0, 0, -1) if edge((g[y * w + x], g[y * w + x - 1]) for y in rows)), 0)
+    right = next((x + 1 for x in range(x1, w - 1) if edge((g[y * w + x], g[y * w + x + 1]) for y in rows)), w)
+    return left, top, right, bottom
+
+
+def framing_samples(path, times, size):
+    """[(t, [{"size": face h / card h, "card": card w / frame w}])] for each time with a frame."""
+    w = FACE_W
+    h = max(2, int(round(w * size[1] / float(size[0]))) // 2 * 2)
+    tmp = tempfile.mkdtemp(prefix="takes-faces-")
+    try:
+        def grab(t):
+            png = os.path.join(tmp, "%.2f.png" % t)
+            subprocess.run([need_ffmpeg(), "-v", "error", "-y", "-ss", "%.3f" % t, "-i", path, "-frames:v", "1",
+                            "-an", "-vf", "scale=640:-2", png], capture_output=True, timeout=60)
+            g = grey_frames(path, t, 0.04, 25, (w, h))[:1]
+            return t, png, (g[0] if g else None)
+        with concurrent.futures.ThreadPoolExecutor(4) as ex:
+            got = [x for x in ex.map(grab, times) if x[2] and os.path.exists(x[1])]
+        boxes = face_boxes([png for _, png, _ in got])
+        if boxes is None:
+            raise Skip("Takes cannot find faces here: takes-faces is not in Takes.app. Update Takes.")
+        out = []
+        for t, png, g in got:
+            found = []
+            for b in boxes.get(png) or []:
+                left, top, right, bottom = face_card(g, w, h, b)
+                found.append({"size": b[3] * h / max(1.0, bottom - top), "card": (right - left) / float(w)})
+            out.append((t, found))
+        return out
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def framing_verdict(samples, lim):
+    """(value, times, say or None, extra) from framing_samples."""
+    tight, biggest = [], 0.0
+    for t, found in samples:
+        sizes = [f["size"] for f in found if f["card"] >= lim["min_card"] and f["size"] >= lim["min_face"]]
+        if sizes:
+            biggest = max(biggest, max(sizes))
+            if max(sizes) > lim["tight"]:
+                tight.append((t, max(sizes)))
+    want = "the face at most %g of its card's height" % lim["tight"]
+    if len(tight) < lim["frames"]:
+        extra = {"want": want}
+        if not biggest:
+            extra["note"] = "No face big enough to judge."
+        return (round(biggest, 2), [], None, extra)
+    worst = max(v for _, v in tight)
+    return (round(worst, 2), [t for t, _ in tight], "The face fills %d%% of its card's height at %s: too tight." % (
+        round(worst * 100), ", ".join(mmss(t) for t, _ in tight[:4])),
+        {"want": want, "fix": "Zoom out: show head and shoulders with room above the hair or cap, the face "
+                              "about a third of the card's height, centred in it."})
+
+
+def chk_framing(ctx):
+    lim = BUILTIN["framing"]
+    v = ctx["probe"]["video"]
+    size = shown_size(v) if v else (0, 0)
+    if not v or not all(size):
+        raise Skip("The edit has no picture.")
+    total = ctx["probe"]["duration"] or media_seconds(ctx["path"])
+    n = lim["samples"]
+    times = [round((i + 0.5) * total / n, 2) for i in range(n)] if total > 0 else []
+    return framing_verdict(framing_samples(ctx["path"], times, size), lim)
+
+
 def quote(ws):
     return "“%s”" % " ".join(w for _, _, w in ws)
 
@@ -3492,7 +3652,7 @@ def chk_regression(ctx):
     return out or (compared, [], None, {"want": want})
 
 
-PICTURE_CHECKS = ("av_sync", "frozen_video", "picture_drift")
+PICTURE_CHECKS = ("av_sync", "frozen_video", "picture_drift", "framing")
 
 
 def run_builtin(s, rel, path, given=None, as_rel=None):
@@ -3567,7 +3727,7 @@ def run_builtin(s, rel, path, given=None, as_rel=None):
             ctx["why"] = "Takes could not read the take: %s" % e
     elif src["path"]:
         ctx["why"] = "The edit has no sound, so Takes cannot find it in the take."
-    names = ["av_sync", "frozen_video", "band_balance", "echo", "picture_drift", "words", "regression"]
+    names = ["av_sync", "frozen_video", "band_balance", "echo", "picture_drift", "framing", "words", "regression"]
     if not p["video"]:
         names = [n for n in names if n not in PICTURE_CHECKS]  # a sound-only edit: picture checks are not listed
     ex = concurrent.futures.ThreadPoolExecutor(4)
@@ -12658,6 +12818,8 @@ LIBRARY = {"type": "string", "description": "A library: 'style:<Name>' for one o
            "or 'comments' for the comment copilot's files (lessons, target list, style guide)."}
 LESSON = {"type": "string", "description": "With resolve: what this comment taught. A rule id from "
           "get_rules, 'new' (then give rule), or 'one-off'."}
+MISSED = {"type": "boolean", "description": "With a rule id: true when the edit broke what that rule says (counted "
+          "as the same mistake again), false when the comment asks for something new or is taste near it."}
 RULE_DETAILS = {"type": "string", "description": "Longer words for the rule, at most %d characters. '' removes "
                 "them." % DETAILS_MAX}
 MERGE_INTO = {"type": "string", "description": "With a new rule in a full area: the id of the closest rule in the "
@@ -12913,20 +13075,21 @@ TOOLS = [
      "replies=[{id, text, resolve, fixed_in, fixed_at, lesson}] for every comment. fixed_in: the new version's "
      "file; fixed_at: the second in it where the fix shows (a click on the reply jumps there). text: one line "
      "('Caption 20% smaller'). Unclear comment: ask a question, resolve omitted. In a session each resolved "
-     "comment needs a lesson: a rule id from get_rules (the same mistake again), 'new' with rule={area, text} "
-     "(it applies to the next videos too), else 'one-off'.",
+     "comment needs a lesson: a rule id from get_rules, with missed=true when the edit broke that rule (the same "
+     "mistake again) or missed=false for a new ask or taste near it; 'new' with rule={area, text} (it applies to "
+     "the next videos too); else 'one-off'.",
      {"session": SESSION, "library": LIBRARY,
       "replies": {"type": "array", "items": {"type": "object", "properties": {
           "id": {"type": "string", "description": "Comment id, e.g. 'c3'."}, "text": S, "resolve": {"type": "boolean"},
           "fixed_in": {"type": "string", "description": "File of the new version, relative to the session or library."},
           "fixed_at": {"type": "number", "description": "Seconds into fixed_in where the fix shows."},
-          "lesson": LESSON, "rule": RULE},
+          "lesson": LESSON, "rule": RULE, "missed": MISSED},
           "required": ["id"]}},
       # One reply without replies=[...]: the same fields, short here (they load with every Takes chat).
       "id": {"type": "string", "description": "Single reply: comment id. Prefer replies=[...]."},
       **{k: {"type": ty, "description": "As in replies."} for k, ty in (
           ("text", "string"), ("resolve", "boolean"), ("fixed_in", "string"), ("fixed_at", "number"),
-          ("lesson", "string"), ("rule", "object"))}},
+          ("lesson", "string"), ("rule", "object"), ("missed", "boolean"))}},
      [], t_reply_comment),
     ("get_rules", "The rules learned from the user's comments, one file per step: plan (storyboard, script), make "
      "(sound, cut, picture, captions, graphics), package (thumbnail), publish (post-all, post-linkedin, post-x, "

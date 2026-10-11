@@ -234,17 +234,23 @@ struct MarkdownReader: NSViewRepresentable {
     var reveal: (quote: String, token: Int)? = nil
     var onSelect: (String) -> Void = { _ in }
     var onComment: () -> Void = {}
+    /// Space around the text.
+    var inset = NSSize(width: 40, height: 32)
+    /// No page colour: the text sits on whatever is behind it.
+    var clear = false
+    /// A plain click on the text (not on a link, not a drag to select): Ideas opens its editor.
+    var onTap: (() -> Void)? = nil
     @Environment(\.colorScheme) private var scheme
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
         // TextKit 1: tables (NSTextTable) draw only there.
-        let tv = NSTextView(usingTextLayoutManager: false)
+        let tv = TapTextView(usingTextLayoutManager: false)
         tv.isEditable = false
         tv.isSelectable = true
         tv.drawsBackground = true
-        tv.textContainerInset = NSSize(width: 40, height: 32)
+        tv.textContainerInset = inset
         tv.isVerticallyResizable = true
         tv.autoresizingMask = [.width]
         tv.textContainer?.widthTracksTextView = true
@@ -265,6 +271,12 @@ struct MarkdownReader: NSViewRepresentable {
         let page = Theme.paperNS
         tv.backgroundColor = page
         scroll.backgroundColor = page
+        tv.drawsBackground = !clear
+        scroll.drawsBackground = !clear
+        tv.textContainerInset = inset
+        // On a clear page the text lines up with what is above it.
+        tv.textContainer?.lineFragmentPadding = clear ? 0 : 5
+        (tv as? TapTextView)?.onTap = onTap
         tv.selectedTextAttributes = [.backgroundColor: NSColor(Theme.accent).withAlphaComponent(0.22)]
         let key = "\(text.hashValue)|\(size)|\(scheme)"
         if c.drawn != key {
@@ -327,6 +339,18 @@ struct MarkdownReader: NSViewRepresentable {
                                            .underlineStyle: NSUnderlineStyle.single.rawValue,
                                            .underlineColor: NSColor(Theme.accent)], forCharacterRange: r)
             }
+        }
+    }
+
+    /// Calls `onTap` after a single click that left nothing selected and did not land on a link.
+    final class TapTextView: NSTextView {
+        var onTap: (() -> Void)?
+
+        override func mouseDown(with event: NSEvent) {
+            let i = characterIndexForInsertion(at: convert(event.locationInWindow, from: nil))
+            let onLink = i < (textStorage?.length ?? 0) && textStorage?.attribute(.link, at: i, effectiveRange: nil) != nil
+            super.mouseDown(with: event)
+            if let onTap, !onLink, event.clickCount == 1, selectedRange().length == 0 { onTap() }
         }
     }
 

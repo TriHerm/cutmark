@@ -3,7 +3,7 @@ import SwiftUI
 /// Feedback (2026-10-08): what the agent learned from your review comments, and whether it gets
 /// better. When the agent resolves a session comment it gives it a lesson (MCP reply_comment): a
 /// rule in <root>/_library/rules/<area>.json, one file per step of the content journey (2026-10-09:
-/// one lessons.json held them all, and one Post area held every platform), or "one-off". A comment on a rule that was already there is
+/// one lessons.json held them all, and one Post area held every platform), or "one-off". A comment on a rule that was already there, when the edit broke it (missed), is
 /// a repeat: the same mistake again. A rule with a check is measured by check_edit (loudness, true
 /// peak, pauses, length) and the results land in <session>/checks.json. Since 2026-10-11 check_edit
 /// also runs built-in checks that compare each edit with its take (Sources/Takes/EditChecks.swift):

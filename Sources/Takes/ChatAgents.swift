@@ -372,36 +372,57 @@ struct AgentTile: View {
     var size: CGFloat = 26
     var dim = false
 
-    private var letters: String {
-        switch name {
-        case "Claude Code": return "C"
-        case "Codex": return "X"
-        case "Claude Desktop": return "CD"
-        case "Gemini CLI": return "G"
-        case "Antigravity": return "A"
-        case "opencode": return "oc"
-        case "pi": return "pi"
-        default: return String(name.prefix(2))
-        }
-    }
-
-    private var tint: Color {
-        switch name {
-        case "Claude Code", "Claude Desktop": return Color(red: 0xD9 / 255, green: 0x77 / 255, blue: 0x57 / 255)
-        case "Codex": return Theme.ink
-        case "Gemini CLI", "Antigravity": return Color(red: 0x3B / 255, green: 0x82 / 255, blue: 0xF6 / 255)
-        case "pi": return Theme.live
-        default: return Theme.muted
-        }
-    }
-
     var body: some View {
-        Text(letters)
-            .font(Theme.sans(size * 0.42, .semibold))
-            .foregroundStyle(name == "Codex" ? Theme.paper : .white)
-            .frame(width: size, height: size)
-            .background(tint, in: RoundedRectangle(cornerRadius: size * 0.28))
-            .opacity(dim ? 0.5 : 1)
+        Group {
+            if let mark = AgentMark.image(name) {
+                Image(nsImage: mark.image).renderingMode(mark.tint == nil ? .original : .template)
+                    .resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+                    .foregroundStyle(mark.tint ?? Theme.ink)
+            } else {
+                Image(systemName: "terminal").font(.system(size: size * 0.42, weight: .medium)).foregroundStyle(Theme.muted)
+            }
+        }
+        .padding(size * 0.2)
+        .frame(width: size, height: size)
+        .background(Theme.canvas, in: RoundedRectangle(cornerRadius: size * 0.28))
+        .overlay(RoundedRectangle(cornerRadius: size * 0.28).strokeBorder(Theme.border, lineWidth: 0.5))
+        .opacity(dim ? 0.5 : 1)
+    }
+}
+
+/// The agents' real marks (assets/agents, README there for sources), from the app's Resources/Agents.
+/// One-colour marks come back with a tint: they draw as templates, so they follow light and dark.
+@MainActor
+enum AgentMark {
+    struct Mark { let image: NSImage; let tint: Color? }
+
+    private static var cache: [String: Mark] = [:]
+
+    static func file(_ name: String) -> (String, Color?)? {
+        let claude = Color(red: 0xD9 / 255, green: 0x77 / 255, blue: 0x57 / 255)
+        switch name {
+        case "Claude Code", "Claude Desktop": return ("claude.svg", claude)
+        case "Codex": return ("openai.svg", Theme.ink)
+        case "Cursor": return ("cursor.svg", Theme.ink)
+        case "Gemini CLI": return ("gemini.svg", nil)
+        case "Antigravity": return ("antigravity.png", nil)
+        case "opencode": return ("opencode.svg", Theme.ink)
+        case "pi": return ("pi.svg", Theme.ink)
+        default: return nil
+        }
+    }
+
+    static func image(_ name: String) -> Mark? {
+        if let m = cache[name] { return m }
+        guard let (f, tint) = file(name) else { return nil }
+        // The built app has them in Resources; `swift run` and tests read the repo's own folder.
+        let dirs = [Bundle.main.resourceURL?.appending(path: "Agents"),
+                    URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../../assets/agents")]
+        guard let img = dirs.compactMap({ $0 }).lazy.compactMap({ NSImage(contentsOf: $0.appending(path: f)) }).first else { return nil }
+        img.isTemplate = tint != nil
+        let m = Mark(image: img, tint: tint)
+        cache[name] = m
+        return m
     }
 }
 

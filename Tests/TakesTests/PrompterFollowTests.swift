@@ -140,6 +140,24 @@ struct PrompterFollowTests {
         #expect(NotchPanel.body(lines: 4) > NotchPanel.body(lines: 3))
     }
 
+    /// The panel's line is the line Prompter draws, at the smallest and the biggest size: one more
+    /// line of text takes one more of the panel's lines (2026-10-11: it was a fifth short each).
+    @MainActor @Test func aPanelLineIsADrawnLine() {
+        func drawn(_ text: String, _ size: Double) -> CGFloat {
+            let para = NSMutableParagraphStyle()
+            para.lineSpacing = size * 0.35
+            let store = NSTextStorage(string: text, attributes: [.font: Theme.prompter(size), .paragraphStyle: para])
+            let layout = NSLayoutManager(), box = NSTextContainer(size: NSSize(width: 800, height: 10_000))
+            store.addLayoutManager(layout); layout.addTextContainer(box)
+            layout.ensureLayout(for: box)
+            return layout.usedRect(for: box).height
+        }
+        for size in [NotchPanel.fontSizes.lowerBound, NotchPanel.fontSizes.upperBound] {
+            let step = drawn("One\nTwo\nThree", size) - drawn("One\nTwo", size)
+            #expect(abs(step - NotchPanel.line(size)) < 1, "size \(size): a line draws \(step), the panel gives \(NotchPanel.line(size))")
+        }
+    }
+
     @Test func notchIntroHasThreeStepsAndNamesRealButtons() {
         #expect(NotchView.intro.count == 3)
         let all = NotchView.intro.reduce(into: Set<String>()) { $0.formUnion($1.buttons) }
@@ -258,7 +276,7 @@ struct PrompterShots {
     @Test func notch() throws {
         guard ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] != nil else { return }
         fonts()
-        for (name, lines, intro) in [("notch-3", 3, 3), ("notch-5", 5, 3), ("notch-intro-1", 5, 0), ("notch-intro-2", 5, 1), ("notch-intro-3", 5, 2)] {
+        for (name, lines, intro) in [("notch-3", 3, 3), ("notch-5", 5, 3), ("notch-8", 8, 3), ("notch-intro-1", 5, 0), ("notch-intro-2", 5, 1), ("notch-intro-3", 5, 2)] {
             UserDefaults.standard.set(intro, forKey: NotchView.introKey)
             let body = NotchPanel.body(lines: lines)
             let l = NotchLayout.make(screen: CGRect(x: 0, y: 0, width: 1512, height: 982), visibleTop: 950,

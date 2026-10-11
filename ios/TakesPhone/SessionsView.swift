@@ -394,10 +394,65 @@ struct SwipeAway<Content: View>: View {
     }
 }
 
+/// The waiting build's changes, as the Mac's What's new: "Area: headline; more" shows the area
+/// small above the headline. A tap on the heading folds the list.
+struct UpdateChanges: View {
+    let changes: [String]
+    @Binding var open: Bool
+
+    static func split(_ subject: String) -> (area: String, headline: String) {
+        var area = "", rest = Substring(subject)
+        if let r = subject.range(of: ": "), subject[..<r.lowerBound].count <= 24 {
+            area = String(subject[..<r.lowerBound])
+            rest = subject[r.upperBound...]
+        }
+        var headline = String(rest.split(separator: ";", maxSplits: 1).first ?? rest)
+        if let first = headline.first { headline = first.uppercased() + headline.dropFirst() }
+        return (area, headline)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button { withAnimation(.easeOut(duration: 0.2)) { open.toggle() } } label: {
+                HStack(spacing: 6) {
+                    Text(changes.count == 1 ? "1 change" : "\(changes.count) changes")
+                        .font(.inter(.caption, .semibold)).foregroundStyle(Palette.muted)
+                    Image(systemName: "chevron.down").font(.system(size: 10, weight: .bold)).foregroundStyle(Palette.faint)
+                        .rotationEffect(.degrees(open ? 0 : -90))
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(open ? "Hide what's new" : "Show what's new")
+            if open {
+                ForEach(Array(changes.enumerated()), id: \.offset) { _, c in
+                    let p = Self.split(c)
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Circle().fill(Palette.accent).frame(width: 5, height: 5)
+                        VStack(alignment: .leading, spacing: 1) {
+                            if !p.area.isEmpty {
+                                Text(p.area.uppercased()).font(.inter(size: 10, .semibold, relativeTo: .caption2))
+                                    .tracking(0.5).foregroundStyle(Palette.faint)
+                            }
+                            Text(p.headline).font(.inter(.footnote)).foregroundStyle(Palette.ink)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            }
+        }
+        .padding(.leading, 43).padding(.trailing, 12).padding(.bottom, 10)
+    }
+}
+
 /// "Update" when the Mac has a new build of this app: a sidebar row in the accent, as on the Mac.
 /// A tap has the Mac install it; the app ends and opens again on the new build (2026-10-03).
 struct UpdatePill: View {
     @EnvironmentObject var model: Model
+    /// What's new starts open, as on the Mac (2026-10-11): the row alone said nothing about the build.
+    @State private var showChanges = true
 
     var body: some View {
         if let r = model.update?.renew {
@@ -435,6 +490,9 @@ struct UpdatePill: View {
             .disabled(model.updating)
             .accessibilityLabel(model.updating ? "Updating" : "Update the app")
             .transition(.opacity)
+            if let changes = u.changes, !changes.isEmpty {
+                UpdateChanges(changes: changes, open: $showChanges)
+            }
         }
     }
 }

@@ -52,6 +52,8 @@ struct Comment: Codable, Identifiable, Hashable {
     var lesson: String? = nil
     /// The rule was there before the comment: the same mistake again.
     var `repeat`: Bool? = nil
+    /// The rule was there, but the comment asked for something new or was taste near it (2026-10-11).
+    var request: Bool? = nil
 
     var open: Bool { status != "resolved" }
     var area: CGRect? {

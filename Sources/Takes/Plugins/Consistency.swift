@@ -570,6 +570,8 @@ struct ConsistencyPage: View {
     let root: URL
     var choices: () -> [PlanChoice] = { [] }
     var open: (URL) -> Void = { _ in }
+    /// Tests pass the brand file: they have no app bundle.
+    var mascot: NSImage? = Mascot.image
     @State private var editing = false
     @State private var celebrate = false
 
@@ -591,10 +593,21 @@ struct ConsistencyPage: View {
                             }
                             .arrive(0)
                         } else if let plan = store.plan {
-                            Text(CoachWords.headline(store.stats))
-                                .font(Theme.display(26)).foregroundStyle(Theme.ink)
-                                .swapIn(CoachWords.headline(store.stats))
-                                .arrive(0)
+                            // The flame from Change days, on the page itself (the user, 2026-10-11).
+                            let level = FireLevel(days: plan.days.count)
+                            HStack(spacing: 16) {
+                                FireMascot(level: level, size: 58, image: mascot)
+                                    .onTapGesture { withAnimation(.page) { editing = true } }
+                                    .help("\(level.name). Click to change your days.")
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(CoachWords.headline(store.stats))
+                                        .font(Theme.display(26)).foregroundStyle(Theme.ink)
+                                        .swapIn(CoachWords.headline(store.stats))
+                                    Text("\(level.name). \(CoachWords.perMonth(plan.days.count))")
+                                        .font(Theme.sans(13)).foregroundStyle(Theme.muted)
+                                }
+                            }
+                            .arrive(0)
                             PlanWeeks(weeks: store.stats.weeks, goal: store.stats.goal,
                                       note: CoachWords.recording(store.stats), game: store.game, open: open)
                                 .card(padding: 16).arrive(1)

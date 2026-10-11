@@ -410,7 +410,8 @@ struct UpdateButton: View {
 /// to 560 points: a ScrollView alone in a popover shrank to one row and hid the rest (2026-10-04).
 /// The height comes from the first layout (`FitHeight`): measured a moment later, the popover had
 /// already opened at 177 points and showed only the middle of the list (2026-10-08).
-/// With up to six changes, every one starts open.
+/// Every change starts open, however many there are: with more than six they started closed, and
+/// the panel looked empty, only titles (2026-10-11).
 struct WhatsNew: View {
     let staged: Updater.Staged
     let updater: Updater
@@ -419,7 +420,7 @@ struct WhatsNew: View {
 
     init(staged: Updater.Staged, updater: Updater, expanded: Set<String>? = nil, update: @escaping () -> Void) {
         self.staged = staged; self.updater = updater; self.update = update
-        _expanded = State(initialValue: expanded ?? (staged.log.count <= 6 ? Set(staged.log.map(\.id)) : []))
+        _expanded = State(initialValue: expanded ?? Set(staged.log.map(\.id)))
     }
 
     /// Areas in order of their newest change; "Notice" and "Notices" are one area.

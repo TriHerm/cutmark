@@ -145,6 +145,15 @@ class PlanVideos(Base):
         shutil.rmtree(os.path.join(self.root, "Proj", "2026-10-01-b"))
         self.assertEqual([x["title"] for x in t.t_get_plan({})["videos"]], ["Bezos"])
 
+    def test_card_follows_a_moved_session(self):
+        t.t_set_plan({"days": ["tue", "thu"]})
+        a = self.session("2026-10-01-a", "Shop")
+        day = (datetime.now().astimezone().date() + timedelta(days=2)).isoformat()
+        t.t_plan_video({"session": a, "day": day})
+        t.t_move_sessions({"sessions": [a], "project": "Elsewhere"})
+        v = t.t_get_plan({})["videos"]
+        self.assertEqual([(x["session"], x["title"], x["date"]) for x in v], [("Elsewhere/2026-10-01-a", "Shop", day)])
+
     def test_cards_say_posted_or_scheduled(self):
         t.t_set_plan({"days": ["tue", "thu"]})
         today = datetime.now().astimezone().date()

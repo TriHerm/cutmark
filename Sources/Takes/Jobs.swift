@@ -164,8 +164,10 @@ final class JobBoard {
         return job.status == .running || age == nil || age! > 30
     }
 
+    /// O_CLOEXEC: a chat or ffmpeg the app starts in the same moment must not get a copy of the
+    /// fd. A copy keeps the lock it takes, and the job's runner could never lock it (2026-10-11).
     nonisolated static func lockHeld(_ url: URL) -> Bool {
-        let fd = open(url.path, O_RDONLY)
+        let fd = open(url.path, O_RDONLY | O_CLOEXEC)
         guard fd >= 0 else { return false }
         defer { close(fd) }
         return flock(fd, LOCK_SH | LOCK_NB) != 0
@@ -363,6 +365,15 @@ final class JobBoard {
         }
     }
 
+    /// The chat's row (2026-10-11: a row for every end was noise beside the chat's own words).
+    /// It shows what runs, and an end the chat never hears about: a lost job, or one the chat did
+    /// not start. A done or failed job of the chat's own goes there as a message instead.
+    func row(_ session: URL, now: Date = Date()) -> [Job] {
+        visible(session, now: now).filter { j in
+            j.status.live || ((j.status == .failed || j.status == .lost) && !Self.toTell(j))
+        }
+    }
+
     /// A job runs in this session (the sidebar's ring).
     func running(_ session: URL) -> Bool { (bySession[session.standardizedFileURL] ?? []).contains { $0.status.live } }
 
@@ -439,21 +450,21 @@ struct StopArm {
     func asking(_ key: String, now: Date = Date()) -> Bool { armed == key && now.timeIntervalSince(at) < Self.window }
 }
 
-/// The session's jobs above the message box: what runs, what is ready, what went wrong.
+/// The session's jobs above the message box: what runs, and an end the chat does not hear about.
 struct JobsRow: View {
     @Environment(AppModel.self) var app
     let session: URL
     @State private var arm = StopArm()
 
     var body: some View {
-        let jobs = app.jobs.visible(session)
+        let jobs = app.jobs.row(session)
         if !jobs.isEmpty {
             // Each second while something is young or about to go; else every 30 s.
             let fast = jobs.contains { j in
                 j.status == .stopped || j.status == .starting || (j.started.map { -$0.timeIntervalSinceNow < 60 } ?? true)
             } || arm.armed != nil
             TimelineView(.periodic(from: .now, by: fast ? 1 : 30)) { ctx in
-                let now = app.jobs.visible(session, now: ctx.date)
+                let now = app.jobs.row(session, now: ctx.date)
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(now.prefix(3).enumerated()), id: \.element.key) { i, j in
                         row(j, now: ctx.date).arrive(i)

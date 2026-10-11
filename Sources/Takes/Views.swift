@@ -192,6 +192,10 @@ struct ContentView: View {
     /// The session tab, only so back and forward see it change.
     @AppStorage("rightTab") private var tab = SessionMode.record.rawValue
     @State private var fullScreen = false
+    /// How far the sidebar is open, 0 to 1. Only this number animates on ⌘B (2026-10-11).
+    @State private var drawer: CGFloat = 1
+    /// The sidebar stays in the tree until it has slid shut.
+    @State private var sidebarMounted = true
 
     // Sidebar | the session or a board. Our own columns, not NavigationSplitView: its sidebar
     // floats as an inset card on macOS 26, and this one runs the full height of the window.
@@ -217,6 +221,8 @@ struct ContentView: View {
         let _ = Perf.body("ContentView")
         // ⌘B: the content takes its new width at once and only the sidebar slides. Animating the
         // width made every board lay out again on each frame, which looked jumpy.
+        // Since 2026-10-11 the page slides with the sidebar's edge (an offset, no new layout), and
+        // the sidebar is clipped to its column, so its text never runs over the board rail.
         // The frame as in Codex (Rail.swift): the top row, the board rail, the session list, the page.
         ZStack(alignment: .topLeading) {
             content
@@ -227,14 +233,20 @@ struct ContentView: View {
                 // off (2026-10-03). Now anything too wide runs out on the right.
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 .animation(nil, value: savedColumns)
+                .modifier(DrawerOffset(open: drawer, target: showsSidebar ? 1 : 0, width: sidebarWidth))
             BoardRail()
                 .padding(.top, Chrome.bar)
                 .frame(maxHeight: .infinity, alignment: .top)
-            if showsSidebar {
+            if sidebarMounted {
                 Sidebar(library: library)
                     .padding(.top, Chrome.bar)
                     .frame(width: sidebarWidth)
                     .frame(maxHeight: .infinity)
+                    // A drawer: it comes out from under the rail and is cut at the column's edge.
+                    .opacity(0.4 + 0.6 * drawer)
+                    .frame(width: sidebarWidth * drawer, alignment: .trailing)
+                    .clipped()
+                    .allowsHitTesting(showsSidebar)
                     // Drag the list's right edge to make it wider or narrower.
                     .overlay(alignment: .trailing) {
                         Color.clear.frame(width: 8).contentShape(Rectangle())
@@ -243,7 +255,6 @@ struct ContentView: View {
                                 .onChanged { v in sidebarWidth = min(max(v.location.x - Chrome.rail, 200), 340) })
                     }
                     .padding(.leading, Chrome.rail)
-                    .transition(.move(edge: .leading).combined(with: .opacity))
             }
             // ‹ › and the sidebar button in the top row, beside the traffic lights (Navigation.swift).
             NavButtons()
@@ -258,9 +269,15 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in fullScreen = false }
         .overlay { if app.notchTour { NotchTourShade().transition(.opacity) } }
         .animation(Theme.motion, value: app.notchTour)
-        .animation(.easeOut(duration: 0.2), value: savedColumns)
         .onReceive(NotificationCenter.default.publisher(for: .takesToggleSidebar)) { _ in
-            savedColumns = showsSidebar ? "detailOnly" : "all"
+            let opening = !showsSidebar
+            if opening { sidebarMounted = true }
+            withAnimation(Theme.drawer) {
+                savedColumns = opening ? "all" : "detailOnly"
+                drawer = opening ? 1 : 0
+            } completion: {
+                if !showsSidebar { sidebarMounted = false }
+            }
         }
         .onChange(of: library.selectedSessions) { _, sel in
             app.board = nil  // ⌘N, a link
@@ -270,6 +287,8 @@ struct ContentView: View {
         .onChange(of: tab) { app.noteSpot() }
         .onAppear {
             app.trail.visit(app.spotNow)
+            drawer = showsSidebar ? 1 : 0
+            sidebarMounted = showsSidebar
             fullScreen = NSApp.windows.contains { $0.isVisible && $0.styleMask.contains(.fullScreen) }
         }
     }
@@ -3439,5 +3458,20 @@ private struct Placed: ViewModifier {
             content.frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(.horizontal, 28).padding(.top, 56).padding(.bottom, 96)  // the record pill sits below
         }
+    }
+}
+
+/// ⌘B: moves the page with the sidebar's edge while `open` animates. The page already has its
+/// new width (`target`), so only this offset changes per frame and nothing lays out again.
+private struct DrawerOffset: GeometryEffect {
+    var open: CGFloat
+    var target: CGFloat
+    var width: CGFloat
+    var animatableData: CGFloat {
+        get { open }
+        set { open = newValue }
+    }
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        ProjectionTransform(CGAffineTransform(translationX: (open - target) * width, y: 0))
     }
 }

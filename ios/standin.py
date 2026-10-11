@@ -335,6 +335,14 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b)
             return
+        if p == "/test/update":
+            state["update"] = True
+            return self.send({"ok": True})
+        if p == "/api/update" and state.get("update"):
+            return self.send({"stamp": "491610a Oct 11 16:05", "changes": [
+                "Ideas: the body reads as markdown; click it or the pencil to type",
+                "What's new: every change starts open, not only with six or fewer",
+                "Rail: drop the Connections and Site stats numbers"]})
         if p == "/api/update" and state.get("files"):
             return self.send({"renew": "Xcode lost your Apple ID. On the Mac: Xcode > Settings > Apple Accounts, sign in. The app stops in 30 h."})
         if p == "/api/ping":

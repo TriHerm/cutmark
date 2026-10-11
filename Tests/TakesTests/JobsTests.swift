@@ -39,7 +39,8 @@ struct JobFixture {
     /// Holds a job's lock the way its runner does, until `release`.
     func hold(_ id: String, generate: Bool = false) -> Int32 {
         let path = session.appending(path: (generate ? "generated/.jobs/" : ".jobs/") + id + ".lock").path
-        let fd = open(path, O_WRONLY | O_CREAT, 0o644)
+        // O_CLOEXEC: a process another test starts must not keep the lock after close (lostRule failed so).
+        let fd = open(path, O_WRONLY | O_CREAT | O_CLOEXEC, 0o644)
         flock(fd, LOCK_EX)
         return fd
     }
@@ -164,6 +165,22 @@ struct JobsTests {
         let again = JobBoard(defaults: defaults)
         again.scan(root: f.root)
         #expect(Set(again.visible(f.session).map(\.id)) == ["job-stop"])
+    }
+
+    /// The chat's row: what runs, and ends the chat never hears about. The chat tells the rest itself.
+    @MainActor @Test func rowRules() throws {
+        let f = try JobFixture()
+        defer { f.cleanup() }
+        let defaults = try #require(UserDefaults(suiteName: "jobs-test-\(UUID().uuidString)"))
+        try f.job("job-run", [:])
+        try f.job("job-done", ["status": "done", "ended": JobFixture.iso(10)])
+        try f.job("job-fail", ["status": "failed", "ended": JobFixture.iso(10)])
+        try f.job("job-lost", ["status": "lost", "ended": JobFixture.iso(10)])
+        try f.job("job-mine", ["status": "failed", "from_chat": false, "ended": JobFixture.iso(10)])
+        try f.job("job-stop", ["status": "stopped", "stopped_by": "you", "ended": JobFixture.iso(1)])
+        let board = JobBoard(defaults: defaults)
+        board.scan(root: f.root)
+        #expect(Set(board.row(f.session).map(\.id)) == ["job-run", "job-lost", "job-mine"])
     }
 
     @Test func watcherRoutesJobFiles() {

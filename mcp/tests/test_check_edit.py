@@ -86,8 +86,10 @@ class CheckEdit(Base):
         self.assertEqual(r["source"], "take-01-camera.mov")
         built = [x for x in r["results"] if "check" in x]
         self.assertEqual([x["check"] for x in built], ["streams", "av_sync", "frozen_video", "band_balance", "echo",
-                                                     "picture_drift", "words", "regression"])
-        self.assertEqual([x for x in built if x["pass"] is not True], [])
+                                                     "picture_drift", "framing", "words", "regression"])
+        # framing skips only where Takes.app's face finder is not built.
+        self.assertEqual([x for x in built if x["pass"] is not True
+                          and not (x["check"] == "framing" and "takes-faces" in x.get("skip", ""))], [])
         self.assertTrue(r["passed"])
         self.assertIn("Every check passes", r["note"])
 
@@ -340,6 +342,17 @@ class CheckEdit(Base):
         self.assertEqual(bad[0]["say"], "The sound is early by 0.2 s.")
 
     # Picture
+
+    def test_framing_fails_a_face_too_big_for_its_card(self):
+        lim = t.BUILTIN["framing"]
+        big = [{"size": 0.55, "card": 0.8}]
+        ok = [{"size": 0.32, "card": 0.8}]
+        pip = [{"size": 0.7, "card": 0.3}]  # a small picture-in-picture box: not judged
+        v = t.framing_verdict([(1.0, big), (5.0, ok), (9.0, big), (13.0, pip)], lim)
+        self.assertEqual(v[1], [1.0, 9.0])
+        self.assertIn("too tight", v[2])
+        self.assertIsNone(t.framing_verdict([(1.0, big), (5.0, ok), (9.0, pip)], lim)[2], "one frame is not enough")
+        self.assertIn("No face", t.framing_verdict([(1.0, [])], lim)[3]["note"])
 
     def test_green_fails_picture_drift(self):
         r, by = self.run_check("green-v1.mp4", self.segs, vf="colorbalance=gs=0.3")

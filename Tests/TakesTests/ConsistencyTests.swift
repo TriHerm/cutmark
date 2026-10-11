@@ -215,10 +215,13 @@ extension Snap {
             return w
         }
         store.stats = s
-        shoot("consistency-board", ConsistencyPage(store: store, root: root), size: CGSize(width: 1100, height: 820))
-        // Change days: the flame at each level, with the two-week preview.
+                // Change days: the flame at each level, with the two-week preview.
         let mascot = NSImage(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .appending(path: "../../assets/brand/mascot.png").standardized)
+        for dark in [true, false] {
+            shoot("consistency-board-\(dark ? "dark" : "light")", ConsistencyPage(store: store, root: root, mascot: mascot),
+                  size: CGSize(width: 1100, height: 820), dark: dark)
+        }
         for (name, days) in [("1", ["tue"]), ("2", ["tue", "thu"]), ("3", ["tue", "thu", "fri"]), ("5", ["mon", "tue", "wed", "thu", "fri"])] {
             let plan = PostingPlan(days: days, time: "08:02", platforms: ["linkedin"])
             for dark in [true, false] {

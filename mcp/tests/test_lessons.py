@@ -57,13 +57,28 @@ class Lessons(unittest.TestCase):
         self.assertNotIn("repeat", self.comment("c1"))
         self.assertEqual(self.comment("c3")["lesson"], "one-off")
         # c2 was written after the rule existed: the same mistake again.
-        t.t_reply_comment({"session": self.s, "replies": [{"id": "c2", "resolve": True, "lesson": "cut-1"}]})
+        with self.assertRaises(ValueError):  # after the rule: missed must say if the edit broke it
+            t.t_reply_comment({"session": self.s, "replies": [{"id": "c2", "resolve": True, "lesson": "cut-1"}]})
+        t.t_reply_comment({"session": self.s, "replies": [{"id": "c2", "resolve": True, "lesson": "cut-1",
+                                                          "missed": True}]})
         self.assertTrue(self.comment("c2")["repeat"])
         self.assertEqual(t.t_get_rules({"area": "all"})["rules"][0]["repeated"], 1)
         self.assertEqual(t.read_lessons()["rules"][0]["from"], ["Proj/2026-10-08-idea#c1"])
         # One file per area: the app reads rules/cut.json.
         with open(os.path.join(self.root, "_library", "rules", "cut.json")) as f:
             self.assertEqual(json.load(f)["rules"][0]["id"], "cut-1")
+
+    def test_a_new_ask_near_a_rule_is_no_repeat(self):
+        t.t_reply_comment({"session": self.s, "replies": [
+            {"id": "c1", "resolve": True, "lesson": "new", "rule": {"area": "graphics", "text": "Real logos only."}}]})
+        t.t_reply_comment({"session": self.s, "replies": [{"id": "c3", "resolve": True, "lesson": "graphics-1",
+                                                          "missed": False}]})
+        c = self.comment("c3")
+        self.assertNotIn("repeat", c)
+        self.assertTrue(c["request"])
+        rule = t.read_lessons()["rules"][0]
+        self.assertEqual(rule["repeats"], [])
+        self.assertIn("Proj/2026-10-08-idea#c3", rule["from"])
 
     def test_unknown_lesson_writes_nothing(self):
         with self.assertRaises(ValueError):

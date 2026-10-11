@@ -41,6 +41,8 @@ enum Theme {
     static let motion = Animation.easeOut(duration: 0.18)
     /// Things that move: the mode indicator, drawers, the record button. A little overshoot.
     static let spring = Animation.spring(response: 0.42, dampingFraction: 0.74)
+    /// The sidebar drawer (⌘B): quick and smooth, no overshoot.
+    static let drawer = Animation.spring(duration: 0.32, bounce: 0)
     /// Soft ink-tinted shadow under cards that float on the canvas.
     static var shadow: Color { c.shadow }
 

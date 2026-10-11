@@ -208,9 +208,17 @@ final class NotchPanel {
 
     /// The text part's height for a number of lines, with the bar under it.
     static func body(lines: Int) -> CGFloat {
-        let line = fontSize * 1.35 + 0.5
-        return (CGFloat(lines) * line).rounded() + 24 + NotchView.barHeight
+        return (CGFloat(lines) * line(fontSize)).rounded() + 24 + NotchView.barHeight
     }
+
+    /// One line of the prompter as it draws: the font's own line height plus the 0.35 spacing
+    /// Prompter sets. A fixed 1.35 left out about a fifth of a line each, so bigger text showed
+    /// fewer lines and the panel seemed not to grow (2026-10-11).
+    static func line(_ size: Double) -> CGFloat {
+        NSLayoutManager().defaultLineHeight(for: Theme.prompter(size)) + size * 0.35
+    }
+
+    static let maxLines = 8
 
     /// Sizes the panel for its screen and line count, and draws it new for that shape. `glow`:
     /// a soft blue light round the panel for a moment, to bring the eye up to the notch.
@@ -245,7 +253,7 @@ final class NotchPanel {
     }
 }
 
-/// What the panel shows: the script, two to six lines, and a small bar.
+/// What the panel shows: the script, two to eight lines, and a small bar.
 struct NotchView: View {
     @Environment(AppModel.self) private var app
     @AppStorage("notchLines") private var lines = 3
@@ -413,8 +421,9 @@ struct NotchView: View {
             .disabled(fontSize >= sizes.upperBound)
             button("rectangle.compress.vertical", lines <= 2 ? "Fewer lines (2 is the least)" : "Fewer lines") { lines = max(2, lines - 1) }
                 .disabled(lines <= 2)
-            button("rectangle.expand.vertical", lines >= 6 ? "More lines (6 is the most)" : "More lines") { lines = min(6, lines + 1) }
-                .disabled(lines >= 6)
+            let most = NotchPanel.maxLines
+            button("rectangle.expand.vertical", lines >= most ? "More lines (\(most) is the most)" : "More lines") { lines = min(most, lines + 1) }
+                .disabled(lines >= most)
             button("questionmark", "Take the quick tour again", id: "tour") { introStep = 0 }
             button("xmark", "Close the panel (⌥⌘N)") { close() }
         }

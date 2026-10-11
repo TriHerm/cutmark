@@ -287,6 +287,20 @@ final class ParityTests: XCTestCase {
         shot(app, "p5-2-session")
     }
 
+    /// The Update row lists the build's changes, open at first, as the Mac's What's new (2026-10-11).
+    func testWhatsNew() throws {
+        _ = try get("/test/parity")
+        _ = try get("/test/update")
+        let app = XCUIApplication()
+        open(app)
+        XCTAssertTrue(app.buttons["Update the app"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["The body reads as markdown"].exists, "changes show without a tap")
+        shot(app, "p6-whats-new")
+        app.buttons["Hide what's new"].tap()
+        sleep(1)
+        XCTAssertFalse(app.staticTexts["The body reads as markdown"].exists)
+    }
+
     func shot(_ app: XCUIApplication, _ name: String) {
         let png = XCUIScreen.main.screenshot().pngRepresentation
         let dir = ProcessInfo.processInfo.environment["TAKES_SHOTS"] ?? NSTemporaryDirectory()
