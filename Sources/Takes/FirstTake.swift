@@ -420,7 +420,7 @@ private struct Chip: View {
 }
 
 /// Brand-coloured paper that bursts up and falls for three seconds, then is gone.
-private struct Confetti: View {
+struct Confetti: View {
     @Environment(\.accessibilityReduceMotion) var still
     @State private var start = Date()
     private static let colors: [Color] = [Theme.accent, Theme.live, Color(red: 0.06, green: 0.16, blue: 0.34),

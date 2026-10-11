@@ -235,6 +235,29 @@ final class ParityTests: XCTestCase {
     }
 
     /// Stage 5: ⌘K as the Search screen.
+    /// While Takes works, a message waits in the queue above the box and its x takes it back.
+    func testQueueWhileWorking() throws {
+        _ = try get("/test/parity")
+        _ = try get("/test/chat/busy")
+        let app = XCUIApplication()
+        open(app)
+        app.buttons.matching(identifier: "session-row").firstMatch.tap()
+        sleep(2)
+        if app.buttons["Chat"].exists { app.buttons["Chat"].tap() }
+        let box = app.textViews["chat-input"].exists ? app.textViews["chat-input"] : app.textFields["chat-input"]
+        XCTAssertTrue(box.waitForExistence(timeout: 10))
+        box.tap()
+        box.typeText("Also make it vertical")
+        app.buttons["Send"].tap()
+        XCTAssertTrue(app.staticTexts["Also make it vertical"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Take it out of the queue"].exists)
+        shot(app, "q-1-queued")
+        app.buttons["Take it out of the queue"].tap()
+        sleep(2)
+        XCTAssertFalse(app.staticTexts["Also make it vertical"].exists)
+        XCTAssertTrue(log().contains { $0["/api/chat/unqueue"] as? String == "0" }, "\(log())")
+    }
+
     func testSearch() throws {
         _ = try get("/test/parity")
         let app = XCUIApplication()

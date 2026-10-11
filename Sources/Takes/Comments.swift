@@ -1177,7 +1177,7 @@ struct CommentCard: View {
                 .help("Click to edit")
             ForEach(Array((comment.replies ?? []).enumerated()), id: \.offset) { _, r in
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(r.by == "user" ? "you" : r.by).font(Theme.mono(10, .medium))
+                    Text(r.by == "user" ? "you" : r.by == "claude" ? "Takes" : r.by).font(Theme.mono(10, .medium))
                         .foregroundStyle(r.by == "user" ? .white.opacity(0.45) : Theme.accent)
                     VStack(alignment: .leading, spacing: 3) {
                         if !r.text.isEmpty {

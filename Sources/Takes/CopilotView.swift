@@ -66,6 +66,8 @@ struct CommentsView: View {
     let root: URL
     @AppStorage("copilotTab") private var tab = "review"
     @AppStorage("copilotDrafts") private var drafts = 5
+    /// The daily search (CommentScout): The user turns it off here.
+    @AppStorage(CommentScout.onKey) private var daily = true
     /// The card on the Review tab. Approve or skip takes the card out, so the same place then
     /// shows the next one.
     @State private var reviewAt = 0
@@ -191,6 +193,8 @@ struct CommentsView: View {
                     ForEach([3, 5, 7, 10, 15], id: \.self) { Text("\($0) posts").tag($0) }
                 }
                 .pickerStyle(.inline)
+                Divider()
+                Toggle("Search every day at 8:07", isOn: $daily)
             } label: {
                 HStack(spacing: 3) {
                     Text("\(drafts)").font(Theme.mono(11.5, .semibold))
@@ -200,7 +204,7 @@ struct CommentsView: View {
                 .contentShape(Rectangle())
             }
             .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
-            .help("How many posts a run looks for")
+            .help("How many posts a run looks for, and the daily search")
         }
         .font(Theme.sans(13, .semibold))
         .foregroundStyle(Theme.paper)

@@ -523,6 +523,13 @@ enum CopilotAsk {
         "Find up to \(count) LinkedIn posts worth a comment and draft one comment for each."
     }
 
+    /// The daily run (CommentScout): the same ask, and the user may not be at the Mac.
+    static func daily(_ count: Int) -> String {
+        find(count) + " This is the daily run: I may not be watching and cannot answer. Never post, "
+            + "like or send anything. If Chrome is not connected or LinkedIn shows a login wall, "
+            + "CAPTCHA or rate limit, stop and say so in one line."
+    }
+
     static func redraft(_ s: Suggestion, note: String, variant: Int?, edit: String? = nil) -> String {
         "Feedback on the draft for \(about(s, variant)): \"\(note)\"\(edited(edit)) Write a new draft that follows it and save it with redraft_comment."
     }
@@ -643,4 +650,53 @@ final class OutputBuffer: @unchecked Sendable {
     private let lock = NSLock()
     func append(_ d: Data) { lock.lock(); buffer.append(d); lock.unlock() }
     var data: Data { lock.lock(); defer { lock.unlock() }; return buffer }
+}
+
+// MARK: - The daily search
+
+/// Finds posts once a day in the Comments board's own chat (2026-10-10). Before, a LaunchAgent ran
+/// a hidden `claude -p` at 8:07, and the user saw Chrome at work with nothing in Takes. Now the run
+/// is the board's Find chat: the sidebar shows it, the board says "Finding · watch", Stop stops it.
+/// The app must be open: a day it was shut runs when it opens, once.
+@MainActor
+final class CommentScout {
+    static let onKey = "commentScoutOn", dayKey = "commentScoutDay"
+    nonisolated static let hour = 8, minute = 7, count = 10
+
+    static var on: Bool {
+        get { UserDefaults.standard.object(forKey: onKey) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: onKey) }
+    }
+
+    private var timer: Timer?
+
+    /// True when today's run is due: past the time, and no run started today yet.
+    nonisolated static func due(now: Date, lastDay: String?, calendar: Calendar = .current) -> Bool {
+        guard let at = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: now) else { return false }
+        return now >= at && lastDay != day(now, calendar)
+    }
+
+    nonisolated static func day(_ d: Date, _ calendar: Calendar = .current) -> String {
+        let c = calendar.dateComponents([.year, .month, .day], from: d)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
+
+    func start(_ hub: ChatHub) {
+        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self, weak hub] _ in
+            MainActor.assumeIsolated { if let hub { self?.tick(hub) } }
+        }
+        timer?.tolerance = 30
+        tick(hub)
+    }
+
+    private func tick(_ hub: ChatHub) {
+        let d = UserDefaults.standard
+        guard Self.on, Self.due(now: Date(), lastDay: d.string(forKey: Self.dayKey)) else { return }
+        d.set(Self.day(Date()), forKey: Self.dayKey)
+        // A Find the user started himself counts as today's run.
+        guard !hub.comments.running else { return }
+        hub.comments.reset()
+        hub.comments.send(CopilotAsk.daily(Self.count), title: "Comments", onStage: nil,
+                          shown: "Daily search: find up to \(Self.count) posts")
+    }
 }

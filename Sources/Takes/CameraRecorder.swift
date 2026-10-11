@@ -285,13 +285,18 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     }
 
     /// Turns the camera back on and waits until it delivers frames, so a take never starts black.
-    func resume() async {
-        guard paused || held else { return }
+    /// True when it was off. startRunning blocks the camera queue until the session runs, so a hop
+    /// through the queue waits as long as the camera needs: an iPhone can take longer than the
+    /// 2 seconds the old poll gave it.
+    @discardableResult
+    func resume() async -> Bool {
+        guard paused || held else { return false }
         paused = false
         held = false
         apply()
-        for _ in 0..<40 where !session.isRunning { try? await Task.sleep(for: .milliseconds(50)) }
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in queue.async { c.resume() } }
         try? await Task.sleep(for: .milliseconds(400))  // exposure settles
+        return true
     }
 
     private func pollLevel() {

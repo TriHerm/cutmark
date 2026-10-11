@@ -152,6 +152,8 @@ struct FileMore: View {
     @Binding var voice: Bool
     let done: () -> Void
     var toChat: (() -> Void)? = nil
+    /// Download to the phone: the viewer fetches it and opens the share sheet.
+    var download: (() -> Void)? = nil
     @State private var saving = false
     @State private var folders: [String] = []
 
@@ -172,6 +174,12 @@ struct FileMore: View {
                 }
             }
             PanelDivider()
+        }
+        if let download {
+            PanelRow(icon: "square.and.arrow.down", title: "Download") {
+                withAnimation(Brand.quick) { open = false }
+                download()
+            }
         }
         if file.isVideo {
             PanelGroup(icon: "film.stack", title: "Save to B-roll", open: $saving) {

@@ -665,9 +665,9 @@ struct PrompterRecorder: View {
                 #endif
                 if hasScript {
                     island(g, landscape: landscape)
-                        .padding(.top, 8)
+                        .padding(.top, landscape ? 8 : 0)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                        .ignoresSafeArea(edges: .top)
+                        .ignoresSafeArea(edges: landscape ? .top : [.top, .horizontal])
                 }
                 VStack(spacing: 0) {
                     Spacer()
@@ -701,6 +701,8 @@ struct PrompterRecorder: View {
 
     /// The script in a black panel that grows out of the Dynamic Island, as the Mac's grows out of
     /// the notch (2026-10-08): the eyes stay next to the lens. The text starts under the island.
+    /// Upright it fills the top edge to edge, with no gap beside or above it, and lets the camera
+    /// show through a little (2026-10-10, as the Mac's notch since 148d209).
     private func island(_ g: GeometryProxy, landscape: Bool) -> some View {
         let under = landscape ? 10 : max(10, g.safeAreaInsets.top - 14)
         return PrompterTextView(text: prompter)
@@ -708,9 +710,12 @@ struct PrompterRecorder: View {
             .mask(LinearGradient(stops: [.init(color: .black, location: 0.8), .init(color: .clear, location: 1)],
                                  startPoint: .top, endPoint: .bottom))
             .padding(.top, under)
-            .frame(width: landscape ? g.size.width * 0.62 : g.size.width + g.safeAreaInsets.leading + g.safeAreaInsets.trailing - 16,
+            .padding(.horizontal, landscape ? 0 : 8)
+            .frame(width: landscape ? g.size.width * 0.62 : g.size.width + g.safeAreaInsets.leading + g.safeAreaInsets.trailing,
                    height: g.size.height * (landscape ? 0.42 : 0.22) + under)
-            .background(.black, in: RoundedRectangle(cornerRadius: landscape ? 28 : 40, style: .continuous))
+            .background(.black.opacity(0.82), in: UnevenRoundedRectangle(
+                topLeadingRadius: landscape ? 28 : 0, bottomLeadingRadius: 28,
+                bottomTrailingRadius: 28, topTrailingRadius: landscape ? 28 : 0, style: .continuous))
             .overlay(alignment: .bottomTrailing) {
                 if !camera.recording {
                     Button { settings = true } label: {

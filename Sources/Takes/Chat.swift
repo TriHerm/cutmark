@@ -904,6 +904,9 @@ final class ClaudeChat {
         letSleep()
         cancelResume()
         messages.append(ChatMessage(role: .error, text: Self.cutOff))
+        // It goes on by itself at the next launch (2026-10-10: an update quit Takes under two
+        // chats, and the user found his asks undone hours later). ChatHub.resume opens this chat.
+        queued.insert(Self.goOn, at: 0)
         save()
     }
 
@@ -1147,8 +1150,29 @@ final class ChatHub {
 
     /// The app quits: stop every running reply and save where it got to.
     func stopAll() {
+        // Session and plugin chats are made on first use: remember which ones were cut off, so
+        // the next launch makes them and they go on (`resume`). The fixed boards go on anyway.
+        let cut = Self.Resume(sessions: chats.values.filter(\.running).compactMap { $0.session?.path },
+                              boards: boards.filter { $0.value.running }.map(\.key))
         chats.values.forEach { $0.quit() }; boards.values.forEach { $0.quit() }
         board.quit(); comments.quit(); commentsPost.quit(); styles.quit()
+        if !cut.sessions.isEmpty || !cut.boards.isEmpty {
+            try? FileManager.default.createDirectory(at: ClaudeChat.boardFolder, withIntermediateDirectories: true)
+            try? JSONEncoder().encode(cut).write(to: Self.resumeFile, options: .atomic)
+        }
+    }
+
+    struct Resume: Codable { var sessions: [String]; var boards: [String] }
+    nonisolated static var resumeFile: URL { ClaudeChat.boardFolder.appending(path: "resume.json") }
+
+    /// At launch: the chats a quit cut off send their saved "go on" (and what waited with it).
+    func resume() {
+        guard let d = try? Data(contentsOf: Self.resumeFile), let r = try? JSONDecoder().decode(Resume.self, from: d) else { return }
+        try? FileManager.default.removeItem(at: Self.resumeFile)
+        for path in r.sessions where FileManager.default.fileExists(atPath: path) {
+            chat(URL(fileURLWithPath: path)).sendPending()
+        }
+        for name in r.boards { boardChat(name).sendPending() }
     }
 
     /// A plugin board's own chat, made on first use (Plugins/). Its context comes from

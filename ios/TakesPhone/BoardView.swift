@@ -529,6 +529,7 @@ private struct ShotNotes: View {
             }
         }
         .onDisappear { voice.cancel() }
+        .keepsDraft($draft, key: "shotDraft.\(sessionID).\(shot.id)")
     }
 
     private func note(_ c: Comment) -> some View {

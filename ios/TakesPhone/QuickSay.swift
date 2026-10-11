@@ -82,6 +82,7 @@ struct QuickSay: View {
         .animation(Brand.quick, value: hasText)
         .onDisappear { voice.cancel() }
         .onChange(of: draft) { if draft.isEmpty { spoke = false } }
+        .keepsDraft($draft, key: "sayDraft.\(sessionID).\(from ?? "")")
     }
 
     private func toggleVoice() async {
@@ -117,4 +118,27 @@ struct QuickSay: View {
             }
         }
     }
+}
+
+/// Unsent text in a message box goes to the phone's settings on every change and comes back when
+/// the box opens again: leaving the screen, a lost Mac, a crash or an app update never loses it
+/// (2026-10-10). The chat tab does the same in SessionView.
+struct KeepsDraft: ViewModifier {
+    @Binding var text: String
+    let key: String
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { if text.isEmpty, let kept = UserDefaults.standard.string(forKey: key) { text = kept } }
+            .onChange(of: text) { Self.keep(text, key) }
+    }
+
+    static func keep(_ text: String, _ key: String) {
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { UserDefaults.standard.removeObject(forKey: key) }
+        else { UserDefaults.standard.set(text, forKey: key) }
+    }
+}
+
+extension View {
+    func keepsDraft(_ text: Binding<String>, key: String) -> some View { modifier(KeepsDraft(text: text, key: key)) }
 }

@@ -622,6 +622,9 @@ struct API {
     }
 
     func stop(_ id: String) async throws { _ = try await send(request("/api/chat/stop", ["id": id], method: "POST"), as: OK.self) }
+    func unqueue(_ id: String, index: Int) async throws {
+        _ = try await send(request("/api/chat/unqueue", ["id": id, "index": String(index)], method: "POST"), as: OK.self)
+    }
     func read(_ id: String) async throws { _ = try await send(request("/api/chat/read", ["id": id], method: "POST"), as: OK.self) }
     func cover(_ path: String) async throws { _ = try await send(request("/api/cover", ["path": path], method: "POST"), as: OK.self) }
     func archive(_ id: String, _ on: Bool) async throws {

@@ -1014,6 +1014,7 @@ struct BoardChatView: View {
             voice.cancel()
             if model.chatID == id { model.chatID = nil }
         }
+        .keepsDraft($draft, key: "chatDraft.board.\(id)")
     }
 
     /// Stopping puts what was said into the box, after anything typed, to check.

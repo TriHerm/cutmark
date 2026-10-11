@@ -1289,6 +1289,7 @@ struct TakeCut: Decodable, Equatable {
 
 /// Above the script column while a storyboard shot records: which shot this take is for.
 struct ShotBanner: View {
+    @Environment(AppModel.self) var app
     var shot: StoryShot
 
     var body: some View {
@@ -1300,6 +1301,10 @@ struct ShotBanner: View {
             if !shot.how.isEmpty {
                 Text(shot.how).font(Theme.sans(11.5)).foregroundStyle(Theme.muted).lineLimit(1)
             }
+            Button { app.endShot() } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)) }
+                .buttonStyle(.plain).foregroundStyle(Theme.muted)
+                .help("Back to the storyboard")
+                .disabled(app.isRecording)
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
         .background(Theme.accent.opacity(0.08))

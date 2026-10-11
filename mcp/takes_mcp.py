@@ -23,7 +23,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 PROTOCOL = "2025-06-18"
 
@@ -337,6 +337,7 @@ def t_get_session(a):
             "folders": FOLDERS,
             "warnings": misplaced(s),
             "library": "Style for this project: get_library with project '%s'." % os.path.basename(os.path.dirname(s)),
+            **({"posting_plan": plan_brief()} if read_plan() else {}),
             "manifest": os.path.join(s, "SESSION.md")}
 
 
@@ -4392,6 +4393,196 @@ def t_get_post_queue(a):
                     "add is always listed)."}
 
 
+# ---------- Posting plan (<root>/_library/plan.json) ----------
+# The days the user wants to post (2026-10-09). Each day is a slot; a ready, scheduled or posted post with
+# a time on that day fills it. The chat uses the empty slots to say what a new take is good for.
+# The Plan board (2026-10-10) also holds video cards: sessions put on a day ("videos", in order),
+# by plan_video or by the user dragging them, and shows "weeks" weeks (2 to 12).
+
+PLAN_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+PLAN_WEEKS = (2, 12)
+
+
+def plan_file():
+    return os.path.join(root(), LIB, "plan.json")
+
+
+def read_plan_file():
+    try:
+        with open(plan_file()) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_plan_file(d):
+    path = plan_file()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def plan_weeks(d):
+    try:
+        n = int(d.get("weeks") or 2)
+    except (TypeError, ValueError):
+        n = 2
+    return min(max(n, PLAN_WEEKS[0]), PLAN_WEEKS[1])
+
+
+def read_plan():
+    d = read_plan_file()
+    if d.get("off"):  # the Plan plugin is off in the app
+        return None
+    days = [x for x in PLAN_DAYS if x in (d.get("days") or [])]
+    if not days:
+        return None
+    plats = [x for x in d.get("platforms") or ["linkedin"] if x in PLATFORMS] or ["linkedin"]
+    return {"days": days, "time": d.get("time") or "09:00", "platforms": plats, "weeks": plan_weeks(d),
+            "videos": [v for v in d.get("videos") or [] if isinstance(v, dict) and v.get("session") and v.get("day")]}
+
+
+def plan_view(today=None):
+    """The plan's weeks of slots, which are empty, how many covered slots come before the first
+    empty one (the buffer), and the video cards. A card covers its day's slot as planned; a post
+    with a time fills it."""
+    plan = read_plan()
+    if not plan:
+        return None
+    names = {PLATFORMS[p]["name"] for p in plan["platforms"]}
+    today = today or datetime.now().astimezone().date()
+    by_day, unplanned, state = {}, [], {}
+    for post in t_get_post_queue({"posted": True})["posts"]:
+        if post["platform"] not in names:
+            continue
+        if post["status"] in ("posted", "scheduled") and state.get(post["session"]) != "posted":
+            state[post["session"]] = post["status"]
+        if not post["at"]:
+            if post["status"] == "ready":
+                unplanned.append(post["title"])
+            continue
+        day = datetime.fromisoformat(post["at"]["utc"].replace("Z", "+00:00")).astimezone().date()
+        by_day.setdefault(day, []).append("%s (%s, %s)" % (post["title"], post["platform"], post["status"]))
+    videos = []
+    for v in plan["videos"]:
+        path = os.path.join(root(), v["session"])
+        if not os.path.isfile(os.path.join(path, "session.json")):
+            continue
+        try:
+            d = datetime.strptime(v["day"], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        videos.append({"session": v["session"], "title": read_meta(path).get("title") or title_from_folder(os.path.basename(path)),
+                       "day": d.strftime("%a %b %d"), "date": v["day"],
+                       **({"post": state[v["session"]]} if v["session"] in state else {}),
+                       **({"passed": True} if d < today else {}),
+                       **({"after_last_week": True} if d >= today + timedelta(days=plan["weeks"] * 7) else {})})
+    # A card from a passed day sits on today, as on the board.
+    on_day = {}
+    for v in videos:
+        on_day.setdefault(max(datetime.strptime(v["date"], "%Y-%m-%d").date(), today), []).append(v["title"])
+    slots = []
+    for i in range(plan["weeks"] * 7):
+        d = today + timedelta(days=i)
+        if PLAN_DAYS[d.weekday()] in plan["days"]:
+            slots.append({"day": d.strftime("%a %b %d"), "date": d.isoformat(), "filled_by": by_day.get(d) or None,
+                          "planned": on_day.get(d) or None})
+    covered = lambda x: x["filled_by"] or x["planned"]
+    buffer = next((i for i, x in enumerate(slots) if not covered(x)), len(slots))
+    gaps = [x["day"] for x in slots if not covered(x)]
+    return dict(plan, slots=slots, empty_slots=gaps, next_gap=gaps[0] if gaps else None,
+                buffer=buffer, buffer_ready=sum(1 for x in slots[:buffer] if x["filled_by"]),
+                ready_without_time=unplanned, videos=videos)
+
+
+def plan_brief():
+    """The plan in a line or two, for get_session."""
+    v = plan_view()
+    if not v:
+        return None
+    return {"next_gap": v["next_gap"], "buffer": v["buffer"], "ready_without_time": len(v["ready_without_time"]),
+            "note": "Details: get_plan."}
+
+
+def t_get_plan(a):
+    v = plan_view()
+    if not v:
+        return {"plan": None,
+                "note": "No posting days yet. Ask the user which days he wants to post (recommend two a week, "
+                        "for example Tue and Thu, at a time his audience is online), then call set_plan."}
+    v["note"] = ("videos = the cards on the Plan board, in order (plan_video adds or moves one; the user drags "
+                 "them). A slot is filled by a ready, scheduled or posted post with a time on that day (filled_by); "
+                 "a card on that day covers it as planned (planned). buffer = covered slots before the first "
+                 "empty one; buffer_ready = how many of those have a post. When the user records a take or an edit is done, say in one "
+                 "positive line which empty slot it can fill (\"great one for the gap on Fri\"). Praise the "
+                 "buffer when it grows. Never nag about a gap, never block anything.")
+    return v
+
+
+def t_set_plan(a):
+    days = [x.strip().lower()[:3] for x in a.get("days") or []]
+    bad = [x for x in days if x not in PLAN_DAYS]
+    if bad or not days:
+        raise ValueError("days: a list of weekdays, e.g. [\"tue\", \"thu\"].")
+    time_ = (a.get("time") or "09:00").strip()
+    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", time_):
+        raise ValueError("time: HH:MM, 24-hour, e.g. 08:02.")
+    plats = a.get("platforms") or ["linkedin"]
+    if any(p not in PLATFORMS for p in plats):
+        raise ValueError("platforms: any of " + ", ".join(PLATFORMS))
+    old = read_plan_file()
+    d = {"days": [x for x in PLAN_DAYS if x in days], "time": time_, "platforms": plats,
+         "since": old.get("since") or datetime.now().astimezone().date().isoformat()}
+    if a.get("weeks") is not None:
+        d["weeks"] = plan_weeks({"weeks": a["weeks"]})
+    elif old.get("weeks"):
+        d["weeks"] = old["weeks"]
+    if old.get("videos"):
+        d["videos"] = old["videos"]
+    write_plan_file(d)
+    return t_get_plan({})
+
+
+def t_plan_video(a):
+    """Puts a session's video card on a day of the Plan board, moves it, or takes it off."""
+    d = read_plan_file()
+    if not read_plan():
+        raise ValueError("No posting plan yet (or the Plan plugin is off). Ask the user for his days, then set_plan.")
+    path = resolve_session(a["session"])
+    if not os.path.isfile(os.path.join(path, "session.json")):
+        raise ValueError("Not a session: %s" % a["session"])
+    rel = os.path.relpath(path, root())
+    if rel.startswith(".."):
+        raise ValueError("The session is not in the library.")
+    videos = [v for v in d.get("videos") or [] if isinstance(v, dict) and v.get("session") != rel]
+    day = (a.get("day") or "").strip()
+    if day:
+        try:
+            when = datetime.strptime(day, "%Y-%m-%d").date()
+        except ValueError:
+            raise ValueError("day: YYYY-MM-DD, e.g. 2026-10-13. Empty takes the card off the plan.")
+        today = datetime.now().astimezone().date()
+        weeks_out = (when - today).days // 7 + 1
+        if weeks_out > PLAN_WEEKS[1]:
+            raise ValueError("The board plans %d weeks ahead at most." % PLAN_WEEKS[1])
+        if weeks_out > plan_weeks(d):
+            d["weeks"] = weeks_out  # show the week the card is on
+        card = {"session": rel, "day": day}
+        before = a.get("before")
+        if before:
+            before = os.path.relpath(resolve_session(before), root())
+        i = next((i for i, v in enumerate(videos) if before and v["session"] == before and v["day"] == day), None)
+        if i is None:
+            i = max((i + 1 for i, v in enumerate(videos) if v["day"] == day), default=len(videos))
+        videos.insert(i, card)
+    d["videos"] = videos
+    write_plan_file(d)
+    return t_get_plan({})
+
+
 def t_create_session(a):
     project = a.get("project") or "Inbox"
     pdir = os.path.join(root(), project.replace("/", "-"))
@@ -4674,6 +4865,24 @@ def add_post(posts, post):
     return out + [post]
 
 
+def mark_post_live(s, plat, url=None, at=None):
+    """A platform marked published means its post is live: the post file says posted too, so the plan
+    never lists a live post as draft or ready (2026-10-09). Same rule as the app's markPublished."""
+    p = next((k for k, v in PLATFORMS.items() if v["name"].lower() == (plat or "").lower()), None)
+    f = post_file(s, p) if p else None
+    if f is None or f[0].get("status") == "posted":
+        return
+    fm, text = f
+    fm["status"] = "posted"
+    fm.pop("scheduled_at", None)
+    fm.pop("scheduled_hash", None)
+    if not fm.get("at"):
+        fm["at"], fm["tz"] = post_time(at or now_iso(), fm.get("tz"))
+    if url and not fm.get("url"):
+        fm["url"] = url
+    write_post_file(s, fm, text, p)
+
+
 def t_set_published(a):
     s = resolve_session(a["session"])
     meta = read_meta(s)
@@ -4686,6 +4895,9 @@ def t_set_published(a):
             if a.get(k):
                 post[k] = a[k]
         posts = add_post(meta.get("published") or [], post)
+        live = next((x for x in posts if (x.get("platform") or "").lower() == (a.get("platform") or "").lower()), None)
+        if live:
+            mark_post_live(s, live.get("platform"), live.get("url"), live.get("at"))
     if posts:
         meta["published"] = posts
     else:
@@ -4722,6 +4934,7 @@ def t_set_post_stats(a):
     post["stats"] = (post.get("stats") or []) + [reading]
     meta["published"] = posts
     write_meta(s, meta)
+    mark_post_live(s, post.get("platform"), post.get("url"), post.get("at"))
     return {"session": os.path.relpath(s, root()), "platform": post.get("platform"), "url": post.get("url"),
             "readings": len(post["stats"]), "latest": reading}
 
@@ -6453,6 +6666,28 @@ TOOLS = [
       "drafts": {"type": "boolean", "description": "Also list drafts (not marked ready yet), e.g. for a "
                  "pipeline overview. Default false."}},
      [], t_get_post_queue),
+    ("get_plan", "The user's posting plan: the weekdays he wants to post, the slots in the next 14 days, which are "
+     "empty (next_gap), the buffer (covered slots before the first empty one) and ready posts with no time yet. "
+     "Use it to tie a new take or edit to the slot it can fill, and to suggest a time when he marks a post "
+     "ready. No plan yet: ask him which days, then set_plan.",
+     {}, [], t_get_plan),
+    ("set_plan", "Save the posting days the user picked. Overwrites the plan. Returns get_plan.",
+     {"days": {"type": "array", "items": {"type": "string"}, "description": "Weekdays: mon, tue, wed, thu, fri, sat, sun."},
+      "time": {"type": "string", "description": "Usual posting time, HH:MM 24-hour. Default 09:00."},
+      "platforms": {"type": "array", "items": {"type": "string", "enum": list(PLATFORMS)},
+                    "description": "Which posts fill a slot. Default [linkedin]."},
+      "weeks": {"type": "integer", "description": "How many weeks the Plan board shows, 2 to 12. Default: unchanged."}},
+     ["days"], t_set_plan),
+    ("plan_video", "Put a session's video card on a day of the user's Plan board (the calendar in Takes), move "
+     "it to another day, or take it off (day empty). Use it when he asks you to plan his videos; one call per "
+     "video. A card shows the session's title and thumbnail; the user drags cards to reorder them. A card covers "
+     "that day's posting slot as planned; a post with a time fills it. The board grows to show the card's week. "
+     "Returns get_plan.",
+     {"session": SESSION,
+      "day": {"type": "string", "description": "YYYY-MM-DD, up to 12 weeks ahead. Empty: take the card off."},
+      "before": {"type": "string", "description": "Optional: another planned session on that day; the card goes "
+                 "before it. Default: last on that day."}},
+     ["session"], t_plan_video),
     ("set_post_status", "Record what you did on LinkedIn or X (platform=x) for a session's post. status=scheduled after you scheduled "
      "it (records the time and text you scheduled, so later changes show up as an action); status=posted "
      "with url once it is live (also marks the session published); ready to undo. The user marks posts ready "
@@ -6863,6 +7098,95 @@ if not SOCIAL:
     TOOLS = [t for t in TOOLS if t[0] not in SOCIAL_TOOLS]
 BY_NAME = {t[0]: t for t in TOOLS}
 
+# What tools/list adds to the table above (2026-10-10; MCP directories such as Smithery score both):
+# a description for each parameter that has none, and the MCP tool hints.
+PARAM_DOC = {
+    "take": "Take number.", "start": "Start, in seconds.", "end": "End, in seconds.",
+    "title": "The title.", "name": "The name.", "script": "The whole script, in markdown.",
+    "note": "One line: what changed or why.", "project": "Project name.", "variant": "Variant id from get_session.",
+    "variants": "Variant ids from get_session.", "version": "Version id from the history list.",
+    "keeper": "true stars the take as the keeper.", "move": "Move instead of copy. Default false.",
+    "status": "Which status.", "id": "Item id.", "text": "The text.", "resolve": "true resolves the comment.",
+    "fixed_in": "File of the new version, relative to the session or library.",
+    "fixed_at": "Seconds into fixed_in where the fix shows.", "sessions": "Sessions as 'Project/folder'.",
+    "author": "The post author's name.", "author_url": "The post author's profile URL.",
+    "reactions": "Reactions on the post when you read it.", "limit": "At most this many. Default all.",
+    "impressions": "Impressions.", "likes": "Likes or reactions.", "replies": "Replies.",
+    "comments": "Comments.", "platform": "LinkedIn, X, YouTube, Instagram or TikTok. Default all.",
+    "stale_hours": "Numbers older than this are stale. Default 24.",
+    "orientation": "Only vertical or only horizontal clips.", "kind": "What kind of file.",
+    "items": "Paths inside the library. Omit for everything.", "draft": "'main' or a variant id.",
+    "area": "The area the rule is for.", "on": "false turns the rule off, true on.",
+    "remove": "true removes the rule.", "search": "Words to search the ElevenLabs voice library for.",
+    "gender": "With search: male, female or neutral.", "accent": "With search: e.g. american, british.",
+    "language": "With search: language code, e.g. en.", "age": "With search: young, middle_aged or old.",
+    "use_case": "With search: e.g. narrative_story, conversational.",
+    "model": "ElevenLabs model id. Default: the best one for the job.",
+    "stability": "Voice stability 0-1. Default: the voice's own.",
+    "similarity": "Similarity to the voice 0-1. Default: the voice's own.",
+    "style": "Style exaggeration 0-1. Default: the voice's own.", "speed": "Speech speed 0.7-1.2. Default 1.",
+    "open": "Offer the session in the app. Default true.",
+    "hooks": "The hook options, best first: [{text, note}].",
+    "shots": "The shots in order: [{id, section, kind, say, do, sketch, seconds, video, variants, image, redraw}].",
+    "takes": "Several takes: [{path, screen_path, name, keeper, kind}], one take each, in order.",
+    "non_keepers": "true trashes every take without a star.",
+    "create_project.name": "Name of the new project.", "rename_take.name": "New name. Empty resets it.",
+    "import_take.name": "Name for the take.", "update_variant.name": "New tab label, 1-4 words.",
+    "update_variant.script": "The variant's new script.", "update_session.title": "New title. Renames the folder.",
+    "update_session.script": "The new main script, in markdown.", "create_session.title": "The session's title.",
+    "set_style.project": "Project name, to set the style of every session in it.",
+    "list_sessions.project": "Project name from list_projects.", "move_sessions.project": "Target project.",
+    "list_comment_suggestions.status": "Only suggestions with this status. Default all.",
+    "get_comments.status": "open (default), resolved or all.",
+    "set_post_status.status": "draft, ready, scheduled or posted.",
+    "next_path.kind": "edit, thumbnail or library.", "set_rule.text": "The rule, one short sentence.",
+    "set_best_cut.take": "Take number.", "set_best_cut.end": "Seconds from the start of the take.",
+    "set_comment_stats.impressions": "Impressions of the comment.",
+    "set_post_stats.impressions": "Impressions.", "reply_comment.replies": "One reply per comment: "
+    "[{id, text, resolve, fixed_in, fixed_at, lesson, rule}].",
+    "create_post_variants.variants": "The versions: [{name, text, tweets, note}].",
+    "create_variants.variants": "The variants: [{name, script, note}].",
+    "delete_post_variants.variants": "Post variant ids from get_session.",
+    "trash_takes.takes": "Take numbers to trash.", "use_post_variant.variant": "Post variant id from get_session.",
+    "say": "The shot's lines, word for word from script.md.", "do": "How to film or build it, in one short line.",
+    "sketch": "What the frame shows. Never text in the frame.", "redraw": "true draws the sketch again.",
+    "path": "Path to the file.", "redraft_comment.id": "Suggestion id from get_comment_context.",
+    "set_comment_posted.id": "Suggestion id from list_comment_suggestions.",
+    "set_comment_stats.id": "Suggestion id from list_comment_suggestions.", "screen_path": "Path to the screen recording of the same take.",
+    "check": "{kind, target, tolerance, max, floor}.",
+}
+READ_ONLY = {"get_comment_context", "list_comment_suggestions", "list_projects", "list_sessions", "get_session",
+             "post_history", "get_post_queue", "get_plan", "get_comments", "get_rules", "script_history",
+             "get_script_version", "get_performance", "list_broll", "search_media", "list_music", "get_library",
+             "phone_videos", "higgsfield_status", "replicate_status", "replicate_model"}
+DESTRUCTIVE = {"trash_takes", "trash_sessions", "delete_variants", "delete_post_variants", "copy_library",
+               "set_rule", "set_hooks", "set_post_hooks", "set_storyboard"}
+OPEN_WORLD = {"make_image", "voices", "design_voice", "voiceover", "fix_words", "change_voice", "higgsfield",
+              "higgsfield_status", "replicate", "replicate_model", "replicate_status", "set_storyboard"}
+
+
+def documented(tool, schema):
+    """A copy of schema with PARAM_DOC filled in where a description is missing (nested items too)."""
+    out = dict(schema)
+    if "properties" in out:
+        props = {}
+        for k, v in out["properties"].items():
+            doc = v.get("description") or PARAM_DOC.get("%s.%s" % (tool, k)) or PARAM_DOC.get(k)
+            props[k] = documented(tool, dict(v, description=doc) if doc else v)
+        out["properties"] = props
+    if isinstance(out.get("items"), dict):
+        out["items"] = documented(tool, out["items"])
+    return out
+
+
+def listed(name, desc, props, req):
+    """One tool as tools/list sends it."""
+    return {"name": name, "description": desc,
+            "inputSchema": documented(name, {"type": "object", "properties": props, "required": req}),
+            "annotations": {"readOnlyHint": name in READ_ONLY,
+                            "destructiveHint": name in DESTRUCTIVE,
+                            "openWorldHint": name in OPEN_WORLD}}
+
 
 # ---------- JSON-RPC over stdio ----------
 
@@ -6927,13 +7251,15 @@ def handle(msg):
                                     "Higgsfield plan) makes a clip for a storyboard shot or changes a session video; use the one "
                                     "he names, else replicate when replicate_status shows a token; make_image makes or changes an image (GPT Image 2.5 drafts; when the user likes one, "
                                     "from=<draft> makes the 4K Nano Banana 2.1 final; never Higgsfield for images); results land in generated/. "
+                                    "Posting plan: get_plan has the days the user wants to post, the empty slots and the "
+                                    "video cards on his Plan board (plan_video puts a session on a day). "
+                                    "When he records a take or an edit is done, say in one positive line which slot it "
+                                    "can fill; never nag about gaps. "
                                     "Trashing is recoverable."})
     elif method == "ping":
         reply(id_, {})
     elif method == "tools/list":
-        reply(id_, {"tools": [{"name": n, "description": d,
-                               "inputSchema": {"type": "object", "properties": props, "required": req}}
-                              for n, d, props, req, _ in TOOLS]})
+        reply(id_, {"tools": [listed(n, d, props, req) for n, d, props, req, _ in TOOLS]})
     elif method == "tools/call":
         p = msg.get("params") or {}
         tool = BY_NAME.get(p.get("name"))

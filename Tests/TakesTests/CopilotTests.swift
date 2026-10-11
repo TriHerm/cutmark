@@ -222,3 +222,24 @@ struct CopilotTests {
         #expect(PostedTally([]).days.isEmpty)
     }
 }
+
+// 2026-10-10: the daily comment search runs in the board's chat, once a day after 8:07.
+struct CommentScoutTests {
+    let cal: Calendar = { var c = Calendar(identifier: .gregorian); c.timeZone = TimeZone(identifier: "America/Los_Angeles")!; return c }()
+    func at(_ h: Int, _ m: Int, day: Int = 10) -> Date {
+        cal.date(from: DateComponents(year: 2026, month: 10, day: day, hour: h, minute: m))!
+    }
+
+    @Test func runsOnceADayAfterItsTime() {
+        #expect(!CommentScout.due(now: at(8, 6), lastDay: nil, calendar: cal))
+        #expect(CommentScout.due(now: at(8, 7), lastDay: nil, calendar: cal))
+        #expect(CommentScout.due(now: at(15, 0), lastDay: "2026-10-09", calendar: cal))
+        #expect(!CommentScout.due(now: at(15, 0), lastDay: "2026-10-10", calendar: cal))
+        #expect(CommentScout.due(now: at(9, 0, day: 11), lastDay: "2026-10-10", calendar: cal))
+    }
+
+    @Test func theDailyAskNeverPosts() {
+        #expect(CopilotAsk.daily(10).hasPrefix(CopilotAsk.find(10)))
+        #expect(CopilotAsk.daily(10).contains("Never post"))
+    }
+}

@@ -591,6 +591,22 @@ struct ChatRunTests {
         #expect(ask(2)?.hasSuffix("Still on it?!") == true)
     }
 
+    /// 2026-10-10: an update quit Takes under two chats, and their work stopped for good. A cut
+    /// chat now keeps a "go on" and sends it when it opens again.
+    @Test func aChatCutOffByAQuitGoesOnAtTheNextLaunch() async throws {
+        defer { cleanup() }
+        try fake(#"if [ $n = 1 ]; then sleep 20; fi"#)
+        let chat = ClaudeChat(session: session)
+        chat.send("Make the cut", title: "T", onStage: nil)
+        await until { runs == 1 }
+        chat.quit()
+        #expect(chat.queued == [ClaudeChat.goOn])
+        let next = ClaudeChat(session: session)  // the next launch
+        await until(30) { runs == 2 && !next.running }
+        #expect(ask(2)?.hasSuffix(ClaudeChat.goOn) == true)
+        #expect(next.queued.isEmpty)
+    }
+
     @Test func aSteerShowsNoErrorAndGoesOn() async throws {
         defer { cleanup() }
         // The sleep outlives bash and keeps its output pipe open: the end must not wait for it.

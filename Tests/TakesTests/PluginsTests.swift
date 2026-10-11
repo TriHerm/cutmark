@@ -4,12 +4,12 @@ import Testing
 
 /// The Plugins board: a removal is saved, an install undoes it, and others stay as they were.
 struct PluginsTests {
-    /// Feedback, Replicate, Higgsfield and Voices are plugins in every build; the last two are no longer Settings pages.
+    /// Feedback, Consistency, Replicate, Higgsfield and Voices are plugins in every build; the last two are no longer Settings pages.
     @Test func higgsfieldAndVoicesArePlugins() {
         let ids = Plugins.available.map(\.id)
-        #expect(ids.prefix(4) == ["feedback", "replicate", "higgsfield", "voices"])
+        #expect(ids.prefix(5) == ["feedback", "consistency", "replicate", "higgsfield", "voices"])
         #expect(Set(ids).count == ids.count)
-        #expect(SettingsView.SettingsPage.allCases.map(\.rawValue) == ["appearance", "search", "gemini", "archived", "privacy"])
+        #expect(SettingsView.SettingsPage.allCases.map(\.rawValue) == ["appearance", "search", "gemini", "usage", "archived", "privacy"])
     }
 
     @Test func removeAndInstallAgain() {

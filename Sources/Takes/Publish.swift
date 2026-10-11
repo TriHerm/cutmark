@@ -46,6 +46,18 @@ extension SessionDoc {
     func markPublished(_ platform: String?, url: String? = nil, at: Date = Date()) {
         meta.published = Self.adding(Post(platform: platform, url: url, at: at), to: posts)
         save()
+        // A live platform means its post is live: the plan must not list it as draft or ready.
+        // The MCP server's mark_post_live does the same.
+        if let p = PostPlatform.allCases.first(where: { $0.name.lowercased() == platform?.lowercased() }),
+           let c = PostFile.read(self.url, p), c.status != .posted {
+            PostFile.update(self.url, p) {
+                $0.status = .posted
+                $0.meta["scheduled_at"] = nil
+                $0.meta["scheduled_hash"] = nil
+                if $0.at == nil { $0.plan(at, in: $0.tz) }
+                if $0.meta["url"] == nil, let url, !url.isEmpty { $0.meta["url"] = url }
+            }
+        }
     }
 
     /// Switches one platform on or off. nil is "somewhere else".

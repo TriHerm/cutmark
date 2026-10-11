@@ -10,7 +10,7 @@ import SwiftUI
 ///
 /// The Plugins board (sidebar foot, 2026-10-08) turns them on and off and holds their settings.
 /// An off plugin keeps its code and files, but loses its sidebar row, tabs and buttons until it is
-/// on again. Feedback, Replicate, Higgsfield and Voices are public plugins (Plugins/Feedback.swift,
+/// on again. Feedback, Consistency, Replicate, Higgsfield and Voices are public plugins (Plugins/Feedback.swift, Consistency.swift,
 /// Replicate.swift, Higgsfield.swift and ElevenLabs.swift); the last two were Settings pages before.
 struct TakesPlugin: Identifiable {
     let id: String
@@ -34,6 +34,8 @@ struct TakesPlugin: Identifiable {
     /// Its screen on the iPhone (2026-10-09): the routes the phone's screen calls. The phone lists
     /// the plugins that have one (GET /api/plugins) and draws the screen itself.
     var phone: PhoneHook? = nil
+    /// Turned on or off on the Plugins board (2026-10-09, Consistency marks its plan file off).
+    var toggled: (@MainActor (AppModel, Bool) -> Void)? = nil
 }
 
 /// A plugin's part of the phone server. `route` answers the requests it knows (with the library
@@ -95,7 +97,7 @@ struct PostSide: Identifiable {
 
 enum Plugins {
     /// Every plugin this build has, on or off: the public ones, then the user's.
-    static var available: [TakesPlugin] { [Feedback.plugin, ReplicatePage.plugin, HiggsfieldPage.plugin, VoicesPage.plugin] + PrivatePlugins.list }
+    static var available: [TakesPlugin] { [Feedback.plugin, Consistency.plugin, ReplicatePage.plugin, HiggsfieldPage.plugin, VoicesPage.plugin] + PrivatePlugins.list }
     /// The plugin the Plugins board shows.
     static let pickedKey = "pluginsPicked"
     /// The installed ones. Read from UserDefaults (not an observed model), so the phone server can
@@ -258,7 +260,7 @@ struct PluginsBoard: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 16)
-                    Toggle("", isOn: Binding(get: { on }, set: { v in withAnimation(Theme.motion) { Plugins.setInstalled(p.id, v) } }))
+                    Toggle("", isOn: Binding(get: { on }, set: { v in withAnimation(Theme.motion) { Plugins.setInstalled(p.id, v) }; p.toggled?(app, v) }))
                         .toggleStyle(.switch).labelsHidden().tint(Theme.accent)
                         .help(on ? "On. Off hides it; its files and sign-ins stay." : "Off. Turn it on to use it.")
                         .padding(.top, 6)

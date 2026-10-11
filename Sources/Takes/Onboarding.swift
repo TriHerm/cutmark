@@ -70,6 +70,12 @@ final class Onboarding {
         finish()
     }
 
+    /// The demo session opens on its edit: what a finished video looks like before the first take.
+    func example(app: AppModel) {
+        Task { await Demo.shared.add(app.library) }
+        finish()
+    }
+
     /// An empty session on Record: the camera is ready, the script can wait.
     func recordNow(app: AppModel) {
         _ = app.library.createSession()
@@ -481,6 +487,16 @@ private struct StartPage: View {
                 }
             }
             .buttonStyle(AccentButtonStyle(kind: .quiet))
+            .arrive(2)
+            // The demo session: a finished video by a made-up creator, to see first (Demo.swift).
+            Button { flow.example(app: app) } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "play.rectangle").font(.system(size: 11, weight: .semibold))
+                    Text("See a finished example")
+                }
+            }
+            .buttonStyle(AccentButtonStyle(kind: .quiet))
+            .padding(.top, 4)
             .arrive(2)
             Spacer(minLength: 0)
         }

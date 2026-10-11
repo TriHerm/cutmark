@@ -246,5 +246,6 @@ struct NewComment: View {
             if failed { Text("Could not reach the Mac. Try again.").font(.inter(.footnote, .medium)).foregroundStyle(Palette.danger) }
         }
         .onAppear { focused = true }
+        .keepsDraft($text, key: "commentDraft.\(what).\(place ?? quote ?? "")")
     }
 }

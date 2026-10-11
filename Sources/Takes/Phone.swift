@@ -252,6 +252,13 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
 
     static var phonesFile: URL { ClaudeChat.boardFolder.appending(path: "phones.json") }
 
+    /// A paired iPhone used Takes on this Mac in the last `days` days: the update check and the
+    /// usage counts say so (2026-10-10), so the public app's iPhone use shows on the site stats.
+    static func usedRecently(days: Double = 7, file: URL = phonesFile, now: Date = Date()) -> Bool {
+        let phones = (try? JSONDecoder.iso.decode([PairedPhone].self, from: Data(contentsOf: file))) ?? []
+        return phones.contains { ($0.seen ?? $0.paired) > now.addingTimeInterval(-days * 86_400) }
+    }
+
     @MainActor
     init(app: AppModel) {
         self.app = app
@@ -461,6 +468,14 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         case ("POST", "/api/chat/stop"):
             guard let s = session(req.query["id"]) else { return .error(404, "No such session") }
             await MainActor.run { self.app?.chats.existing(s)?.stop() }
+            return .encode(["ok": true])
+        case ("POST", "/api/chat/unqueue"):
+            // The x on a queued message, as the Mac's QueuedChip (2026-10-10).
+            guard let s = session(req.query["id"]) else { return .error(404, "No such session") }
+            let i = Int(req.query["index"] ?? "") ?? -1
+            await MainActor.run {
+                if let c = self.app?.chats.existing(s), c.queued.indices.contains(i) { c.queued.remove(at: i) }
+            }
             return .encode(["ok": true])
         case ("POST", "/api/chat/read"):
             guard let s = session(req.query["id"]) else { return .error(404, "No such session") }

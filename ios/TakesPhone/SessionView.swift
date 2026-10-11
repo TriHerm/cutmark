@@ -454,6 +454,16 @@ struct ChatView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
+            // What waits on the Mac for the run to end, as the Mac's QueuedChip: the x takes it back
+            // (2026-10-10: "iOS chat can't queue messages", the queued message showed nowhere).
+            ForEach(Array((chat.queued ?? []).enumerated()), id: \.offset) { i, text in
+                QueuedChip(text: text) {
+                    Task {
+                        try? await model.api.unqueue(session.id, index: i)
+                        await model.loadChat(session.id)
+                    }
+                }
+            }
             if adding { addPanel }
             if !suggestions.isEmpty && typing { suggestionList }
             if detail.openComments > 0 && !voice.recording {
@@ -514,7 +524,8 @@ struct ChatView: View {
                     if voice.recording {
                         recordingRow
                     } else {
-                        TextField(chat.compacting ? "Queue a message: it goes after compacting" : "Message Takes", text: $draft, axis: .vertical)
+                        TextField(chat.compacting ? "Queue a message: it goes after compacting"
+                                  : chat.running ? "Queue a message" : "Message Takes", text: $draft, axis: .vertical)
                             .lineLimit(1...6)
                             .focused($typing)
                             .accessibilityIdentifier("chat-input")
@@ -1922,6 +1933,9 @@ struct Viewer: View {
     @State private var confirm: Confirm?
     @State private var ask: NameAsk?
     @State private var voice = false
+    /// Download: the file comes from the Mac, then the share sheet saves it (Photos, Files, AirDrop).
+    @State private var fetching = false
+    @State private var saved: SavedFile?
 
     /// A video or picture of this session opens in the review player, with comments as on the Mac.
     private var reviewPath: String? {
@@ -1947,8 +1961,13 @@ struct Viewer: View {
                     }
                     .buttonStyle(.press)
                 }
-                Button { Brand.select(); withAnimation(Brand.quick) { more.toggle() } } label: { dark("ellipsis", "More") }
-                    .buttonStyle(.press)
+                if fetching {
+                    WorkingDots(color: .white).frame(width: 40, height: 40).background(.white.opacity(0.14), in: Circle())
+                        .accessibilityLabel("Downloading")
+                } else {
+                    Button { Brand.select(); withAnimation(Brand.quick) { more.toggle() } } label: { dark("ellipsis", "More") }
+                        .buttonStyle(.press)
+                }
             }
             .padding(.horizontal, 16).padding(.vertical, 8)
             ZStack {
@@ -1968,7 +1987,8 @@ struct Viewer: View {
         .overlay {
             if more {
                 FloatingPanel(open: $more) {
-                    FileMore(file: file, sessionID: sessionID, open: $more, confirm: $confirm, ask: $ask, voice: $voice, done: onDone, toChat: toChat)
+                    FileMore(file: file, sessionID: sessionID, open: $more, confirm: $confirm, ask: $ask, voice: $voice, done: onDone, toChat: toChat,
+                             download: { Task { await download() } })
                 }
             }
         }
@@ -1984,6 +2004,26 @@ struct Viewer: View {
             p.play()  // the user tapped this file himself
         }
         .onDisappear { player?.pause() }
+        .sheet(item: $saved) { ShareSheet(url: $0.url).ignoresSafeArea() }
+    }
+
+    /// Copies the file from the Mac to the phone under its own name, then opens the share sheet.
+    private func download() async {
+        fetching = true
+        defer { fetching = false }
+        do {
+            let (tmp, response) = try await URLSession.shared.download(from: model.api.media(file.path))
+            guard let code = (response as? HTTPURLResponse)?.statusCode, (200..<300).contains(code) else { throw URLError(.badServerResponse) }
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("downloads", isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let dest = dir.appendingPathComponent(file.name)
+            try? FileManager.default.removeItem(at: dest)
+            try FileManager.default.moveItem(at: tmp, to: dest)
+            Brand.tap(.light)
+            saved = SavedFile(url: dest)
+        } catch {
+            model.toast = "The download did not work. Is the Mac reachable?"
+        }
     }
 
     private func dark(_ icon: String, _ label: String, tint: Color = .white) -> some View {
@@ -1991,6 +2031,21 @@ struct Viewer: View {
             .frame(width: 40, height: 40).background(.white.opacity(0.14), in: Circle())
             .contentShape(Circle()).accessibilityLabel(label)
     }
+}
+
+/// A file downloaded to the phone, for the share sheet.
+struct SavedFile: Identifiable {
+    let url: URL
+    var id: URL { url }
+}
+
+/// The system share sheet: Save Video or Image to Photos, Save to Files, AirDrop.
+struct ShareSheet: UIViewControllerRepresentable {
+    let url: URL
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
 }
 
 // MARK: - Uploads
@@ -2044,5 +2099,30 @@ struct UploadsBar: View {
             .shadow(color: Palette.shadow, radius: 10, y: 4)
             .padding(.horizontal, 12).padding(.bottom, 4)
         }
+    }
+}
+
+/// A message waiting on the Mac for the run to end, with an x to take it back: the Mac's QueuedChip.
+struct QueuedChip: View {
+    let text: String
+    let remove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "clock").font(.system(size: 12)).foregroundStyle(Palette.faint)
+            Text(text).font(.inter(.footnote)).foregroundStyle(Palette.muted).lineLimit(2)
+            Spacer(minLength: 4)
+            Button(action: remove) {
+                Image(systemName: "xmark").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.faint)
+                    .frame(width: 32, height: 32).contentShape(Rectangle())
+            }
+            .buttonStyle(.press)
+            .accessibilityLabel("Take it out of the queue")
+        }
+        .padding(.leading, 12).padding(.trailing, 2).padding(.vertical, 2)
+        .background(Palette.well, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Queued: sent when Takes is done")
+        .transition(.opacity.combined(with: .offset(y: 4)))
     }
 }

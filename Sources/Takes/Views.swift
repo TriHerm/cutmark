@@ -25,9 +25,13 @@ struct TakesApp: App {
                 .overlay { SearchPalette().environment(app) }
                 .overlay { OnboardingLayer().environment(app) }
                 .overlay { FirstTakeLayer().environment(app) }
+                .overlay { UsageAskLayer().environment(app) }
                 .task {
                     Onboarding.shared.startIfNew(app.library)
+                    // After the welcome's check: the demo makes the library not empty.
+                    Demo.shared.addIfNew(app.library)
                     FirstTake.shared.settle(app.library)
+                    Usage.shared.start(app.library)
                     // ✦ and Assets pick Replicate once its token is in (VideoMaker).
                     if Plugins.isInstalled(ReplicatePage.plugin.id) { await Replicate.shared.refresh() }
                 }
@@ -80,6 +84,8 @@ struct TakesApp: App {
             }
             CommandGroup(after: .help) {
                 Button("Show Welcome Again") { Onboarding.shared.show() }
+                Button("Add the Demo Session") { Task { await Demo.shared.add(app.library) } }
+                    .disabled(Demo.shared.working || app.isRecording)
                 Button("Show First Take Again") { if let doc = app.library.current { FirstTake.shared.show(doc) } }
                     .disabled(app.library.current?.meta.takes.isEmpty ?? true || app.isRecording)
             }
@@ -347,6 +353,54 @@ extension View {
     }
 }
 
+/// A project header: a dragged project takes its slot, a dragged session moves into it.
+struct ProjectDrop: DropDelegate {
+    let project: URL
+    @Binding var draggingProject: URL?
+    @Binding var draggingSession: URL?
+    @Binding var over: URL?
+    let reorder: (URL, URL) -> Void
+    let moveIn: (URL) -> Void
+
+    func dropEntered(info: DropInfo) {
+        if let d = draggingProject, d != project { withAnimation(Theme.motion) { reorder(d, project) } }
+        if draggingSession != nil { over = project }
+    }
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+    func dropExited(info: DropInfo) { if over == project { over = nil } }
+    func performDrop(info: DropInfo) -> Bool {
+        if let s = draggingSession { moveIn(s) }
+        draggingProject = nil; draggingSession = nil; over = nil
+        return true
+    }
+    func validateDrop(info: DropInfo) -> Bool { draggingProject != nil || draggingSession != nil }
+}
+
+/// A session row: a session of the same project takes its slot; one from another project moves in.
+struct SessionDrop: DropDelegate {
+    let target: URL
+    @Binding var dragging: URL?
+    @Binding var over: URL?
+    let reorder: (URL, URL) -> Void
+    let moveIn: (URL) -> Void
+
+    private var project: URL { target.deletingLastPathComponent().standardizedFileURL }
+    private func foreign(_ d: URL) -> Bool { d.deletingLastPathComponent().standardizedFileURL != project }
+
+    func dropEntered(info: DropInfo) {
+        guard let d = dragging, d != target else { return }
+        if foreign(d) { over = project } else { withAnimation(Theme.motion) { reorder(d, target) } }
+    }
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+    func dropExited(info: DropInfo) {}
+    func performDrop(info: DropInfo) -> Bool {
+        if let d = dragging, foreign(d) { moveIn(d) }
+        dragging = nil; over = nil
+        return true
+    }
+    func validateDrop(info: DropInfo) -> Bool { dragging != nil }
+}
+
 struct ReorderDrop<ID: Hashable>: DropDelegate {
     let target: ID
     @Binding var dragging: ID?
@@ -397,6 +451,8 @@ struct SessionList: View {
     @State private var anchor: URL?
     @State private var dragging: URL?
     @State private var draggingProject: URL?
+    /// The project a dragged session would move into, lit while it hovers.
+    @State private var dropProject: URL?
     @State private var renaming: URL?
     @State private var newName = ""
     /// Renames typed while a chat works in the project: the folder moves once it is done.
@@ -560,13 +616,22 @@ struct SessionList: View {
         }
         let blocked = busy || app.isRecording
         return ProjectHeader(name: pendingNames[p.url] ?? p.name, count: count, folded: fold, waiting: waiting,
+                             dropping: dropProject == p.url,
                              renaming: renaming == p.url, newName: $newName, naming: $naming,
                              toggle: { withAnimation(Theme.motion) { toggle(&folded, p.name) } },
                              add: { library.createSession(in: p.url) },
                              commit: { finishRename(p) },
                              cancel: { renaming = nil })
             .padding(.top, p.url == library.projects.first?.url ? 4 : 18).padding(.bottom, 2)
-            .reorderable(p.url, dragging: $draggingProject) { library.moveProject($0, to: $1) }
+            .onDrag {
+                draggingProject = p.url
+                return NSItemProvider(object: p.url.path as NSString)
+            }
+            // A project dropped here takes its slot; a session dropped here moves into it.
+            .onDrop(of: [.text], delegate: ProjectDrop(project: p.url, draggingProject: $draggingProject,
+                                                       draggingSession: $dragging, over: $dropProject,
+                                                       reorder: { library.moveProject($0, to: $1) },
+                                                       moveIn: { moveIn($0, to: p.url) }))
             .contextMenu {
                 Button("New Session") { library.createSession(in: p.url) }
                 // While a chat works here, the new name shows at once and the folder moves after.
@@ -580,6 +645,25 @@ struct SessionList: View {
             .onChange(of: blocked) { _, b in
                 if !b, let name = pendingNames.removeValue(forKey: p.url) { applyRename(p, to: name) }
             }
+    }
+
+    /// A session dragged into another project. A selected session takes the rest of the
+    /// selection with it. Not while it records or a chat works in it: the folder moves.
+    private func moveIn(_ session: URL, to project: URL) {
+        let urls = library.selectedSessions.contains(session) ? library.selectedSessions : [session]
+        let moving = urls.filter { $0.deletingLastPathComponent().standardizedFileURL != project.standardizedFileURL }
+        guard !moving.isEmpty else { return }
+        let busy = moving.contains { u in app.chats.all.contains { $0.running && $0.session?.standardizedFileURL == u.standardizedFileURL } }
+        if app.isRecording || busy {
+            app.show(toast: app.isRecording ? "Stop the take first, then move the session" : "Takes is working in it. Move it when it is done.")
+            return
+        }
+        let name = library.projects.first { $0.url.standardizedFileURL == project.standardizedFileURL }?.name ?? project.lastPathComponent
+        withAnimation(Theme.motion) {
+            library.moveSessions(Set(moving), to: project)
+            if isFolded(project) { toggle(&folded, name) }
+        }
+        app.show(toast: moving.count == 1 ? "Moved to \(name)" : "Moved \(moving.count) sessions to \(name)")
     }
 
     private func startRename(_ p: Project) {
@@ -658,7 +742,14 @@ struct SessionList: View {
         .help(Self.tip(s, ready: ready, booked: booked))
         .id(s.url)
         .onTapGesture { click(s.url); focused = true }
-        .reorderable(s.url, dragging: $dragging) { library.moveSession($0, to: $1) }
+        .onDrag {
+            dragging = s.url
+            return NSItemProvider(object: s.url.path as NSString)
+        }
+        // In its own project the row takes the slot; dropped on another project's row, it moves there.
+        .onDrop(of: [.text], delegate: SessionDrop(target: s.url, dragging: $dragging, over: $dropProject,
+                                                   reorder: { library.moveSession($0, to: $1) },
+                                                   moveIn: { moveIn($0, to: s.url.deletingLastPathComponent()) }))
         .contextMenu {
             let links = s.posts.compactMap { p in p.url.flatMap(URL.init(string:)).map { (p.label, $0) } }
             ForEach(links, id: \.1) { label, url in
@@ -754,6 +845,8 @@ private struct ProjectHeader: View {
     let count: Int
     let folded: Bool
     let waiting: Bool
+    /// A dragged session hovers it: it would move here.
+    var dropping = false
     let renaming: Bool
     @Binding var newName: String
     var naming: FocusState<Bool>.Binding
@@ -794,6 +887,13 @@ private struct ProjectHeader: View {
             }
         }
         .padding(.horizontal, 10).frame(height: 24)
+        .background {
+            if dropping {
+                RoundedRectangle(cornerRadius: 7).fill(Theme.accentSoft)
+                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.accent.opacity(0.6), lineWidth: 1))
+            }
+        }
+        .animation(Theme.motion, value: dropping)
         .contentShape(Rectangle())
         .onTapGesture { if !renaming { toggle() } }
         .onHover { hover = $0 }
@@ -888,6 +988,8 @@ struct DetailView: View {
         .onAppear { app.postView = postMode; app.stageCovered = stageCovered }
         .onChange(of: postMode) { _, on in app.postView = on }
         .onChange(of: stageCovered) { _, on in app.stageCovered = on }
+        // A shot waiting on Record: another tab lets it go (and stays that tab).
+        .onChange(of: rightTab) { _, tab in if tab != "script" && !app.isRecording { app.shot = nil } }
         .onChange(of: notchRecord, initial: true) { _, on in NotchPanel.shared.follow(record: on, app) }
         // A take that ran on while you left Record: the notch goes once it ends.
         .onChange(of: app.isRecording) { _, _ in NotchPanel.shared.follow(record: notchRecord, app) }
@@ -1106,6 +1208,13 @@ struct DetailView: View {
 
     @ViewBuilder private var overlay: some View {
         switch app.phase {
+        case .warming:
+            // The camera comes on (it was off on the Storyboard): the picture shows, then the count.
+            Text(app.warmedUp ? "Get ready" : "Camera starting…")
+                .font(Theme.sans(15, .semibold)).foregroundStyle(.white)
+                .padding(.horizontal, 16).padding(.vertical, 9)
+                .background(.black.opacity(0.45), in: .capsule)
+                .transition(.opacity)
         case .countdown(let n):
             Text("\(n)")
                 .font(Theme.sans(140, .bold))
@@ -1322,6 +1431,7 @@ struct RecordPill: View {
     private var recording: Bool { if case .recording = app.phase { return true }; return false }
     private var stoppable: Bool {
         if case .countdown = app.phase { return true }
+        if case .warming = app.phase { return true }
         return recording
     }
 

@@ -8,7 +8,7 @@ enum Mode: String, CaseIterable, Identifiable {
 }
 
 enum Phase: Equatable {
-    case idle, countdown(Int), starting, recording(Date), finishing
+    case idle, warming, countdown(Int), starting, recording(Date), finishing
 }
 
 // @Observable, not ObservableObject: a view now redraws only for the properties it reads. Before,
@@ -176,6 +176,7 @@ final class AppModel {
     @ObservationIgnored private var pending: Pending?
     @ObservationIgnored private var monitors: [Any] = []
     @ObservationIgnored private var pollTimer: Timer?
+    @ObservationIgnored private let scout = CommentScout()
     @ObservationIgnored private let watch = FileWatch()
 
     private struct Pending {
@@ -194,12 +195,13 @@ final class AppModel {
     /// column shows its lines while it records; after the take, the tab goes back to the storyboard.
     var shot: StoryShot?
 
+    /// Opens Record for the shot with the camera on. He starts the take himself when he is ready
+    /// (2026-10-10: starting at once left him no time to prepare).
     func record(shot: StoryShot) {
         guard !isRecording else { return }
         self.shot = shot
         preview = nil
         SessionMode.set(.record)
-        toggleRecord()
     }
 
     var isRecording: Bool { phase != .idle }
@@ -333,6 +335,8 @@ final class AppModel {
             }
         }
         pollTimer?.tolerance = 5
+        chats.resume()
+        if Features.socialBoards { scout.start(chats) }
         // The camera runs only while you can see it.
         for name in [NSWindow.didChangeOcclusionStateNotification, NSApplication.didHideNotification,
                      NSApplication.didUnhideNotification, NSWindow.didMiniaturizeNotification,
@@ -554,7 +558,7 @@ final class AppModel {
     func toggleRecord() {
         switch phase {
         case .idle: recordTask = Task { await start() }
-        case .countdown: recordTask?.cancel(); phase = .idle; endShot()
+        case .warming, .countdown: recordTask?.cancel(); phase = .idle; endShot()
         case .recording: Task { await stop() }
         case .starting: camera.cancelStart(); screen.cancelStart()
         case .finishing: break
@@ -567,14 +571,25 @@ final class AppModel {
         doc.flushScript()
         doc.snapshotDirty()
         preview = nil
-        await camera.resume()
         resetToken += 1
         scrolling = false
+        // The camera is off on the Storyboard and other covering tabs. It comes on first and the
+        // count waits for a live picture, then a beat to get ready (2026-10-10: the iPhone camera
+        // was still dark through "3, 2, 1", and a start that timed out threw him back to the board).
+        warmedUp = false
+        phase = .warming
+        let woke = await camera.resume()
+        warmedUp = true
+        if Task.isCancelled || phase != .warming { return }
+        if woke && countdownOn {
+            try? await Task.sleep(for: .seconds(Self.getReady))
+            if Task.isCancelled || phase != .warming { return }
+        }
         if countdownOn {
             for i in (1...3).reversed() {
                 phase = .countdown(i)
                 try? await Task.sleep(for: .seconds(1))
-                if Task.isCancelled { return }
+                if Task.isCancelled || phase != .countdown(i) { return }
             }
         }
         phase = .starting
@@ -603,12 +618,18 @@ final class AppModel {
             for u in [camURL, screenURL].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
             library.isRecording = false
             phase = .idle
-            endShot()
+            // A failed shot stays on Record with the error and the shot's lines: Record tries again.
         }
     }
 
+    /// The camera runs while the phase is .warming: the stage says "Get ready".
+    var warmedUp = false
+
+    /// Seconds of live picture before the count, when the camera just came on.
+    nonisolated static let getReady: Double = 1.5
+
     /// Back to the storyboard after a shot's take (or a cancelled one).
-    private func endShot() {
+    func endShot() {
         guard shot != nil else { return }
         shot = nil
         SessionMode.set(.storyboard)

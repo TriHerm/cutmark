@@ -174,6 +174,20 @@ class H(BaseHTTPRequestHandler):
             state["chat"] = {"running": True, "messages": messages}
             state["chat_revision"] += 1
             return self.send({"ok": True})
+        if p == "/test/chat/busy":
+            # Takes works: a message from the phone waits in the queue (2026-10-10).
+            state["chat"] = {"running": True, "messages": [message(1, "Cut the intro", role="user")], "queued": []}
+            state["chat_revision"] += 1
+            return self.send({"ok": True})
+        if p == "/api/chat/unqueue" and method == "POST":
+            state["log"].append({p: q.get("index")})
+            chat = json.loads(json.dumps(state["chat"]))
+            i = int(q.get("index", "-1"))
+            if 0 <= i < len(chat.get("queued") or []):
+                chat["queued"].pop(i)
+            state["chat"] = chat
+            state["chat_revision"] += 1
+            return self.send({"ok": True})
         if p == "/test/chat/grow":
             # Replace the last message as a real streaming event does, retaining its id.
             chat = json.loads(json.dumps(state["chat"]))
@@ -364,7 +378,12 @@ class H(BaseHTTPRequestHandler):
             if method == "POST":
                 text = json.loads(self.body())["text"]
                 state["log"].append({"say": text, "id": q.get("id")})
-                if state["chat_revision"]:
+                if state["chat"].get("running") and "queued" in state["chat"]:
+                    chat = json.loads(json.dumps(state["chat"]))
+                    chat["queued"].append(text)
+                    state["chat"] = chat
+                    state["chat_revision"] += 1
+                elif state["chat_revision"]:
                     chat = json.loads(json.dumps(state["chat"]))
                     chat["messages"].append(message(len(chat["messages"]), text, role="user"))
                     chat["running"] = True

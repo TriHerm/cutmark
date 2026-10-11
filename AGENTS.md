@@ -29,26 +29,33 @@ through the `takes` MCP server. This file is for agents that work on the Takes c
 | `assets/` | Icon, fonts, brand kit. |
 | `build.sh`, `test.sh` | Build and test. |
 
-Where things are in `Sources/Takes/`:
+Two folders have their own `AGENTS.md`: `ios/AGENTS.md` (the iPhone app) and `mcp/AGENTS.md`
+(the server). Read it before you change that folder.
 
-- **Window and layout:** `Views.swift` (sidebar, session, tabs), `Shell.swift` (the five session
-  tabs), `Theme.swift` and `Look.swift` (colours, type, light and dark, palettes), `Settings.swift`.
-- **Library on disk:** `Library.swift` (projects, sessions, `session.json`, `SESSION.md`),
-  `Watch.swift` (file changes), `Scripts.swift` (variants, history), `Assets.swift`.
-- **Recording:** `CameraRecorder.swift`, `ScreenRecorder.swift`, `AppModel.swift` (the record flow).
-- **Storyboard:** `Storyboard.swift`.
-- **Posts:** `Post.swift` (LinkedIn), `XPost.swift`, `VideoPost.swift` (YouTube, vertical),
-  `Article.swift` and `ArticleView.swift` (blog), `PostDrafts.swift`, `Hooks.swift`,
-  `PostQueue.swift` (the plan), `Publish.swift` (published posts and their numbers).
-- **Review comments:** `Comments.swift`, `OpenComments.swift`.
-- **Chat with Claude Code:** `Chat.swift`, `ChatAttach.swift`, `ChatRefs.swift`.
-- **Sound and voice:** `Voice.swift`, `Sounds.swift`, `Broll.swift`.
-- **Agents and updates:** `AgentSetup.swift` (sets up the MCP server and skills at launch),
-  `Updater.swift` (the Update button), `Namer.swift` (session titles).
-- **Private features** (`Features.socialBoards`): `Copilot.swift` and `CopilotView.swift` (LinkedIn
-  comments), `Performance.swift`, `Social.swift`, `SocialWeek.swift`.
-- **Private blog** (`Features.blog`, `BLOG` in `mcp/takes_mcp.py`): the Article side of the post tab
-  (`Article.swift`, `ArticleView.swift`) and the server's `article` platform. The public copy turns both off.
+Where things are in `Sources/Takes/`. This is a map of areas, not a list of every file: find the
+rest with `grep`. Most files start with a comment that says what they are for.
+
+| Area | Start here |
+|---|---|
+| Window, sidebar, tabs | `Shell.swift`, `Views.swift` |
+| Look: colours, type, controls | `Theme.swift`, `Look.swift`, `Settings.swift` |
+| Motion | `PageMotion.swift` (pages arrive), `Motion.swift` (endless animations) |
+| Library on disk | `Library.swift`, `Watch.swift`, `Scripts.swift`, `Assets.swift`, `StyleLibrary.swift` |
+| Recording | `AppModel.swift`, `CameraRecorder.swift`, `ScreenRecorder.swift`, `Notch.swift` (the script in the notch), `ScriptFollower.swift` |
+| Transcripts and search | `Transcripts.swift`, `Search.swift` (⌘K), `ScreenFind.swift` (⌘F) |
+| Storyboard | `Storyboard.swift` |
+| Posts | `Post.swift` (LinkedIn), `XPost.swift`, `VideoPost.swift` (YouTube, vertical), `PostDrafts.swift`, `Hooks.swift`, `PostQueue.swift`, `Publish.swift`, `Cover.swift` |
+| Review comments | `Comments.swift`, `OpenComments.swift` |
+| Chat | `Chat.swift` (one Claude Code run per turn), `ChatAttach.swift`, `ChatRefs.swift`, `Dictation.swift` |
+| Sound and voice | `Voice.swift`, `Sounds.swift`, `Broll.swift` |
+| Image, video and voice models | `Gemini.swift`, `Higgsfield.swift`, `Replicate.swift`, `ElevenLabs.swift`, `ModelBrowser.swift` |
+| Plugins | `Plugins/Plugins.swift` (the board and the hooks), `Plugins/Feedback.swift` (rules, comments per video) |
+| The iPhone's server | `Phone.swift`, `PhoneHTTP.swift`, and the `Phone*.swift` files beside them |
+| Agents and updates | `AgentSetup.swift` (MCP server and skills at launch), `Updater.swift`, `Namer.swift` |
+| First run | `Onboarding.swift`, `FirstTake.swift`, `Setup.swift` |
+| Speed | `Perf.swift` |
+| Private features (`Features.socialBoards`) | `Copilot.swift`, `CopilotView.swift` (LinkedIn comments), `Performance.swift`, `Social.swift`, `SocialWeek.swift` |
+| Private blog (`Features.blog`, `BLOG` in the server) | `Article.swift`, `ArticleView.swift`. The public copy turns both off. |
 
 The app and the server share one data format: the library folders in `~/Movies/Takes`. The
 server's `instructions` describe that format. When you change the format, change both sides and
@@ -57,15 +64,7 @@ test both.
 ## The MCP server
 
 An agent with the server connected gets the tool list and descriptions, so the tools need no
-docs here. To add or change a tool:
-
-1. Write a `t_<name>(a)` function in `mcp/takes_mcp.py`.
-2. Add its entry to `TOOLS`: name, description, input schema, required fields, function.
-3. Add a test in `mcp/tests/`. Each test sets `TAKES_ROOT` to a temp folder.
-4. Try it by hand on a scratch library: `TAKES_ROOT=/tmp/lib python3 mcp/takes_mcp.py`.
-
-Write descriptions for the agent that calls the tool: what it does, when to use it, and what to
-call next.
+docs here. To add or change a tool, read `mcp/AGENTS.md`.
 
 ## Skills
 
@@ -86,9 +85,7 @@ When your work is merged or dropped, remove it (`git worktree remove <path>`) an
 branch (`git branch -d <branch>`). Remove a worktree you did not create only when it is clean,
 no process runs in it, and its branch is merged into `origin/main`.
 
-**Test.** `./test.sh` runs the server tests, then the app tests. Pass a filter to run fewer:
-`./test.sh --filter Storyboard`. Tests that use the fake `claude` run one at a time in
-`ChatRunTests`; put a new one in that suite.
+**Test.** Read [Tests](#tests). Run `./test.sh` before every push.
 
 **Look at UI changes.** Render the view and look at the picture before you say it works. The
 `BrandSnapshot` and `ReadmeShots` tests show how.
@@ -102,6 +99,10 @@ no process runs in it, and its branch is merged into `origin/main`.
 4. `./build.sh install`. It installs only what is on `origin/main`, and while Takes runs it
    stages the build. The user starts it with the Update button in the sidebar, when the chats are
    done. The iPhone works the same way: `ios/install.sh` stages, and the phone shows Update.
+   Never quit, restart or swap `Takes.app` yourself, and never leave a script that does it
+   later, not even when the user is away: you run inside Takes, so the quit stops you and every
+   other chat with it (2026-10-10: a script like that cut off two chats, then died with Takes,
+   and Takes stayed shut for five hours).
 
 **Motion and controls.** Every page arrives the same way, so a new page must not do its own
 thing (2026-10-09). Boards come in through `.transition(.page)`, set once where the boards switch
@@ -114,4 +115,41 @@ bordered text fields or Swift Charts defaults.
 **Write.** Short, plain comments that say why, with the date for a decision
 (`// Stays private for now (2026-10-04)`). The app calls its assistant "Takes", and errors from
 the chat process say "the chat". Text in the app uses short sentences in the active voice.
+
+## Tests
+
+`./test.sh` runs the server tests (`mcp/tests/`, `unittest`), then the app tests
+(`Tests/TakesTests/`, Swift Testing). `./test.sh --filter Storyboard` runs fewer. When a test
+cannot find `Testing`, set `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`. The iPhone
+has its own checks: read `ios/AGENTS.md`.
+
+**What needs a test**
+
+- **A bug fix:** first a test that fails the way the bug did, then the fix. Name the test for
+  what must stay true (`brokenFileIsNeverEmptied`), not for the bug.
+- **A change to the files on disk:** test the side you changed. When the app and the server both
+  read or write that file, test both.
+- **A new MCP tool, or a new rule in a tool:** a test in `mcp/tests/` (read `mcp/AGENTS.md`).
+- **Code that decides:** make the decision a plain function and test that function, as
+  `Keys.swift` does for shortcuts. Do not test a decision through a view.
+- **A new screen or a changed look:** render it and look at the picture (`BrandSnapshotTests`,
+  `ReadmeShots`). A test that only builds the view proves nothing about how it looks.
+
+**How tests behave**
+
+- **Own temp folder.** Each test makes its own folder under `temporaryDirectory`, with a
+  `UUID()` in the name, and removes it. Never read or write `~/Movies/Takes` or the user's files.
+- **No network, no keys.** Replace the HTTP call with a fake (the server's tests swap functions
+  such as `t.eleven_http`). Use `x.test` for made-up URLs. A test must pass on a new Mac with no
+  keys and no internet.
+- **No real `claude`.** Chat tests use the fake `claude` in `ChatTests.swift`. Tests that start it
+  run one at a time in `ChatRunTests` (`@Suite(.serialized)`): put a new one there.
+- **Wait for a state, not for a time.** Use `await until(seconds) { condition }`, not `sleep`.
+  Give it room: a full run starts about 250 tests at once, so a step that takes 1 s alone can take
+  20 s there.
+- **A flaky test is a bug.** Find why it fails under load and fix that. Do not run it again until
+  it passes. A test that times real playback or streaming goes in `TIMED` in `test.sh`: those run
+  alone after the rest.
+- **The docs are tested.** `AgentDocsTests` fails when an `AGENTS.md` names a file that is not in
+  the repo. When you rename or delete a file, fix the docs in the same commit.
 

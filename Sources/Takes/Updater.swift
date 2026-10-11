@@ -121,28 +121,63 @@ final class Updater {
         var assets: [Asset]
     }
 
-    /// Asks GitHub for the newest release; a newer one is downloaded and staged. Quiet when
-    /// offline or when GitHub says no: it tries again in six hours.
+    /// The update check goes through gettakes.app (2026-10-10), which answers with GitHub's JSON
+    /// and counts the check: this version, the macOS version and whether an iPhone used this Mac
+    /// in the last 7 days. `from` is set on the first check of a new version: the version before
+    /// it (an update), or "new" (a first install). No ID. GitHub itself is the fallback.
+    nonisolated static func checkURL(own: String, phone: Bool, from: String? = nil) -> URL {
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        var c = URLComponents(string: "https://gettakes.app/latest")!
+        c.queryItems = [.init(name: "v", value: own), .init(name: "os", value: "\(v.majorVersion).\(v.minorVersion)"),
+                        .init(name: "phone", value: phone ? "1" : "0")]
+        if let from { c.queryItems?.append(.init(name: "from", value: from)) }
+        return c.url!
+    }
+
+    static let checkedKey = "releaseChecked"
+
+    /// What `from` says for this check: nil when this version was counted before. A Mac that
+    /// checked before this code came (no `checkedKey` but past the welcome) is not "new".
+    static func checkFrom(own: String, defaults d: UserDefaults = .standard) -> String? {
+        guard let seen = d.string(forKey: checkedKey) else { return d.bool(forKey: Onboarding.doneKey) ? nil : "new" }
+        return seen == own ? nil : seen
+    }
+
+    /// Asks for the newest release; a newer one is downloaded and staged. Quiet when offline or
+    /// when GitHub says no: it tries again in six hours.
     func checkRelease() {
         guard let own = ownRelease, !fetching, !applying else { return }
         fetching = true
-        let api = URL(string: "https://api.github.com/repos/\(Self.releaseRepo)/releases/latest")!
+        let github = URL(string: "https://api.github.com/repos/\(Self.releaseRepo)/releases/latest")!
+        let api = Self.checkURL(own: own, phone: PhoneServer.usedRecently(), from: Self.checkFrom(own: own))
         let stage = waiting.deletingLastPathComponent(), skip = staged?.release, id = Bundle.main.bundleIdentifier ?? ""
         Task { @MainActor in
             defer { fetching = false }
-            if await Self.fetchRelease(api: api, own: own, skip: skip, bundleID: id, into: stage) != nil {
+            // Counted once gettakes.app answered, so an offline launch keeps the update to tell.
+            let counted: @Sendable () -> Void = { UserDefaults.standard.set(own, forKey: Self.checkedKey) }
+            if await Self.fetchRelease(api: api, fallback: github, own: own, skip: skip, bundleID: id, into: stage, answered: counted) != nil {
                 lastRead = nil; check()
             }
         }
     }
 
-    /// Reads the newest release from `api`; when it is newer than `own` and not `skip` (already
-    /// staged), downloads its Takes.dmg and stages it. Returns the staged tag.
-    nonisolated static func fetchRelease(api: URL, own: String, skip: String?, bundleID: String, into stage: URL) async -> String? {
-        var req = URLRequest(url: api)
-        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              (resp as? HTTPURLResponse)?.statusCode == 200,
+    /// Reads the newest release from `api`, or from `fallback` when `api` does not answer; when
+    /// it is newer than `own` and not `skip` (already staged), downloads its Takes.dmg and stages
+    /// it. Returns the staged tag.
+    nonisolated static func fetchRelease(api: URL, fallback: URL? = nil, own: String, skip: String?, bundleID: String, into stage: URL,
+                                         answered: (@Sendable () -> Void)? = nil) async -> String? {
+        func latest(_ url: URL) async -> Data? {
+            var req = URLRequest(url: url)
+            req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+            guard let (data, resp) = try? await URLSession.shared.data(for: req),
+                  (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+            return data
+        }
+        var data = await latest(api)
+        if data != nil { answered?() }
+        if data == nil, let fallback { data = await latest(fallback) }
+        let lists = fallback ?? api
+        guard let data,
               let r = try? JSONDecoder().decode(Release.self, from: data),
               isNewer(r.tag_name, than: own), skip != r.tag_name,
               let dmg = r.assets.first(where: { $0.name == "Takes.dmg" }),
@@ -152,8 +187,8 @@ final class Updater {
         // One update jumps to the newest release, so What's new lists every release since `own`
         // (2026-10-08), not only the newest. Without the list, the newest release's notes.
         var bodies = [r.body ?? ""]
-        if let list = URL(string: api.absoluteString.replacingOccurrences(of: "/releases/latest", with: "/releases?per_page=30")),
-           list != api, let (ldata, lresp) = try? await URLSession.shared.data(for: URLRequest(url: list)),
+        if let list = URL(string: lists.absoluteString.replacingOccurrences(of: "/releases/latest", with: "/releases?per_page=30")),
+           list != lists, let (ldata, lresp) = try? await URLSession.shared.data(for: URLRequest(url: list)),
            (lresp as? HTTPURLResponse)?.statusCode == 200,
            let all = try? JSONDecoder().decode([Release].self, from: ldata) {
             let since = all.filter { isNewer($0.tag_name, than: own) && !isNewer($0.tag_name, than: r.tag_name) }
