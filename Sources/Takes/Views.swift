@@ -26,6 +26,7 @@ struct TakesApp: App {
                 .overlay { OnboardingLayer().environment(app) }
                 .overlay { FirstTakeLayer().environment(app) }
                 .overlay { UsageAskLayer().environment(app) }
+                .sheet(isPresented: Bindable(Releaser.shared).asking) { ReleaseAsk() }
                 .task {
                     Onboarding.shared.startIfNew(app.library)
                     // After the welcome's check: the demo makes the library not empty.
@@ -187,44 +188,74 @@ struct ContentView: View {
     @Environment(AppModel.self) var app
     var library: Library
     @AppStorage("sidebar") private var savedColumns = "all"
-    @AppStorage("sidebarWidth") private var sidebarWidth: Double = 260
+    @AppStorage("sidebarWidth") private var sidebarWidth: Double = 240
+    /// The session tab, only so back and forward see it change.
+    @AppStorage("rightTab") private var tab = SessionMode.record.rawValue
+    @State private var fullScreen = false
 
     // Sidebar | the session or a board. Our own columns, not NavigationSplitView: its sidebar
     // floats as an inset card on macOS 26, and this one runs the full height of the window.
     private var showsSidebar: Bool { savedColumns != "detailOnly" }
 
+    /// Sidebar hidden: the page title starts after ‹ › instead of under them.
+    private var titleInset: CGFloat {
+        showsSidebar ? 0 : max(0, Chrome.navEnd(fullScreen: fullScreen) - Chrome.rail - 8)
+    }
+
+    private var boardTitle: String {
+        switch app.board {
+        case .performance?: return "Performance"
+        case .styles?: return "Styles"
+        case .comments?: return "Comments"
+        case .plugins?: return "Plugins"
+        case .plugin(let id)?: return Plugins.named(id)?.title ?? ""
+        default: return ""
+        }
+    }
+
     var body: some View {
         let _ = Perf.body("ContentView")
         // ⌘B: the content takes its new width at once and only the sidebar slides. Animating the
         // width made every board lay out again on each frame, which looked jumpy.
-        ZStack(alignment: .leading) {
+        // The frame as in Codex (Rail.swift): the top row, the board rail, the session list, the page.
+        ZStack(alignment: .topLeading) {
             content
-                .padding(.leading, showsSidebar ? sidebarWidth + 1 : 0)
+                .environment(\.titleInset, titleInset)
+                .padding(.leading, Chrome.rail + (showsSidebar ? sidebarWidth : 0))
                 // Never wider than the window: content that wanted more width made the whole
                 // stack wider and centred it, so the left edge went under the sidebar and was cut
                 // off (2026-10-03). Now anything too wide runs out on the right.
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 .animation(nil, value: savedColumns)
+            BoardRail()
+                .padding(.top, Chrome.bar)
+                .frame(maxHeight: .infinity, alignment: .top)
             if showsSidebar {
-                HStack(spacing: 0) {
-                    Sidebar(library: library)
-                        .padding(.top, 28)  // clear of the traffic lights
-                        .frame(width: sidebarWidth)
-                        .frame(maxHeight: .infinity)
-                        .background(Theme.canvas)
-                    Rectangle().fill(Theme.border).frame(width: 1)
-                        .overlay {
-                            Color.clear.frame(width: 8).contentShape(Rectangle())
-                                .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
-                                .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named("shell"))
-                                    .onChanged { v in sidebarWidth = min(max(v.location.x, 220), 360) })
-                        }
-                }
-                .transition(.move(edge: .leading).combined(with: .opacity))
+                Sidebar(library: library)
+                    .padding(.top, Chrome.bar)
+                    .frame(width: sidebarWidth)
+                    .frame(maxHeight: .infinity)
+                    // Drag the list's right edge to make it wider or narrower.
+                    .overlay(alignment: .trailing) {
+                        Color.clear.frame(width: 8).contentShape(Rectangle())
+                            .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
+                            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named("shell"))
+                                .onChanged { v in sidebarWidth = min(max(v.location.x - Chrome.rail, 200), 340) })
+                    }
+                    .padding(.leading, Chrome.rail)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
             }
+            // ‹ › and the sidebar button in the top row, beside the traffic lights (Navigation.swift).
+            NavButtons()
+                .padding(.leading, Chrome.navX(fullScreen: fullScreen))
+                .frame(height: Chrome.bar)
         }
         .coordinateSpace(name: "shell")
+        .background(Theme.surface)
+        .background(TrafficLights())
         .ignoresSafeArea(.container, edges: .top)
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in fullScreen = true }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in fullScreen = false }
         .overlay { if app.notchTour { NotchTourShade().transition(.opacity) } }
         .animation(Theme.motion, value: app.notchTour)
         .animation(.easeOut(duration: 0.2), value: savedColumns)
@@ -234,44 +265,66 @@ struct ContentView: View {
         .onChange(of: library.selectedSessions) { _, sel in
             app.board = nil  // ⌘N, a link
         }
+        .onChange(of: app.board) { app.noteSpot() }
+        .onChange(of: library.current?.url) { app.noteSpot() }
+        .onChange(of: tab) { app.noteSpot() }
+        .onAppear {
+            app.trail.visit(app.spotNow)
+            fullScreen = NSApp.windows.contains { $0.isVisible && $0.styleMask.contains(.fullScreen) }
+        }
     }
 
     /// The session or a board.
     private var content: some View {
-            ZStack {
-                // Under a board and the session as they cross-fade: no see-through frame.
-                Theme.canvas
-                if app.board == .performance {
-                    ChatSlot(hub: app.chats, target: ChatTarget(chat: app.chats.board, title: "Performance", session: nil)) {
-                        PerformanceView(board: app.performance, root: library.root) { app.follow($0) }
-                    }
-                    .overlay(alignment: .bottomTrailing) {
-                        BoardChatCorner(hub: app.chats).padding(18)
-                    }
+        ZStack {
+            // Under a board and the session as they cross-fade: no see-through frame.
+            Theme.surface
+            if app.board == nil {
+                DetailView(library: library, camera: app.camera, screen: app.screen)
                     .transition(.page)
-                } else if app.board == .styles {
-                    ChatSlot(hub: app.chats, target: ChatTarget(chat: app.chats.styles, title: "Styles", session: nil)) {
-                        StylesBoard(root: library.root)
-                    }
-                    .overlay(alignment: .bottomTrailing) {
-                        BoardChatCorner(hub: app.chats, styles: true).padding(18)
-                    }
-                    .transition(.page)
-                } else if app.board == .comments {
-                    CommentsBoard(hub: app.chats, store: app.copilot, root: library.root)
-                        .transition(.page)
-                } else if app.board == .plugins {
-                    PluginsBoard().transition(.page)
-                } else if case .plugin(let id)? = app.board, let board = Plugins.named(id)?.board {
-                    board(app).transition(.page)
-                } else {
-                    DetailView(library: library, camera: app.camera, screen: app.screen)
-                        .transition(.page)
+            } else {
+                // A board: its name in the top row, the board in the panel under it.
+                VStack(spacing: 0) {
+                    BoardTitleBar(title: boardTitle)
+                    boards.pagePanel()
                 }
+                .transition(.page)
             }
-            .animation(.page, value: app.board)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Theme.paper)
+        }
+        .animation(.page, value: app.board == nil)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The open board.
+    private var boards: some View {
+        ZStack {
+            Theme.canvas
+            if app.board == .performance {
+                ChatSlot(hub: app.chats, target: ChatTarget(chat: app.chats.board, title: "Performance", session: nil)) {
+                    PerformanceView(board: app.performance, root: library.root) { app.follow($0) }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    BoardChatCorner(hub: app.chats).padding(18)
+                }
+                .transition(.page)
+            } else if app.board == .styles {
+                ChatSlot(hub: app.chats, target: ChatTarget(chat: app.chats.styles, title: "Styles", session: nil)) {
+                    StylesBoard(root: library.root)
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    BoardChatCorner(hub: app.chats, styles: true).padding(18)
+                }
+                .transition(.page)
+            } else if app.board == .comments {
+                CommentsBoard(hub: app.chats, store: app.copilot, root: library.root)
+                    .transition(.page)
+            } else if app.board == .plugins {
+                PluginsBoard().transition(.page)
+            } else if case .plugin(let id)? = app.board, let board = Plugins.named(id)?.board {
+                board(app).transition(.page)
+            }
+        }
+        .animation(.page, value: app.board)
     }
 }
 
@@ -312,10 +365,9 @@ struct PersistentSplit<Left: View, Right: View>: View {
 
 // MARK: - Sidebar
 
-/// The sidebar ways into the boards. It also keeps the post plan current for the session list.
+/// Setup, Update and Release at the foot of the session list. The boards moved to the rail
+/// (Rail.swift, 2026-10-11).
 struct BoardRows: View {
-    /// The Plugins board can turn a plugin off: draw again without it.
-    @AppStorage(Plugins.removedKey) private var pluginsRemoved = ""
     @Environment(AppModel.self) var app
 
     var body: some View {
@@ -323,18 +375,7 @@ struct BoardRows: View {
             SetupButton()
             UpdateButton(library: app.library)
             ReleaseRow()
-            if Features.socialBoards {
-                PerformanceRow(board: app.performance, selected: app.board == .performance) { app.board = .performance }
-                CommentsRow(store: app.copilot, runner: app.copilot.runner, chat: app.chats.comments, post: app.chats.commentsPost, selected: app.board == .comments) { app.board = .comments }
-            }
-            ForEach(Plugins.boards) { p in
-                PluginRow(plugin: p, app: app, selected: app.board == .plugin(p.id)) { app.board = .plugin(p.id) }
-            }
         }
-            .onAppear { app.posts.scan(app.library.root) }
-            .onReceive(NotificationCenter.default.publisher(for: .takesFilesChanged)) { n in
-                if let paths = n.object as? [String], PostQueue.matters(paths) { app.posts.scanInBackground(app.library.root) }
-            }
     }
 }
 
@@ -518,10 +559,10 @@ struct SessionList: View {
             return .handled
         }
         .disabled(app.isRecording)
-        .alert("New project", isPresented: $showNewProject) {
-            TextField("Name", text: $newProject)
-            Button("Create") { library.createProject(newProject) }
-            Button("Cancel", role: .cancel) {}
+        .sheet(isPresented: $showNewProject) {
+            TakesConfirm(title: "New project", confirm: "Create", field: $newProject, fieldPrompt: "Name",
+                         onConfirm: { showNewProject = false; library.createProject(newProject) },
+                         onCancel: { showNewProject = false })
         }
         .overlay {
             if library.projects.isEmpty {
@@ -632,14 +673,15 @@ struct SessionList: View {
                                                        draggingSession: $dragging, over: $dropProject,
                                                        reorder: { library.moveProject($0, to: $1) },
                                                        moveIn: { moveIn($0, to: p.url) }))
-            .contextMenu {
-                Button("New Session") { library.createSession(in: p.url) }
+            .takesContextMenu { [library, recording = app.isRecording] in
+                MenuButton("New session", icon: "plus") { library.createSession(in: p.url) }
                 // While a chat works here, the new name shows at once and the folder moves after.
-                Button("Rename\u{2026}") { startRename(p) }
-                Button("Reveal in Finder") { library.reveal(p.url) }
-                Divider()
-                Button("Move Project to Trash", role: .destructive) { library.trashProject(p.url) }
-                    .disabled(busy || app.isRecording)
+                MenuButton("Rename\u{2026}", icon: "pencil") { startRename(p) }
+                MenuButton("Reveal in Finder", icon: "folder") { library.reveal(p.url) }
+                MenuDivider()
+                MenuButton("Move project to Trash", icon: "trash", enabled: !(busy || recording), danger: true) {
+                    library.trashProject(p.url)
+                }
             }
             .simultaneousGesture(TapGesture(count: 2).onEnded { startRename(p) })
             .onChange(of: blocked) { _, b in
@@ -720,7 +762,8 @@ struct SessionList: View {
                     .foregroundStyle(s.published && !picked ? Theme.muted : Theme.ink)
                 Spacer(minLength: 6)
                 ClaudeActivity(chat: app.chats.existing(s.url),
-                               waiting: app.notices.contains { $0.session == s.url.standardizedFileURL })
+                               waiting: app.notices.contains { $0.session == s.url.standardizedFileURL },
+                               job: app.jobs.running(s.url))
                 Group {
                     if !booked.isEmpty {
                         let at = Self.next(booked)
@@ -750,13 +793,10 @@ struct SessionList: View {
         .onDrop(of: [.text], delegate: SessionDrop(target: s.url, dragging: $dragging, over: $dropProject,
                                                    reorder: { library.moveSession($0, to: $1) },
                                                    moveIn: { moveIn($0, to: s.url.deletingLastPathComponent()) }))
-        .contextMenu {
-            let links = s.posts.compactMap { p in p.url.flatMap(URL.init(string:)).map { (p.label, $0) } }
-            ForEach(links, id: \.1) { label, url in
-                Button("Open on \(label)") { NSWorkspace.shared.openSoon(url) }
-            }
-            if !links.isEmpty { Divider() }
-            BulkMenu(library: library, urls: sel.contains(s.url) ? sel : [s.url])
+        // The same rows as the session's ⋯ menu (SessionMenu); a picked row takes the selection.
+        .takesContextMenu { [app, library] in
+            let sel = app.board == nil ? library.selectedSessions : []
+            return SessionMenu.rows(app: app, urls: sel.contains(s.url) ? sel : [s.url])
         }
     }
 
@@ -937,11 +977,9 @@ struct DetailView: View {
             && !(library.selectedSessions.count > 1)
     }
 
-    /// Tabs that hide the camera and the stage player for as long as they show.
-    private var stageCovered: Bool {
-        (["post", "storyboard", "broll"].contains(rightTab) || writing) && !app.isRecording && library.current != nil
-            && !(library.selectedSessions.count > 1)
-    }
+    /// Tabs that hide the camera and the stage player for as long as they show. The same test as
+    /// cover: Assets and Sound hid the camera but left it and the mic meter running (2026-10-11).
+    private var stageCovered: Bool { cover != nil }
 
     private var writing: Bool { rightTab == "write" }
 
@@ -980,7 +1018,7 @@ struct DetailView: View {
         let _ = Perf.body("DetailView")
         Group {
             if library.selectedSessions.count > 1 && !app.isRecording {
-                BulkView(library: library)
+                BulkView(library: library).pagePanel().padding(.top, Chrome.bar)
             } else {
                 recorder
             }
@@ -1001,19 +1039,20 @@ struct DetailView: View {
     /// then the file plays on the stage and the list sits beside it.
     private var cover: String? {
         guard !app.isRecording, library.current != nil, !(library.selectedSessions.count > 1) else { return nil }
-        if rightTab == "post" || rightTab == "storyboard" || rightTab == "broll" || writing { return rightTab }
-        if (rightTab == "assets" || rightTab == "sounds") && app.preview == nil { return rightTab }
-        return nil
+        return Self.covers(rightTab, previewing: app.preview != nil) ? rightTab : nil
+    }
+
+    nonisolated static func covers(_ tab: String, previewing: Bool) -> Bool {
+        ["post", "storyboard", "broll", "write"].contains(tab) || (["assets", "sounds"].contains(tab) && !previewing)
     }
 
     private var recorder: some View {
         VStack(spacing: 0) {
             if let doc = library.current {
                 SessionHeader(doc: doc)
-                    // A tall Post page squeezed the header and cut the title's top (2026-10-02).
-                    .fixedSize(horizontal: false, vertical: true)
                     .sheet(isPresented: Bindable(app).cleaningUp) { CleanupSheet(doc: doc) }
-                Rule()
+            } else {
+                Color.clear.frame(height: Chrome.bar)
             }
             ZStack {
                 // The recorder stays mounted under the cover: removing the camera preview
@@ -1053,12 +1092,13 @@ struct DetailView: View {
                     .accessibilityHidden(cover == nil)
                 }
             }
+            .pagePanel()
         }
         .overlay(alignment: .bottomTrailing) {
             if let doc = library.current, !app.isRecording {
                 // Above the Assets footer bar, clear of its buttons.
                 ChatCorner(hub: app.chats, doc: doc, away: recordOnly && cover == nil)
-                    .padding(.trailing, 18).padding(.bottom, 52)
+                    .padding(.trailing, 26).padding(.bottom, 60)
                     .transition(.opacity)
             }
         }
@@ -1466,12 +1506,8 @@ struct RecordPill: View {
                 // With two displays, which one records shows here, not only in the device panel
                 // (Jeremy could not find it, 2026-10-06).
                 if app.mode == .cameraScreen && screen.displays.count > 1 {
-                    Menu {
-                        Picker("Record", selection: $screen.displayID) {
-                            ForEach(screen.displays) { Text($0.name).tag(Optional($0.id)) }
-                        }
-                        .pickerStyle(.inline)
-                    } label: {
+                    let screen = screen
+                    TakesMenuButton(help: "Which display to record") {
                         HStack(spacing: 4) {
                             Image(systemName: "display")
                             Text(screen.displays.first { $0.id == screen.displayID }?.name ?? "Display")
@@ -1479,9 +1515,14 @@ struct RecordPill: View {
                         }
                         .font(Theme.sans(12, .medium))
                         .padding(.horizontal, 8).frame(height: 28)
+                        .modifier(PillGhostLook())
+                    } content: {
+                        MenuLabel("Record")
+                        for d in screen.displays {
+                            MenuButton(d.name, icon: "display", checked: d.id == screen.displayID) { screen.displayID = d.id }
+                        }
                     }
-                    .menuStyle(.button).buttonStyle(PillGhostStyle()).menuIndicator(.hidden).fixedSize()
-                    .help("Which display to record")
+                    .fixedSize()
                 }
                 Button { devices.toggle() } label: {
                     Image(systemName: "slider.horizontal.3").font(.system(size: 12, weight: .medium))
@@ -1489,8 +1530,8 @@ struct RecordPill: View {
                 }
                 .buttonStyle(PillGhostStyle())
                 .help("Camera, microphone and screen")
-                .popover(isPresented: $devices, arrowEdge: .top) {
-                    DevicePanel(camera: camera, screen: screen)
+                .takesMenu(isPresented: $devices, width: 270) { [app, camera, screen] in
+                    DevicePanel.rows(mode: app.mode, camera: camera, screen: screen)
                 }
             }
             .disabled(app.isRecording)
@@ -1550,6 +1591,19 @@ struct PillGhostStyle: ButtonStyle {
     }
 }
 
+/// PillGhostStyle's look for a label that is not its own button (a Takes menu's label, 2026-10-11).
+private struct PillGhostLook: ViewModifier {
+    @State private var hover = false
+    func body(content: Content) -> some View {
+        content
+            .foregroundStyle(hover ? Theme.ink : Theme.muted)
+            .background(Capsule().fill(hover ? Theme.hover : .clear))
+            .contentShape(Capsule())
+            .onHover { hover = $0 }
+            .animation(Theme.motion, value: hover)
+    }
+}
+
 /// Shows while you record: a red pill with a slow pulse.
 struct LivePill: View {
     var body: some View {
@@ -1567,102 +1621,59 @@ struct LivePill: View {
 
 /// The devices behind the pill's slider button: one quiet row each, like Control Center. Shape
 /// is on the pill itself; the hints live in tooltips (the user, 2026-10-06: "pretty ugly").
-struct DevicePanel: View {
-    @Environment(AppModel.self) var app
-    @ObservedObject var camera: CameraRecorder
-    @ObservedObject var screen: ScreenRecorder
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            row("video", "Camera") {
-                pick(camera.videoDevices.map { ($0.uniqueID, $0.localizedName) },
-                     camera.videoID, set: { camera.chooseVideo($0) })
-            }
-            VStack(spacing: 0) {
-                row("mic", "Microphone") {
-                    pick(camera.audioDevices.map { ($0.uniqueID, $0.localizedName) },
-                         camera.audioID, set: { camera.chooseAudio($0) })
-                }
-                LevelMeter(meter: camera.meter, track: Theme.border, fill: Theme.live)
-                    .frame(height: 2).clipShape(Capsule())
-                    .padding(.leading, 36).padding(.trailing, 10).padding(.bottom, 4)
-            }
-            if app.mode == .cameraScreen {
-                row("display", "Screen") {
-                    pick(screen.displays.map { (String($0.id), $0.name) }, screen.displayID.map { String($0) },
-                         set: { screen.displayID = $0.flatMap { UInt32($0) } })
-                }
-                .help("Takes hides itself from the screen file.")
-            }
-            Rectangle().fill(Theme.border).frame(height: 1).padding(.vertical, 4).padding(.horizontal, 8)
-            // Apps can't turn Portrait on: only the macOS Video Effects menu can. The row opens it
-            // (Jeremy looked for a blur in Takes, 2026-10-06).
-            TimelineView(.periodic(from: .now, by: 1)) { _ in
-                let on = AVCaptureDevice.isPortraitEffectEnabled
-                Button { AVCaptureDevice.showSystemUserInterface(.videoEffects) } label: {
-                    row("person.and.background.dotted", "Background blur") {
-                        HStack(spacing: 4) {
-                            Text(on ? "On" : "Off")
-                            Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
-                        }
-                        .font(Theme.sans(12)).foregroundStyle(on ? Theme.accent : Theme.faint)
-                    }
-                }
-                .buttonStyle(PanelRowStyle())
-                .help("macOS blurs the background behind you (Portrait, in Video Effects).")
-            }
-            row("lightbulb", "Camera on") {
-                Toggle("", isOn: Binding(get: { !camera.paused }, set: { camera.setPaused(!$0) }))
-                    .toggleStyle(.switch).controlSize(.mini).labelsHidden()
-            }
-            .help("Off turns the camera light off. Record turns it back on.")
+/// A Takes menu since 2026-10-11: one list, a section each for camera, microphone and screen.
+enum DevicePanel {
+    @MainActor @MenuBuilder
+    static func rows(mode: Mode, camera: CameraRecorder, screen: ScreenRecorder) -> [MenuItem] {
+        MenuLabel("Camera")
+        for d in camera.videoDevices {
+            MenuButton(d.localizedName, icon: "video", checked: d.uniqueID == camera.videoID) { camera.chooseVideo(d.uniqueID) }
         }
-        .padding(6)
-        .frame(width: 270)
-        .foregroundStyle(Theme.ink)
-        .tint(Theme.accent)
-    }
-
-    private func row(_ icon: String, _ label: String, @ViewBuilder _ trailing: () -> some View) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon).font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.muted)
-                .frame(width: 18)
-            Text(label).font(Theme.sans(12.5, .medium))
-            Spacer(minLength: 8)
-            trailing()
+        MenuLabel("Microphone")
+        for d in camera.audioDevices {
+            MenuButton(d.localizedName, icon: "mic", checked: d.uniqueID == camera.audioID) { camera.chooseAudio(d.uniqueID) }
         }
-        .padding(.horizontal, 8).frame(height: 32)
-        .contentShape(Rectangle())
-    }
-
-    /// The device's name in grey; a click lists the others.
-    private func pick(_ items: [(id: String, name: String)], _ current: String?, set: @escaping (String?) -> Void) -> some View {
-        Menu {
-            ForEach(items, id: \.id) { item in
-                Button { set(item.id) } label: {
-                    if item.id == current { Label(item.name, systemImage: "checkmark") } else { Text(item.name) }
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Text(items.first { $0.id == current }?.name ?? "None").lineLimit(1).truncationMode(.middle)
-                Image(systemName: "chevron.up.chevron.down").font(.system(size: 8, weight: .semibold))
-            }
-            .font(Theme.sans(12)).foregroundStyle(Theme.muted)
-            .frame(maxWidth: 140, alignment: .trailing)
+        MenuView("meter") {
+            LevelMeter(meter: camera.meter, track: Theme.border, fill: Theme.live)
+                .frame(height: 2).clipShape(Capsule())
+                .padding(.leading, 33).padding(.trailing, 10).padding(.vertical, 4)
+                .help("Microphone level")
         }
-        .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+        if mode == .cameraScreen {
+            MenuLabel("Screen")
+            for d in screen.displays {
+                MenuButton(d.name, icon: "display", checked: d.id == screen.displayID) { screen.displayID = d.id }
+            }
+            MenuView("screen-note") {
+                Text("Takes hides itself from the screen file.").font(Theme.sans(11)).foregroundStyle(Theme.faint)
+                    .padding(.leading, 33).padding(.trailing, 8).padding(.bottom, 4)
+            }
+        }
+        MenuDivider()
+        // Apps can't turn Portrait on: only the macOS Video Effects menu can. The row opens it
+        // (Jeremy looked for a blur in Takes, 2026-10-06).
+        MenuButton("Background blur", icon: "person.and.background.dotted",
+                   detail: AVCaptureDevice.isPortraitEffectEnabled ? "On" : "Off") {
+            AVCaptureDevice.showSystemUserInterface(.videoEffects)
+        }
+        MenuView("camera-on") { CameraOnRow(camera: camera) }
     }
 }
 
-/// A whole panel row as a button: a soft well on hover.
-private struct PanelRowStyle: ButtonStyle {
-    @State private var hover = false
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .background(RoundedRectangle(cornerRadius: 8).fill(hover || configuration.isPressed ? Theme.hover : .clear))
-            .onHover { hover = $0 }
-            .animation(Theme.motion, value: hover)
+/// "Camera on" with its switch, in the device menu: it follows the camera as it changes.
+private struct CameraOnRow: View {
+    @ObservedObject var camera: CameraRecorder
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "lightbulb").font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.muted)
+                .frame(width: 15)
+            Text("Camera on").font(Theme.sans(13)).foregroundStyle(Theme.ink)
+            Spacer(minLength: 8)
+            Toggle("", isOn: Binding(get: { !camera.paused }, set: { camera.setPaused(!$0) }))
+                .toggleStyle(.switch).controlSize(.mini).labelsHidden().tint(Theme.accent)
+        }
+        .padding(.horizontal, 8).frame(height: 30)
+        .help("Off turns the camera light off. Record turns it back on.")
     }
 }
 
@@ -1696,12 +1707,16 @@ struct TakesList: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(10)
         } else {
-            // As tall as the takes, up to 150; then it scrolls.
-            ViewThatFits(in: .vertical) {
-                rows
-                ScrollView { rows }
+            // As tall as the takes, up to 150; then it scrolls. A row is about 35 pt, so four fit.
+            // Picked by the count: ViewThatFits built every row twice, with and without the scroll
+            // view, on each session switch (2026-10-11).
+            Group {
+                if doc.takeGroups.count <= 4 {
+                    rows
+                } else {
+                    ScrollView { rows }.frame(height: 150)
+                }
             }
-            .frame(maxHeight: 150)
             .background(Theme.paper)
         }
     }
@@ -1741,8 +1756,9 @@ struct TakeRow: View {
         doc.trashTake(number)
     }
 
-    private var trashButton: some View {
-        Button("Move Take to Trash", role: .destructive, action: trash).disabled(app.isRecording)
+    /// The take's Trash row, last in each of its right-click menus.
+    private var trashRow: [MenuItem] {
+        MenuButton("Move take to Trash", icon: "trash", enabled: !app.isRecording, danger: true, action: trash).items
     }
 
     /// "Hook 2" while that hook is still in hooks.json, else "hook".
@@ -1794,11 +1810,11 @@ struct TakeRow: View {
                 .buttonStyle(BracketButtonStyle(active: app.preview == url))
                 .disabled(app.isRecording)
                 .help("Play \(t.file)")
-                .contextMenu {
-                    Button("Open in QuickTime") { NSWorkspace.shared.openSoon(url) }
-                    Button("Reveal in Finder") { NSWorkspace.shared.revealSoon([url]) }
-                    Divider()
-                    trashButton
+                .takesContextMenu { [trashRow] in
+                    MenuButton("Open in QuickTime", icon: "play.rectangle") { NSWorkspace.shared.openSoon(url) }
+                    MenuButton("Reveal in Finder", icon: "folder") { NSWorkspace.shared.revealSoon([url]) }
+                    MenuDivider()
+                    trashRow
                 }
             }
             if let said, !said.isEmpty {
@@ -1806,8 +1822,8 @@ struct TakeRow: View {
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted)
                     .lineLimit(1).truncationMode(.tail)
                     .help(said)
-                    .contextMenu {
-                        Button("Copy Transcript") {
+                    .takesContextMenu {
+                        MenuButton("Copy transcript", icon: "doc.on.doc") {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(said, forType: .string)
                         }
@@ -1824,7 +1840,7 @@ struct TakeRow: View {
         .buttonStyle(.borderless)
         .padding(.horizontal, 10).padding(.vertical, 6)
         .contentShape(Rectangle())
-        .contextMenu { trashButton }
+        .takesContextMenu { [trashRow] in trashRow }
         .onAppear { name = takes.first?.name ?? "" }
         .onDisappear { if name != (takes.first?.name ?? "") { doc.nameTake(number, name) } }
         .onAppear { hooks = HookStore.read(doc.url).hooks }
@@ -1917,32 +1933,6 @@ struct HoverRowStyle: ButtonStyle {
     }
 }
 
-struct BulkMenu: View {
-    var library: Library
-    let urls: Set<URL>
-
-    var body: some View {
-        let others = library.projects.filter { $0.url != library.selectedProject }
-        if !others.isEmpty {
-            Menu("Move to Project") {
-                ForEach(others) { p in Button(p.name) { library.moveSessions(urls, to: p.url) } }
-            }
-        }
-        Button("Trash Takes Without a Star") { library.trashNonKeepers(urls) }
-        Menu(urls.count == 1 ? "Mark as Published On" : "Mark \(urls.count) as Published On") {
-            ForEach(Platforms.all, id: \.self) { p in Button(p) { library.markPublished(urls, on: p) } }
-            Button("Somewhere Else") { library.markPublished(urls) }
-        }
-        let archived = library.sessions.filter { urls.contains($0.url) }.allSatisfy(\.archived)
-        Button(archived ? "Unarchive" : "Archive") { library.setArchived(urls, !archived) }
-        Button("Reveal in Finder") { library.reveal(urls) }
-        Divider()
-        Button(urls.count == 1 ? "Move Session to Trash" : "Move \(urls.count) Sessions to Trash", role: .destructive) {
-            library.trashSessions(urls)
-        }
-    }
-}
-
 struct BulkView: View {
     var library: Library
     @State private var note: String?
@@ -1968,13 +1958,14 @@ struct BulkView: View {
                             ForEach(picked) { s in sessionRow(s) }
                         }
                         card("02", "actions") {
-                            Menu {
-                                ForEach(others) { p in Button(p.name) { library.moveSessions(urls, to: p.url) } }
-                            } label: {
+                            TakesMenuButton {
                                 actionLabel("folder", "Move to Project",
                                             others.isEmpty ? "Create another project first" : "Keeps every file and script")
+                            } content: {
+                                for p in others {
+                                    MenuButton(p.name, icon: "folder") { library.moveSessions(urls, to: p.url) }
+                                }
                             }
-                            .menuStyle(.borderlessButton).menuIndicator(.hidden)
                             .disabled(others.isEmpty)
                             action("star.slash", "Keep Only Starred Takes",
                                    stats.unstarred == 0 ? "Every take has a star" : "Trash \(stats.unstarred) take\(stats.unstarred == 1 ? "" : "s") without a star") {
@@ -2131,8 +2122,18 @@ struct HoverBackground: View {
 struct ClaudeActivity: View {
     let chat: ClaudeChat?
     let waiting: Bool
+    /// A job runs in the session (Jobs.swift): the ring shows also while the chat is idle.
+    var job = false
     var body: some View {
-        if let chat { Live(chat: chat, waiting: waiting) } else if waiting { Self.dot.help("Takes has something to show you here") }
+        if let chat { Live(chat: chat, waiting: waiting, job: job) }
+        else if job { Self.ring }
+        else if waiting { Self.dot.help("Takes has something to show you here") }
+    }
+
+    static var ring: some View {
+        LayerSpinner(color: Theme.faint, lineWidth: 1.5, inset: 0, length: 0.3)
+            .frame(width: 9, height: 9)
+            .help("Takes is working in this session")
     }
 
     static var dot: some View { Circle().fill(Theme.accent).frame(width: 7, height: 7) }
@@ -2140,12 +2141,11 @@ struct ClaudeActivity: View {
     private struct Live: View {
         var chat: ClaudeChat
         let waiting: Bool
+        var job = false
         var body: some View {
             Group {
-                if chat.running {
-                    LayerSpinner(color: Theme.faint, lineWidth: 1.5, inset: 0, length: 0.3)
-                        .frame(width: 9, height: 9)
-                        .help("Takes is working in this session")
+                if chat.running || job {
+                    ClaudeActivity.ring
                 } else if waiting || chat.unread {
                     ClaudeActivity.dot.help(waiting ? "Takes has something to show you here" : "Takes replied")
                 }
@@ -2530,15 +2530,18 @@ struct ScriptPane: View {
             .buttonStyle(PillGhostStyle())
             .background(Theme.hover, in: Capsule())
             if compact {
-                Menu {
-                    Toggle("Follow my voice", isOn: Binding(get: { app.followVoice }, set: { app.followVoice = $0 }))
-                    Toggle("Auto-scroll when recording starts", isOn: Binding(get: { app.autoScroll }, set: { app.autoScroll = $0 }))
-                    Toggle("3s countdown", isOn: Binding(get: { app.countdownOn }, set: { app.countdownOn = $0 }))
-                } label: {
+                let app = app
+                TakesMenuButton(help: "Voice follow, auto-scroll and countdown") {
                     Image(systemName: "slider.horizontal.3")
+                } content: {
+                    // Checks that switch in place, as the toggles did.
+                    MenuButton("Follow my voice", icon: "waveform", checked: app.followVoice, keepsOpen: true) { app.followVoice.toggle() }
+                    MenuButton("Auto-scroll when recording starts", icon: "arrow.down", checked: app.autoScroll, keepsOpen: true) {
+                        app.autoScroll.toggle()
+                    }
+                    MenuButton("3s countdown", icon: "timer", checked: app.countdownOn, keepsOpen: true) { app.countdownOn.toggle() }
                 }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                .help("Voice follow, auto-scroll and countdown")
+                .fixedSize()
             } else {
                 ToggleChip(title: "Auto-scroll", icon: "arrow.down", on: Binding(get: { app.autoScroll }, set: { app.autoScroll = $0 }))
                     .help("Start scrolling when recording starts")
@@ -2868,13 +2871,15 @@ struct DraftBar: View {
         .gesture(TapGesture(count: 2).onEnded { startRename(slug, name) })
         .simultaneousGesture(TapGesture().onEnded { if renaming != slug && doc.activeDraft != slug { doc.activeDraft = slug } })
         .help(slug == "main" ? "Main script" : "\(note.isEmpty ? name : note) · double-click to rename")
-        .contextMenu {
-            Button(favorite ? "Remove Favorite" : "Mark as Favorite") { doc.toggleFavorite(slug) }
+        .takesContextMenu { [doc] in
+            MenuButton(favorite ? "Remove favorite" : "Mark as favorite", icon: favorite ? "star.slash" : "star") {
+                doc.toggleFavorite(slug)
+            }
             if slug != "main" {
-                Button("Rename…") { startRename(slug, name) }
-                Button("Use as Main Script") { doc.promote(slug) }
-                Divider()
-                Button("Delete Variant", role: .destructive) { doc.deleteVariant(slug) }
+                MenuButton("Rename…", icon: "pencil") { startRename(slug, name) }
+                MenuButton("Use as main script", icon: "arrow.up.doc") { doc.promote(slug) }
+                MenuDivider()
+                MenuButton("Delete variant", icon: "trash", danger: true) { doc.deleteVariant(slug) }
             }
         }
     }
@@ -3238,11 +3243,18 @@ struct Prompter: NSViewRepresentable {
             clip.postsFrameChangedNotifications = true
             followObservers.append(NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: clip, queue: .main) {
                 [weak self] _ in MainActor.assumeIsolated {
-                    guard let self, let voice = self.parent.voice, let tv = self.textView else { return }
-                    self.place(tv, word: voice.next, animated: false)
+                    // A session switch changes the frame several times in one turn: place once, after it.
+                    guard let self, !self.placePending, self.parent.voice != nil else { return }
+                    self.placePending = true
+                    DispatchQueue.main.async {
+                        self.placePending = false
+                        guard let voice = self.parent.voice, let tv = self.textView else { return }
+                        self.place(tv, word: voice.next, animated: false)
+                    }
                 }
             })
         }
+        private var placePending = false
 
         /// Dims the words said and brings the next one to the reading line, or clears the dimming
         /// when voice follow is off.
@@ -3278,9 +3290,13 @@ struct Prompter: NSViewRepresentable {
             if words.text != tv.string { words = ScriptFollower(tv.string) }
             guard !words.ranges.isEmpty else { return }
             let r = words.ranges[min(word, words.ranges.count - 1)]
-            lm.ensureLayout(for: tc)
+            // Only the text up to the word: laying out the whole script took most of a switch's
+            // own time on long scripts (2026-10-11).
+            lm.ensureLayout(forCharacterRange: NSRange(location: 0, length: r.location + r.length))
             let rect = lm.boundingRect(forGlyphRange: lm.glyphRange(forCharacterRange: r, actualCharacterRange: nil), in: tc)
             let clip = scroll.contentView
+            // And a screen below it, so the page is tall enough to bring the word up to the line.
+            lm.ensureLayout(forBoundingRect: NSRect(x: 0, y: 0, width: tc.size.width, height: rect.maxY + clip.bounds.height), in: tc)
             let maxY = max(0, (scroll.documentView?.frame.height ?? 0) - clip.bounds.height)
             let y = min(maxY, max(0, rect.minY + tv.textContainerOrigin.y - clip.bounds.height * parent.readingLine))
             offset = y

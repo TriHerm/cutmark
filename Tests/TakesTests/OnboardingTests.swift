@@ -27,7 +27,7 @@ extension ChatRunTests {
             try? FileManager.default.removeItem(at: root)
         }
 
-        func ready(ffmpeg: Setup.Status = .ok) { setup.claude = .ok; setup.signedIn = .ok; setup.ffmpeg = ffmpeg }
+        func ready(ffmpeg: Setup.Status = .ok) { setup.claude = .ok; setup.signedIn = .ok; setup.ffmpeg = ffmpeg; setup.devTools = .ok }
 
         @Test func showsOnceToANewLibraryOnly() throws {
             defer { cleanup() }

@@ -23,6 +23,8 @@ struct Asset: Identifiable, Hashable {
     let size: Int64
     let modified: Date
     var take = false    // a raw recording from the take list
+    /// Problems check_edit found in this file's newest check (edits/ only; checks.json).
+    var problems = 0
     var id: URL { url }
     /// Path inside the session folder (the key comments use).
     var rel: String { take || group.isEmpty ? name : "\(group)/\(name)" }
@@ -43,7 +45,7 @@ final class AssetStore: ObservableObject {
     @Published private(set) var assets: [Asset] = []
     private(set) var url: URL?
     /// Files the script system and the take list own. Not shown here.
-    nonisolated static let skipFiles: Set<String> = ["script.md", "session.json", "SESSION.md", ".order.json", "hooks.json", "comments.json", "evergreen.json", "cuts.json", "plan.json"]
+    nonisolated static let skipFiles: Set<String> = ["script.md", "session.json", "SESSION.md", ".order.json", "hooks.json", "comments.json", "evergreen.json", "cuts.json", "plan.json", "checks.json"]
     nonisolated static let skipFolders: Set<String> = ["variants", "history", "comments", "posts", "voice", "storyboard"]
     /// Shown first, in this order. Other folders follow A–Z, loose files last.
     static let known = ["edits", "thumbnails", "stills", "assets", "takes"]
@@ -84,13 +86,14 @@ final class AssetStore: ObservableObject {
         }
     }
 
-    nonisolated private static func walk(_ root: URL, takeFiles: Set<String>) -> [Asset] {
+    nonisolated static func walk(_ root: URL, takeFiles: Set<String>) -> [Asset] {
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
         guard let walk = fm.enumerator(at: root, includingPropertiesForKeys: keys,
                                        options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
         var found: [Asset] = []
         let base = root.standardizedFileURL.pathComponents.count
+        let checks = EditChecks.load(root)  // once per walk, for the badge on each edit
         for case let file as URL in walk {
             let parts = Array(file.standardizedFileURL.pathComponents.dropFirst(base))
             guard let first = parts.first else { continue }
@@ -98,14 +101,18 @@ final class AssetStore: ObservableObject {
             // A "_" folder (a render's work files) is not shown: do not walk into it either.
             if Self.skipFolders.contains(first) || (parts.count == 1 && first.hasPrefix("_")) { walk.skipDescendants(); continue }
             guard let v = try? file.resourceValues(forKeys: Set(keys)), v.isRegularFile == true,
-                  !first.hasPrefix("_"), !file.lastPathComponent.hasSuffix(".words.json") else { continue }  // transcripts
+                  !first.hasPrefix("_"), !file.lastPathComponent.hasSuffix(".words.json"),  // transcripts
+                  !file.lastPathComponent.hasSuffix(EditRecipe.suffix) else { continue }  // an edit's recipe
             let take = parts.count == 1 && takeFiles.contains(first)
+            let modified = v.contentModificationDate ?? .distantPast
             found.append(Asset(url: file,
                                group: take ? "takes" : parts.count == 1 ? "" : first,
                                name: parts.count == 1 ? first : parts.dropFirst().joined(separator: "/"),
                                size: Int64(v.fileSize ?? 0),
-                               modified: v.contentModificationDate ?? .distantPast,
-                               take: take))
+                               modified: modified,
+                               take: take,
+                               problems: first == "edits" && parts.count > 1
+                                   ? EditChecks.problems(EditChecks.state(checks[parts.joined(separator: "/")], modified: modified)) : 0))
             if found.count >= 1000 { break }
         }
         found.sort { ($0.group, $1.modified) < ($1.group, $0.modified) }  // newest first inside a group
@@ -316,19 +323,35 @@ struct AssetsPane: View {
         }
     }
 
+    /// What each post shows, read off the main thread: five post files and a look into edits/ (a
+    /// vertical post opens edits to find a tall one) ran on main on every session switch (2026-10-11).
     private func readPost() {
+        let session = doc.url
+        Task {
+            let found = await Task.detached(priority: .userInitiated) { Self.postState(session) }.value
+            if doc.url == session { show(found) }
+        }
+    }
+
+    private func show(_ found: PostState) {
+        if found.picks != postPick { postPick = found.picks }
+        if found.covers != coverRels { coverRels = found.covers }
+        if found.shows != postMedia { postMedia = found.shows }
+    }
+
+    typealias PostState = (shows: [PostPlatform: URL], picks: [PostPlatform: String], covers: Set<String>)
+
+    nonisolated static func postState(_ session: URL) -> PostState {
         var shows: [PostPlatform: URL] = [:], picks: [PostPlatform: String] = [:], covers: Set<String> = []
         for p in PostPlatform.allCases {
-            let c = PostFile.read(doc.url, p)
+            let c = PostFile.read(session, p)
             if let cover = c?.meta["cover"] { covers.insert(cover) }
             // A platform with no post yet shows nothing; LinkedIn is the post by default.
             guard p == .linkedin || c != nil else { continue }
             picks[p] = c?.media
-            shows[p] = PostFile.media(c, in: doc.url, p)?.standardizedFileURL
+            shows[p] = PostFile.media(c, in: session, p)?.standardizedFileURL
         }
-        if picks != postPick { postPick = picks }
-        if covers != coverRels { coverRels = covers }
-        if shows != postMedia { postMedia = shows }
+        return (shows, picks, covers)
     }
 
     /// The posts that show this file, in platform order.
@@ -341,7 +364,7 @@ struct AssetsPane: View {
     /// edit again; X shows LinkedIn's pick).
     private func pin(_ a: Asset, _ p: PostPlatform) {
         PostFile.pickMedia(postPick[p] == a.rel ? nil : a.rel, in: doc.url, p)
-        readPost()
+        show(Self.postState(doc.url))  // at once: the star follows the click
     }
 
     private var empty: some View { AssetsEmpty() }
@@ -365,6 +388,7 @@ struct AssetsPane: View {
         let open = Dictionary(grouping: comments.all.filter(\.open), by: \.file).mapValues(\.count)
         let isFolded = folded.contains(name)
         let all = showAll.contains(name) || items.count <= Self.firstFew
+        let app = app  // the right-click rows run outside body
         // The file in the player stays in view, even when it is past the first four.
         let shown = all ? items : Array(items.prefix(Self.firstFew))
             + items.dropFirst(Self.firstFew).filter { $0.url == app.preview || picked.contains($0.url) }
@@ -403,6 +427,7 @@ struct AssetsPane: View {
                                   pinned: PostPlatform.allCases.filter { postPick[$0] == a.rel },
                                   isCover: coverRels.contains(a.rel),
                                   onPin: a.kind == .video || a.kind == .image ? { pin(a, $0) } : nil)
+                            .equatable()
                             .background(GeometryReader { g in
                                 Color.clear.preference(key: TileFrames.self, value: [a.url: g.frame(in: .named("assets"))])
                             })
@@ -411,8 +436,8 @@ struct AssetsPane: View {
                             .gesture(TapGesture(count: 2).onEnded { NSWorkspace.shared.openSoon(a.url) })
                             .simultaneousGesture(TapGesture().onEnded { if NSApp.firstClick { click(a) } })
                             .onDrag { NSItemProvider(contentsOf: a.url) ?? NSItemProvider() }
-                            .contextMenu {
-                                if picked.count > 1 && picked.contains(a.url) { bulkMenu } else { menu(a) }
+                            .takesContextMenu {
+                                if picked.count > 1 && picked.contains(a.url) { bulkMenu(app) } else { menu(a, app) }
                             }
                     }
                 }
@@ -444,14 +469,15 @@ struct AssetsPane: View {
         app.chats.open = true
     }
 
-    @ViewBuilder private func menu(_ a: Asset) -> some View {
+    /// A tile's right-click rows (Takes menu kit, 2026-10-11).
+    @MenuBuilder private func menu(_ a: Asset, _ app: AppModel) -> [MenuItem] {
         if a.kind == .video || a.kind == .image || a.kind == .audio {
-            Button("Show in Player") { app.preview = a.url }
+            MenuButton("Show in Player", icon: "play.rectangle") { app.preview = a.url }
         }
         if a.kind == .video || a.kind == .image {
-            Menu("Use in Post") {
-                ForEach(PostPlatform.shown) { p in
-                    Toggle("\(p.name) post", isOn: Binding(get: { postPick[p] == a.rel }, set: { _ in pin(a, p) }))
+            MenuGroup("Use in Post", icon: "rectangle.stack") {
+                for p in PostPlatform.shown {
+                    MenuButton("\(p.name) post", checked: postPick[p] == a.rel) { pin(a, p) }
                 }
             }
         }
@@ -460,7 +486,7 @@ struct AssetsPane: View {
             // Images go to GPT Image directly, videos to Replicate or Higgsfield (VideoMaker).
             let maker = VideoMaker.current
             if a.kind == .image || maker != nil {
-                Button(a.kind == .video ? "Change with \(maker?.name ?? "")…" : "Change Image…") {
+                MenuButton(a.kind == .video ? "Change with \(maker?.name ?? "")…" : "Change Image…", icon: "wand.and.stars") {
                     let chat = app.chats.chat(doc.url)
                     chat.draft = a.kind == .video ? (maker?.changeDraft(a.rel) ?? "") : Higgsfield.imageDraft(a.rel)
                     app.chats.open = true
@@ -469,36 +495,35 @@ struct AssetsPane: View {
         }
         if a.kind == .image, Higgsfield.isDraft(a.url) {
             // A GPT Image draft (2026-10-09): the final is Nano Banana 2.1 at 4K, asked in the chat.
-            Button("Make Final") {
+            MenuButton("Make Final", icon: "sparkles") {
                 app.chats.chat(doc.url).send(Higgsfield.finalAsk(a.rel), title: doc.meta.title, onStage: nil)
                 app.chats.open = true
             }
         }
         if a.kind == .video || a.kind == .audio, Plugins.isInstalled("voices") {
             // ElevenLabs (2026-10-06): the ask goes in the chat box, the user finishes it.
-            Button("Fix Words…") { draft(ElevenLabs.fixDraft(a.rel)) }
-            Button("Change Voice…") { draft(ElevenLabs.voiceDraft(a.rel)) }
+            MenuButton("Fix Words…", icon: "text.badge.checkmark") { draft(ElevenLabs.fixDraft(a.rel)) }
+            MenuButton("Change Voice…", icon: "waveform") { draft(ElevenLabs.voiceDraft(a.rel)) }
         }
-        Button("Open") { NSWorkspace.shared.openSoon(a.url) }
-        Button("Reveal in Finder") { reveal(a.url) }
-        Button("Copy Path") {
+        MenuButton("Open", icon: "arrow.up.forward.app") { NSWorkspace.shared.openSoon(a.url) }
+        MenuButton("Reveal in Finder", icon: "folder") { reveal(a.url) }
+        MenuButton("Copy Path", icon: "doc.on.doc") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(a.url.path, forType: .string)
         }
         if a.kind == .video { saveMenu([a.url]) }
-        Divider()
+        MenuDivider()
         if a.take, let t = doc.meta.takes.first(where: { $0.file == a.name }) {
             // Through the session, so session.json drops it too (camera and screen go together).
-            Button("Move Take \(t.number) to Trash", role: .destructive) {
+            MenuButton("Move Take \(t.number) to Trash", icon: "trash", enabled: !app.isRecording, danger: true) {
                 if doc.meta.takes.contains(where: { $0.number == t.number && doc.fileURL($0) == app.preview }) {
                     app.preview = nil
                 }
                 doc.trashTake(t.number)
                 store.scan(doc)
             }
-            .disabled(app.isRecording)
         } else {
-            Button("Move to Trash", role: .destructive) {
+            MenuButton("Move to Trash", icon: "trash", danger: true) {
                 if app.preview == a.url { app.preview = nil }
                 try? FileManager.default.trashItem(at: a.url, resultingItemURL: nil)
                 store.scan(doc)
@@ -509,13 +534,13 @@ struct AssetsPane: View {
     // MARK: B-roll library
 
     /// Saves videos into a b-roll folder (an APFS clone). Gemini then describes and names each one.
-    @ViewBuilder private func saveMenu(_ urls: [URL]) -> some View {
-        Divider()
-        Menu(urls.count == 1 ? "Save to B-roll" : "Save \(urls.count) to B-roll") {
-            ForEach(brollFolders, id: \.self) { f in
-                Button(BrollFolder.title(f)) { saveBroll(urls, to: f) }
+    @MenuBuilder private func saveMenu(_ urls: [URL]) -> [MenuItem] {
+        MenuDivider()
+        MenuGroup(urls.count == 1 ? "Save to B-roll" : "Save \(urls.count) to B-roll", icon: "film.stack") {
+            for f in brollFolders {
+                MenuButton(BrollFolder.title(f), icon: "folder") { saveBroll(urls, to: f) }
             }
-            if brollFolders.isEmpty { Button("Clips") { saveBroll(urls, to: "Clips") } }
+            if brollFolders.isEmpty { MenuButton("Clips", icon: "folder") { saveBroll(urls, to: "Clips") } }
         }
     }
 
@@ -573,10 +598,11 @@ struct AssetsPane: View {
         }
     }
 
-    @ViewBuilder private var bulkMenu: some View {
+    /// Right-click on several picked tiles (Takes menu kit, 2026-10-11).
+    @MenuBuilder private func bulkMenu(_ app: AppModel) -> [MenuItem] {
         let n = picked.count
-        Button("Reveal \(n) in Finder") { NSWorkspace.shared.revealSoon(pickedAssets.map(\.url)) }
-        Button("Copy \(n) Paths") {
+        MenuButton("Reveal \(n) in Finder", icon: "folder") { NSWorkspace.shared.revealSoon(pickedAssets.map(\.url)) }
+        MenuButton("Copy \(n) Paths", icon: "doc.on.doc") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(pickedAssets.map(\.url.path).joined(separator: "\n"), forType: .string)
         }
@@ -584,11 +610,11 @@ struct AssetsPane: View {
         if !media.isEmpty {
             saveMenu(media)
         }
-                Button("Select All") { picked = Set(ordered.map(\.url)) }
-        Button("Deselect All") { picked = []; anchor = nil }
-        Divider()
-        Button("Move \(n) to Trash", role: .destructive) { trashPicked() }
-            .disabled(app.isRecording && pickedAssets.contains(where: \.take))
+        MenuButton("Select All", icon: "checkmark.circle") { picked = Set(ordered.map(\.url)) }
+        MenuButton("Deselect All", icon: "circle") { picked = []; anchor = nil }
+        MenuDivider()
+        MenuButton("Move \(n) to Trash", icon: "trash",
+                   enabled: !(app.isRecording && pickedAssets.contains(where: \.take)), danger: true) { trashPicked() }
     }
 
     /// Takes go through the session, so session.json drops them too (camera and screen together).
@@ -703,7 +729,15 @@ enum AssetPick {
     }
 }
 
-struct AssetTile: View {
+/// Equatable without its closure: the grid makes a new `onPin` on every body, so SwiftUI saw every
+/// tile as changed and rebuilt all of them on each redraw of the pane (2026-10-11). The closure acts
+/// on `asset` alone, so a tile with the same values does the same thing.
+struct AssetTile: View, Equatable {
+    static func == (a: AssetTile, b: AssetTile) -> Bool {
+        a.asset == b.asset && a.selected == b.selected && a.picked == b.picked && a.openComments == b.openComments
+            && a.inPost == b.inPost && a.pinned == b.pinned && a.isCover == b.isCover && (a.onPin == nil) == (b.onPin == nil)
+    }
+
     let asset: Asset
     let selected: Bool
     var picked = false
@@ -721,14 +755,17 @@ struct AssetTile: View {
     @State private var hover = false
     /// The AI model that made it (generated/), in small grey type.
     @State private var model: String?
+    /// An edit's line under its title: what changed in this version (its recipe's note).
+    @State private var note: String?
 
     init(asset: Asset, selected: Bool, picked: Bool = false, openComments: Int = 0, inPost: [PostPlatform] = [],
-         pinned: [PostPlatform] = [], isCover: Bool = false,
+         pinned: [PostPlatform] = [], isCover: Bool = false, note: String? = nil,
          onPin: ((PostPlatform) -> Void)? = nil) {
         self.asset = asset; self.selected = selected; self.picked = picked; self.openComments = openComments
         self.inPost = inPost; self.pinned = pinned; self.isCover = isCover; self.onPin = onPin
         _image = State(initialValue: Thumbs.shared.cached(asset))
         _duration = State(initialValue: Thumbs.shared.cachedDuration(asset))
+        _note = State(initialValue: note)
     }
 
     /// "On post" for LinkedIn alone, else the platforms: "On X", "On LinkedIn, X".
@@ -756,38 +793,45 @@ struct AssetTile: View {
             }
             .overlay(alignment: .topTrailing) {
                 HStack(spacing: 4) {
-                    if openComments > 0 {
-                        Label("\(openComments)", systemImage: "text.bubble.fill")
-                            .help("\(openComments) open comment\(openComments == 1 ? "" : "s") for Takes")
+                    // check_edit's problems: amber, apart from the comments and posts.
+                    if asset.problems > 0 {
+                        Label("\(asset.problems)", systemImage: "exclamationmark.triangle.fill")
+                            .padding(.horizontal, 7).padding(.vertical, 2)
+                            .background(Theme.warn, in: Capsule())
+                            .help(EditChecks.badgeHelp(asset.problems))
                     }
-                    if !inPost.isEmpty { Text(onPostLabel) }
-                    if isCover { Text("Cover") }
+                    if openComments > 0 || !inPost.isEmpty || isCover {
+                        HStack(spacing: 4) {
+                            if openComments > 0 {
+                                Label("\(openComments)", systemImage: "text.bubble.fill")
+                                    .help("\(openComments) open comment\(openComments == 1 ? "" : "s") for Takes")
+                            }
+                            if !inPost.isEmpty { Text(onPostLabel) }
+                            if isCover { Text("Cover") }
+                        }
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(Theme.accent, in: Capsule())
+                    }
                 }
                 .font(Theme.sans(10.5, .bold))
-                .padding(.horizontal, 7).padding(.vertical, 2)
-                .background(Theme.accent, in: Capsule())
                 .foregroundStyle(.white)
                 .padding(8)
-                .opacity(openComments > 0 || !inPost.isEmpty || isCover ? 1 : 0)
             }
             .overlay(alignment: .bottomTrailing) {
                 if let onPin, hover || !pinned.isEmpty {
-                    Menu {
-                        Section("Show on") {
-                            ForEach(PostPlatform.shown) { p in
-                                Toggle("\(p.name) post", isOn: Binding(get: { pinned.contains(p) }, set: { _ in onPin(p) }))
-                            }
-                        }
-                    } label: {
+                    let pinned = pinned
+                    TakesMenuButton(width: 200) {
                         Image(systemName: pinned.isEmpty ? "star" : "star.fill").font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(pinned.isEmpty ? .white : Theme.accent)
                             .frame(width: 26, height: 26)
                             .background(Color.black.opacity(0.45), in: Circle())
                             .contentShape(Circle())
+                    } content: {
+                        MenuLabel("Show on")
+                        for p in PostPlatform.shown {
+                            MenuButton("\(p.name) post", checked: pinned.contains(p)) { onPin(p) }
+                        }
                     }
-                    .menuStyle(.button)
-                    .buttonStyle(.plain)
-                    .menuIndicator(.hidden)
                     .fixedSize()
                     .padding(8)
                     .transition(.opacity)
@@ -802,23 +846,36 @@ struct AssetTile: View {
                         .padding(7)
                 }
             }
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(fileTitle).font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.ink)
-                    .lineLimit(1).truncationMode(.middle)
-                Spacer(minLength: 0)
-                if let model {
-                    Text(model).font(Theme.sans(11)).foregroundStyle(Theme.faint).lineLimit(1)
-                        .layoutPriority(-1)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(fileTitle).font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.ink)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 0)
+                    if let model {
+                        Text(model).font(Theme.sans(11)).foregroundStyle(Theme.faint).lineLimit(1)
+                            .layoutPriority(-1)
+                    }
+                    if let badge { Text(badge).font(Theme.mono(12)).foregroundStyle(Theme.faint).fixedSize() }
                 }
-                if let badge { Text(badge).font(Theme.mono(12)).foregroundStyle(Theme.faint).fixedSize() }
+                // Every edit tile has this line, so the tiles in a row keep one height.
+                if asset.group == "edits" {
+                    Text(note ?? " ").font(Theme.sans(11)).foregroundStyle(Theme.faint)
+                        .lineLimit(1).truncationMode(.tail)
+                        .opacity(note == nil ? 0 : 1)
+                }
             }
         }
         .contentShape(Rectangle())
         .onHover { hover = $0 }
         .animation(Theme.motion, value: hover)
-        .help("\(asset.url.path)\n\(ByteCountFormatter.string(fromByteCount: asset.size, countStyle: .file)) · \(SessionList.when(asset.modified))\(model.map { "\nMade with \($0)" } ?? "")")
+        .help("\(asset.url.path)\n\(ByteCountFormatter.string(fromByteCount: asset.size, countStyle: .file)) · \(SessionList.when(asset.modified))\(model.map { "\nMade with \($0)" } ?? "")\(note.map { "\nWhat changed: \($0)" } ?? "")")
         .task(id: asset) {
             model = asset.group == "generated" ? MadeWith.label(for: asset.url) : nil
+            if asset.group == "edits" {
+                let u = asset.url
+                let found = await Task.detached(priority: .utility) { EditRecipe.note(for: u) }.value
+                if found != note { withAnimation(Theme.motion) { note = found } }
+            }
             if let hit = Thumbs.shared.cached(asset) {
                 if image !== hit { image = hit }
                 if asset.kind == .video || asset.kind == .audio { duration = await Thumbs.shared.duration(asset) }

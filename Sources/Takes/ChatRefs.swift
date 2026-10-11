@@ -18,7 +18,7 @@ enum ChatRefs {
     static let howTo = """
     To show the user a file (an edit, a take, a still, a thumbnail, a post file), put its absolute \
     path alone on its own line. To show a published LinkedIn or X post, put its URL alone on its \
-    own line. The panel turns each such line into a preview card he can click, so whenever you \
+    own line. The panel turns each such line into a preview card the user can click, so whenever you \
     name a specific video, image or post, add its line right after.
     """
 

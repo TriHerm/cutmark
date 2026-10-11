@@ -60,15 +60,20 @@ final class PostQueue: ObservableObject {
         for project in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? []
         where !project.lastPathComponent.hasPrefix("_") {
             for s in (try? fm.contentsOfDirectory(at: project, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? [] {
+                var title: String?   // read once per session, not once per post
                 for p in PostPlatform.shown {
                     guard let c = PostFile.read(s, p) else { continue }
+                    if title == nil { title = Self.title(s) }
                     found.append(QueuedPost(session: s, platform: p, project: project.lastPathComponent,
-                                            title: Self.title(s), content: c))
+                                            title: title ?? s.lastPathComponent, content: c))
                 }
             }
         }
-        found.sort { ($0.content.at ?? .distantFuture, $0.title) < ($1.content.at ?? .distantFuture, $1.title) }
-        return found
+        // `at` parses a date each time it is read: once per post, not twice per comparison
+        // (1.6 s of a 1.8 s scan at 1,000 sessions, 2026-10-11).
+        return found.map { ($0, $0.content.at ?? .distantFuture) }
+            .sorted { ($0.1, $0.0.title) < ($1.1, $1.0.title) }
+            .map(\.0)
     }
 
     /// Called every 15 s: a post whose time came goes from scheduled to posted.

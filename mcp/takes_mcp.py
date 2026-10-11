@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """MCP server for Takes (stdio, stdlib only).
 
-Lets Claude Code manage the Takes library: projects, sessions, scripts, takes.
+Lets any MCP agent (Claude Code, Codex, Cursor, Gemini CLI, Antigravity, opencode, pi, Claude Desktop) manage
+the Takes library: projects, sessions, scripts, takes.
 It writes the same on-disk format as the app (see Sources/Takes/Library.swift).
 The app rescans every 2 seconds, so changes show up without a click.
 
-Register:  claude mcp add takes --scope user -- python3 <path>/takes_mcp.py
+Register:  python3 <path>/takes_mcp.py --setup   (adds it to every agent on this Mac)
+       or:  claude mcp add takes --scope user -- python3 <path>/takes_mcp.py
 """
+import array
 import concurrent.futures
 import glob
 import hashlib
@@ -15,7 +18,10 @@ import math
 import os
 import random
 import re
+import secrets
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -23,6 +29,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.parse
+import wave
 from datetime import datetime, timedelta, timezone
 
 PROTOCOL = "2025-06-18"
@@ -66,18 +73,83 @@ def parse_iso(s):
         return None
 
 
+def lib_parts(path, r=None):
+    """The parts of path below the library root, [] for the root itself, or None when path is not inside
+    the library. Lexical: '..' cannot climb out, while a folder the user links into the library still counts
+    as inside (audit #10, 2026-10-11)."""
+    r = r or root()
+    p = os.path.normpath(os.path.abspath(os.path.expanduser(path)))
+    for base in dict.fromkeys([os.path.normpath(os.path.abspath(os.path.expanduser(r))), os.path.realpath(r)]):
+        if p == base:
+            return []
+        if p.startswith(base.rstrip(os.sep) + os.sep):
+            return p[len(base.rstrip(os.sep)) + 1:].split(os.sep)
+    return None
+
+
+def inside_root(path, r=None):
+    """True when path is the library root or inside it."""
+    return lib_parts(path, r) is not None
+
+
+def is_session_path(path):
+    """A session is a folder inside a project: <root>/<project>/<session>. The root and a project are not."""
+    parts = lib_parts(path)
+    return parts is not None and len(parts) == 2
+
+
+def project_name(name):
+    """A project folder name from the caller's name: '/' becomes '-'. Empty, '.' and '..' are refused, so a
+    project can never be the root or a folder outside it."""
+    name = str(name or "").replace("/", "-").strip()
+    if name in ("", ".", ".."):
+        raise ValueError("Give a project name, e.g. 'LinkedIn Posts'.")
+    return name
+
+
+RESOLVED = {}  # ref -> folder, for refs this tool call found by an old path (handle adds resolved_from)
+
+
 def resolve_session(ref):
-    """Accepts an absolute path or 'Project/folder' relative to the library root."""
+    """A session folder from an absolute path, 'Project/folder', the session id, or an old path
+    (2026-10-11): a renamed or moved session keeps working for the agent that still has its old path."""
+    ref = str(ref or "").strip()
     path = ref if os.path.isabs(ref) else os.path.join(root(), ref)
     path = os.path.normpath(os.path.expanduser(path))
-    if not os.path.isdir(path):
-        raise ValueError("No session folder at %s" % path)
-    return path
+    if ref and os.path.isdir(path):
+        # '', '.', 'Proj' or 'Proj/..' used to resolve to the root or a whole project, and '../x' to a folder
+        # outside the library: trash_sessions or update_session then acted on all of it (audit #10).
+        if not is_session_path(path):
+            raise ValueError("Not a session: %s. A session is a folder inside a project in the library, e.g. "
+                             "'LinkedIn Posts/2026-10-11-my-post'; list_sessions gives them." % ref)
+        return path
+    if re.fullmatch(r"[0-9a-f]{12}", ref):
+        hits = sessions_with_id(ref)
+        if len(hits) > 1:
+            raise ValueError("Two sessions have the id %s: %s, %s. Use the path." % (ref, hits[0], hits[1]))
+        if hits:
+            return hits[0]
+    found = follow_moves(path) if ref else None
+    if not found and ref and not os.path.isdir(os.path.dirname(path)):
+        # The project has a new name: the folder name alone, when one session has it.
+        name = os.path.basename(path)
+        hits = [p for p in glob.glob(os.path.join(glob.escape(root()), "*", glob.escape(name)))
+                if os.path.isdir(p) and not os.path.basename(os.path.dirname(p)).startswith((".", "_"))]
+        found = hits[0] if len(hits) == 1 else None
+    if found and is_session_path(found):
+        RESOLVED[ref] = found
+        return found
+    raise ValueError("No session at %s. It may have been renamed: call list_sessions, or pass the session id "
+                     "from get_session." % path)
 
 
 def resolve_project(name):
-    path = name if os.path.isabs(name) else os.path.join(root(), name)
-    path = os.path.normpath(path)
+    name = str(name or "").strip()
+    path = os.path.normpath(name if os.path.isabs(name) else os.path.join(root(), name))
+    parts = lib_parts(path)
+    if not name or parts is None or len(parts) != 1:
+        raise ValueError("No project '%s'. A project is a folder in the Takes library: use list_projects or "
+                         "create_project." % name)
     if not os.path.isdir(path):
         raise ValueError("No project '%s'. Use list_projects or create_project." % name)
     return path
@@ -106,6 +178,7 @@ def clock(sec):
 
 
 def write_meta(session, meta):
+    meta.setdefault("id", session_id(session, meta))
     with open(os.path.join(session, "session.json"), "w") as f:
         json.dump(meta, f, indent=2, sort_keys=True)
     # SESSION.md, same shape the app writes.
@@ -149,6 +222,169 @@ def unique(path):
     return path
 
 
+# ---------- session id and old paths (2026-10-11, same files as Sources/Takes/Library.swift) ----------
+#
+# session.json "id": 12 hex characters, sha1 of createdAt (the raw string) and the folder's inode. The
+# inode stays on a rename and on a move inside the volume, so the app and the server get the same id
+# for an old session without a write. Once written, the stored id wins.
+# <root>/.moves.json: {"<old Project/folder>": "<new Project/folder>"}, written by every folder move,
+# so an old path still finds its session.
+
+MOVES_FILE = ".moves.json"
+MOVES_MAX = 500
+FS_TYPES = {}  # library root -> file system name
+
+
+def lib_root(s):
+    """The library a session folder is in: two folders up."""
+    return os.path.dirname(os.path.dirname(os.path.normpath(os.path.abspath(s))))
+
+
+def fs_type(path):
+    """'apfs', 'exfat', 'smbfs', ... from statfs; None when it cannot tell."""
+    import ctypes
+    import ctypes.util
+    if path in FS_TYPES:
+        return FS_TYPES[path]
+    kind = None
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        buf = ctypes.create_string_buffer(4096)  # struct statfs: f_fstypename is 16 bytes at offset 72
+        if libc.statfs(path.encode(), buf) == 0:
+            kind = buf.raw[72:88].split(b"\0")[0].decode() or None
+    except Exception:
+        pass
+    FS_TYPES[path] = kind
+    return kind
+
+
+def raw_created(s):
+    """createdAt as session.json spells it, else the folder's birth time (what read_meta gives)."""
+    try:
+        with open(os.path.join(s, "session.json")) as f:
+            c = json.load(f).get("createdAt")
+        if isinstance(c, str) and c:
+            return c
+    except (OSError, ValueError, AttributeError):
+        pass
+    created = datetime.fromtimestamp(os.stat(s).st_birthtime, timezone.utc)
+    return created.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def derived_id(s, created=None):
+    created = created if isinstance(created, str) and created else raw_created(s)
+    return hashlib.sha1(("%s:%d" % (created, os.stat(s).st_ino)).encode()).hexdigest()[:12]
+
+
+def session_id(s, meta=None):
+    """The stored id, else the one derived from createdAt and the folder's inode."""
+    meta = meta if meta is not None else read_meta(s)
+    sid = meta.get("id")
+    return sid if isinstance(sid, str) and sid else derived_id(s, meta.get("createdAt"))
+
+
+def shown_id(s, meta=None):
+    """The id tools show. Off APFS an inode may change on remount: only a stored id is shown there."""
+    meta = meta if meta is not None else read_meta(s)
+    if meta.get("id") or fs_type(lib_root(s)) in (None, "apfs"):
+        return session_id(s, meta)
+    return None
+
+
+def all_session_folders(r=None):
+    r = r or root()
+    return [p for p in glob.glob(os.path.join(glob.escape(r), "*", "*"))
+            if os.path.isdir(p) and not os.path.basename(os.path.dirname(p)).startswith((".", "_"))
+            and not os.path.basename(p).startswith((".", "_"))]
+
+
+def sessions_with_id(sid):
+    out = []
+    for p in all_session_folders():
+        try:
+            if session_id(p) == sid:
+                out.append(p)
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def read_moves(r=None):
+    try:
+        with open(os.path.join(r or root(), MOVES_FILE)) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def record_move(old, new):
+    """One folder move into <root>/.moves.json. A move back to a name that is a key removes that key
+    first, so no loop forms (A -> B -> A)."""
+    r = lib_root(new)
+    a, b = os.path.relpath(old, r), os.path.relpath(new, r)
+    if a == b:
+        return
+    path = os.path.join(r, MOVES_FILE)
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                d = json.load(f)
+            if not isinstance(d, dict):
+                raise ValueError
+        except (OSError, ValueError):
+            return  # never write over a file that does not read
+    else:
+        d = {}
+    d.pop(b, None)
+    d.pop(a, None)
+    d[a] = b
+    while len(d) > MOVES_MAX:
+        d.pop(next(iter(d)))
+    with open(path + ".tmp", "w") as f:
+        json.dump(d, f, indent=1, ensure_ascii=False)
+    os.replace(path + ".tmp", path)
+
+
+def follow_moves(path, r=None):
+    """The folder an old path moved to, through .moves.json (up to 20 steps), or None."""
+    r = r or root()
+    rel = os.path.relpath(path, r)
+    if rel.startswith(".."):
+        return None
+    moves, seen = read_moves(r), set()
+    for _ in range(20):
+        if rel not in moves or rel in seen:
+            return None
+        seen.add(rel)
+        rel = moves[rel]
+        p = os.path.join(r, rel)
+        if os.path.isdir(p):
+            return p
+    return None
+
+
+def moved_away(path, sid=None):
+    """True when path is an old name of another session that still exists: a new folder must not take
+    it. A name that leads to session sid itself (rename back, Undo) or to nothing (trashed) is free."""
+    to = follow_moves(path, lib_root(path))
+    if not to:
+        return False
+    try:
+        return session_id(to) != sid
+    except (OSError, ValueError):
+        return True
+
+
+def free_session_path(path, sid=None):
+    """unique() for session folders: also skips names other sessions moved away from."""
+    base, n = path, 2
+    while os.path.exists(path) or moved_away(path, sid):
+        path = "%s-%d" % (base, n)
+        n += 1
+    return path
+
+
 def trash(paths):
     if paths:
         subprocess.run(["/usr/bin/trash"] + list(paths), check=True, capture_output=True)
@@ -160,8 +396,8 @@ def session_summary(session):
     numbers = {t["number"] for t in takes}
     keepers = {t["number"] for t in takes if t.get("keeper")}
     script = os.path.join(session, "script.md")
-    return {"session": os.path.relpath(session, root()), "path": session, "title": meta["title"],
-            "created": meta["createdAt"], "takes": len(numbers), "keepers": len(keepers),
+    return {"session": os.path.relpath(session, root()), "path": session, "id": shown_id(session, meta),
+            "title": meta["title"], "created": meta["createdAt"], "takes": len(numbers), "keepers": len(keepers),
             "published": meta.get("published") or False,
             "has_script": os.path.exists(script) and os.path.getsize(script) > 0}
 
@@ -292,9 +528,7 @@ def t_list_projects(_):
 
 
 def t_create_project(a):
-    name = a["name"].replace("/", "-").strip()
-    if not name:
-        raise ValueError("Empty project name.")
+    name = project_name(a["name"])
     p = os.path.join(root(), name)
     os.makedirs(p, exist_ok=True)
     return {"project": name, "path": p}
@@ -311,39 +545,59 @@ def t_get_session(a):
     script = open(script_path).read() if os.path.exists(script_path) else ""
     takes = []
     cuts = read_cuts(s)
+    ready, jobs = {}, None
     for t in sorted(meta.get("takes", []), key=lambda t: (t["number"], t["kind"])):
+        n = t["number"]
+        if n not in ready:
+            # Word times on the video clock (prepare_take). Read from the words file only: no ffprobe here.
+            g = [x for x in meta.get("takes", []) if x["number"] == n]
+            vt = next((x for x in g if x["kind"] == "camera"), g[0])
+            doc = words_doc(os.path.join(s, vt["file"]))
+            if is_ready(doc):
+                ready[n] = {"edit_ready": True, "audio_offset_s": doc.get("audio_offset_s")}
+            else:
+                jobs = prepare_jobs(s) if jobs is None else jobs
+                st = prepare_state(s, n, jobs)
+                ready[n] = dict({"edit_ready": False}, **({"prepare": "running"} if st == "running" else
+                                                            {"prepare_error": st[1]} if isinstance(st, tuple) else {}))
         v = voice_view(s, t)
-        c = cuts.get(str(t["number"]))
+        c = cuts.get(str(n))
         c = {k: v for k, v in c.items() if k not in ("pid", "model")} if c else None
-        takes.append(dict(t, path=os.path.join(s, t["file"]), **({"voice": v} if v else {}),
+        takes.append(dict(t, path=os.path.join(s, t["file"]), **ready[n], **({"voice": v} if v else {}),
                           **({"best_cut": c} if c else {}), **take_said(s, t, meta.get("takes", []))))
-    return {"session": os.path.relpath(s, root()), "path": s, "title": meta["title"],
-            "created": meta["createdAt"], "script": script, "variants": variants(s),
-            "favorite_script": meta.get("favorite"),
-            "published": meta.get("published") or False,
-            "style": dict(zip(("name", "picked_by"), style_pick(os.path.dirname(s), s))),
-            "history_versions": len(history(s)), "takes": takes,
-            "assets": assets(s, {t["file"] for t in meta.get("takes", [])}),
-            "post": post_overview(s),
-            "x_post": post_overview(s, "x"),
-            "youtube_post": post_overview(s, "youtube"),
-            "vertical_post": post_overview(s, "vertical"),
-            **({"article": post_overview(s, "article")} if BLOG else {}),
-            "hooks": read_hooks(s).get("hooks", []),
-            "storyboard": storyboard_view(s),
-            "hook_in_script": next((h["id"] for h in read_hooks(s).get("hooks", [])
-                                    if h["text"].strip() == first_paragraph(script)), None),
-            "open_comments": sum(1 for c in read_comments(s)["comments"] if c.get("status") != "resolved"),
-            "folders": FOLDERS,
-            "warnings": misplaced(s),
-            "library": "Style for this project: get_library with project '%s'." % os.path.basename(os.path.dirname(s)),
-            **({"posting_plan": plan_brief()} if read_plan() else {}),
-            "manifest": os.path.join(s, "SESSION.md")}
+    checks = check_states(s)
+    out = {"session": os.path.relpath(s, root()), "path": s, "id": shown_id(s, meta), "title": meta["title"],
+           "created": meta["createdAt"], "script": script, "variants": variants(s),
+           "favorite_script": meta.get("favorite"),
+           "published": meta.get("published") or False,
+           "style": dict(zip(("name", "picked_by"), style_pick(os.path.dirname(s), s))),
+           "history_versions": len(history(s)), "takes": takes,
+           "assets": assets(s, {t["file"] for t in meta.get("takes", [])}),
+           "post": post_overview(s),
+           "x_post": post_overview(s, "x"),
+           "youtube_post": post_overview(s, "youtube"),
+           "vertical_post": post_overview(s, "vertical"),
+           **({"article": post_overview(s, "article")} if BLOG else {}),
+           "hooks": read_hooks(s).get("hooks", []),
+           "storyboard": storyboard_view(s),
+           **session_recipes(s),
+           "hook_in_script": next((h["id"] for h in read_hooks(s).get("hooks", [])
+                                   if h["text"].strip() == first_paragraph(script)), None),
+           "open_comments": sum(1 for c in read_comments(s)["comments"] if c.get("status") != "resolved"),
+           **({"checks": checks} if checks else {}),
+           "folders": FOLDERS,
+           "warnings": misplaced(s),
+           "library": "Style for this project: get_library with project '%s'." % os.path.basename(os.path.dirname(s)),
+           **({"posting_plan": plan_brief()} if read_plan() else {}),
+           "manifest": os.path.join(s, "SESSION.md")}
+    # The rules for what comes next on this session, once per chat: no refusal later (2026-10-10).
+    return with_rules(out, *next_steps(s))
 
 
 # Where each kind of file goes. The one source of truth for Claude; the app shows the same folders.
 FOLDERS = {
-    "edits/": "Edited videos only, as <slug>-vN.mp4. Get the path from next_path kind=edit.",
+    "edits/": "Edited videos only, as <slug>-vN.mp4, each with its recipe <slug>-vN.recipe.json. Make them with "
+              "render_edit + publish_edit.",
     "thumbnails/": "Thumbnail images for an edit, as <slug>-vN.png (options: <slug>-<option>-vN.png). "
                    "Get the path from next_path kind=thumbnail.",
     "stills/": "Frames the user saved from a paused video. Read them; never write here.",
@@ -352,7 +606,10 @@ FOLDERS = {
     "assets/": "Files the user dropped on the Assets tab. Read them; never write here.",
     "(library)": "Reusable style (logos, icons, images, motion graphics, fonts, colours, type) goes in the "
                  "style or project library, never in a session. See get_library.",
-    "(working files)": "Scratch renders, contact sheets and project files stay outside the session folder.",
+    "_work/": "Cuts of cut_take and rough_cut, as <name>-vN.mp4 with .wav, .words.json and .json. Takes "
+              "keeps the newest 5 of a name. List the folder to find an earlier cut. Write here only with those tools.",
+    "_edit/": "_edit/<name>/ holds an edit's sources and renders. Takes manages it. Other scratch stays outside the "
+              "session.",
 }
 
 
@@ -364,8 +621,8 @@ def misplaced(s):
         if not os.path.isdir(d):
             continue
         for f in sorted(os.listdir(d)):
-            if f.startswith(".") or f.endswith((".words.json", ".srt", ".vtt")):
-                continue  # transcripts sit next to their video
+            if f.startswith(".") or f.endswith((".words.json", ".srt", ".vtt", RECIPE_EXT)):
+                continue  # transcripts and recipes sit next to their video
             kind = media_kind(f)
             if kind not in want:
                 out.append("%s/%s is not %s. %s" % (folder, f, what,
@@ -395,20 +652,17 @@ def split_version(name):
 
 
 def versions_in(d, base):
-    """Every version number of <base>-vN.* in folder d."""
+    """Every version number of <base>-vN.* in folder d. A <base>-vN.recipe.json with no video yet is a
+    claim of publish_edit: that N is taken too."""
     if not os.path.isdir(d):
         return []
-    return sorted(v for b, v, _ in (split_version(f) for f in os.listdir(d)) if b == base and v)
+    return sorted({v for b, v in (edit_name_of(f) for f in os.listdir(d)) if b == base and v})
 
 
 def t_next_path(a):
     """The next free versioned path, so every export lands in the right folder with the right name."""
     kind = a["kind"]
     base = slug(split_version(a["name"])[0]) or "untitled"
-    if kind == "edit":
-        need_rules(*EDIT_AREAS)
-    elif kind == "thumbnail":
-        need_rules("thumbnail")
     if kind in ("edit", "thumbnail"):
         s = resolve_session(a["session"])
         d = os.path.join(s, "edits" if kind == "edit" else "thumbnails")
@@ -425,12 +679,23 @@ def t_next_path(a):
         raise ValueError("kind is edit, thumbnail or library.")
     ext = ext if ext.startswith(".") else "." + ext
     have = versions_in(d, base)
+    if kind in ("edit", "thumbnail"):  # a version a running job will write is taken too
+        folder = os.path.basename(d)
+        have = sorted(set(have) | {v for b, v, _ in (split_version(os.path.basename(o)) for o in claimed_outputs(s)
+                                                     if os.path.dirname(o) == folder) if b == base and v})
     n = (have[-1] if have else 0) + 1
     os.makedirs(d, exist_ok=True)
     prev = next((os.path.join(d, f) for f in sorted(os.listdir(d))
-                 if split_version(f)[:2] == (base, have[-1])), None) if have else None
-    return {"path": os.path.join(d, "%s-v%d%s" % (base, n, ext)), "version": n, "previous": prev,
-            "note": "Write the file to exactly this path. Never overwrite an earlier version."}
+                 if split_version(f)[:2] == (base, have[-1]) and not f.endswith(RECIPE_EXT)), None) if have else None
+    out = {"path": os.path.join(d, "%s-v%d%s" % (base, n, ext)), "version": n, "previous": prev,
+           "note": "Write the file to exactly this path. Never overwrite an earlier version."
+                   + (" For an edit, render_edit + publish_edit do this for you and keep the recipe." if kind == "edit" else "")}
+    # A path refuses nothing: the rules come with it, once per chat (2026-10-10).
+    if kind == "edit":
+        return with_rules(out, *EDIT_AREAS)
+    if kind == "thumbnail":
+        return with_rules(out, "thumbnail")
+    return out
 
 
 # ---------- style library ----------
@@ -735,7 +1000,7 @@ def t_create_style(a):
                      "the title card, a caption and the lower third on it. Every style uses the same sample, so "
                      "The user compares like with like. No sample yet: cut 6 s of the user talking from a recent "
                      "keeper take to that path first." % (d, sample),
-                     "Tell the user it is on the Styles board. He keeps it there, or trashes it."]}
+                     "Tell the user it is on the Styles board. The user keeps it there, or trashes it."]}
 
 
 LIBRARY_LAYOUT = {
@@ -794,14 +1059,15 @@ def t_copy_library(a):
 
 def assets(s, take_files):
     """Every file the app shows on the session's Assets tab: stills/, edits/, assets/ and the rest."""
-    skip_files = {"script.md", "session.json", "SESSION.md", ".order.json", "hooks.json", "comments.json", "evergreen.json", "cuts.json"}
+    skip_files = {"script.md", "session.json", "SESSION.md", ".order.json", "hooks.json", "comments.json", "evergreen.json", "cuts.json", "checks.json"}
     out = []
     for dirpath, dirs, files in os.walk(s):
         rel = os.path.relpath(dirpath, s)
         top = "" if rel == "." else rel.split(os.sep)[0]
-        dirs[:] = [d for d in dirs if not d.startswith(".") and not (rel == "." and d in ("variants", "history", "comments", "posts", "voice", "storyboard"))]
+        dirs[:] = [d for d in dirs if not d.startswith(".") and not (rel == "." and (
+            d.startswith("_") or d in ("variants", "history", "comments", "posts", "voice", "storyboard")))]
         for f in files:
-            if f.startswith(".") or f.endswith(".words.json") or (rel == "." and (f in skip_files or f in take_files)):
+            if f.startswith(".") or f.endswith((".words.json", RECIPE_EXT)) or (rel == "." and (f in skip_files or f in take_files)):
                 continue
             path = os.path.join(dirpath, f)
             out.append({"folder": top, "file": os.path.relpath(path, s), "path": path,
@@ -943,6 +1209,109 @@ def cues(text):
     return out
 
 
+# Take time is video time (2026-10-11). A camera take's audio starts 0.16-0.24 s after its first
+# frame. A WAV made with plain -vn starts at the first sound, so its times run that much early (the
+# voice played 5 frames early). Every WAV taken from a take goes through extract_voice: second 0 of the
+# WAV is frame 0 of the video. A voice WAV made before then is paired with take times by voice_offset.
+
+VIDEO_CLOCK = "aresample=async=1:first_pts=0"   # pads or trims the start: the audio runs on video time
+CLOCKS = {}  # (path, size, mtime) -> take_clock
+
+
+def extract_voice(src, out, rate=48000, channels=1, codec="pcm_f32le", extra_af=None, extra=()):
+    """A take's sound as a WAV on the video clock: second 0 of the WAV is frame 0 of the video."""
+    ff("-i", src, "-vn", "-af", VIDEO_CLOCK + ("," + extra_af if extra_af else ""), "-ac", channels, "-ar", rate,
+       "-c:a", codec, *extra, out)
+
+
+def frac(x):
+    try:
+        a, b = str(x).split("/") if "/" in str(x) else (x, 1)
+        return float(a) / float(b) if float(b) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def take_clock(path):
+    """{audio_offset_s, fps, fps_mode, duration, width, height, pix_fmt, color...} of a video, None when it
+    has no video (or cannot be read). audio_offset_s is None without sound."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (path, st.st_size, st.st_mtime)
+    if key in CLOCKS:
+        return dict(CLOCKS[key])
+    probe = find_tool("ffprobe")
+    if not probe:
+        raise ValueError("ffprobe is not installed. Open Takes and click Finish setup, or run brew install ffmpeg.")
+    r = subprocess.run([probe, "-v", "error", "-show_entries",
+                        "stream=codec_type,start_time,r_frame_rate,avg_frame_rate,width,height,pix_fmt,channels,"
+                        "color_primaries,color_transfer,color_space:stream_side_data=rotation",
+                        "-show_entries", "format=duration", "-of", "json", path],
+                       capture_output=True, text=True, timeout=60)
+    try:
+        d = json.loads(r.stdout or "{}")
+    except ValueError:
+        return None
+    streams = d.get("streams") or []
+    v = next((x for x in streams if x.get("codec_type") == "video"), None)
+    a = next((x for x in streams if x.get("codec_type") == "audio"), None)
+    if not v:
+        return None
+    rate, avg = frac(v.get("r_frame_rate")), frac(v.get("avg_frame_rate"))
+    fps = round(rate) if 24 <= rate <= 60 else min((24, 25, 30, 50, 60), key=lambda f: abs(f - (avg or 30)))
+    try:
+        dur = float((d.get("format") or {}).get("duration"))
+    except (TypeError, ValueError):
+        dur = None
+    w, h = v.get("width"), v.get("height")
+    rot = next((x.get("rotation") for x in v.get("side_data_list") or [] if "rotation" in x), 0) or 0
+    if w and h and abs(int(rot)) % 180 == 90:
+        w, h = h, w
+    off = None
+    if a:
+        off = round(float(a.get("start_time") or 0) - float(v.get("start_time") or 0), 3)
+    out = {"audio_offset_s": off, "fps": fps,
+           "fps_mode": "cfr" if v.get("r_frame_rate") == v.get("avg_frame_rate") or abs(rate - avg) < 1e-6 else "vfr",
+           "duration": round(dur, 3) if dur else None, "width": w, "height": h, "pix_fmt": v.get("pix_fmt"),
+           "channels": (a or {}).get("channels")}
+    for k in ("color_primaries", "color_transfer", "color_space"):
+        if v.get(k) and v[k] != "unknown":
+            out[k] = v[k]
+    CLOCKS[key] = out
+    return dict(out)
+
+
+def words_doc(video):
+    """The words file next to a video as a dict, {} when there is none, None when it does not read."""
+    p = os.path.splitext(video)[0] + ".words.json"
+    if not os.path.exists(p):
+        return {}
+    try:
+        with open(p) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return d if isinstance(d, dict) else {"words": d} if isinstance(d, list) else None
+
+
+def voice_offset(s, key):
+    """Seconds a voice WAV starts after video t=0: 0 for 'clock: video', else the take's audio offset."""
+    v = read_voice(s, key) or {}
+    if v.get("clock") == "video":
+        return 0.0
+    m = re.match(r"take-(\d+)-(camera|screen)$", key)
+    if not m:
+        return 0.0
+    try:
+        t = voice_take(s, int(m.group(1)), m.group(2))
+    except ValueError:
+        return 0.0
+    c = take_clock(os.path.join(s, t["file"]))
+    return float((c or {}).get("audio_offset_s") or 0.0)
+
+
 def said(words, start, end, pad=1.0):
     """The words spoken from pad seconds before start to pad seconds after end."""
     lo, hi = start - pad, (end if end is not None else start) + pad
@@ -1001,11 +1370,17 @@ def t_reply_comment(a):
             raise ValueError("Give each resolved comment a lesson (%s): a rule id from get_rules when an "
                              "existing rule covers it, 'new' with rule={area, text} when it applies to the next "
                              "videos too, or 'one-off'." % ", ".join(bare))
-    done = []
+    done, notes = [], {}
     for r in items:
         c = by_id[r["id"]]
         if lessons is not None and r.get("lesson"):
-            apply_lesson(lessons, s, c, r)
+            one = {"merge": notes["merge"]} if "merge" in notes else {}  # one merge note for all rules
+            apply_lesson(lessons, s, c, r, one)
+            if "merge" in one:
+                notes["merge"] = one["merge"]
+            for k, v in one.items():
+                if v not in notes.get(k, ""):
+                    notes[k] = (notes[k] + " " + v) if k in notes else v
         if r.get("text", "").strip() or r.get("fixed_in"):
             reply = {"by": "claude", "text": r.get("text", "").strip(), "at": now_iso()}
             if r.get("fixed_in"):
@@ -1024,7 +1399,8 @@ def t_reply_comment(a):
         write_lessons(lessons)
     write_comments(s, data)
     views = [comment_view(s, c) for c in done]
-    return views[0] if len(views) == 1 and not a.get("replies") else {"updated": views}
+    out = views[0] if len(views) == 1 and not a.get("replies") else {"updated": views}
+    return {**out, **notes}
 
 
 # ---------- lessons: what the agent learned from the user's comments ----------
@@ -1037,12 +1413,17 @@ def t_reply_comment(a):
 # the agent made the same mistake again. The Feedback board shows the rules (the user edits, turns
 # off or deletes them) and how the number of comments per video changes. A rule with a check is
 # measured by check_edit, so it no longer rests on the agent's memory.
-# Rules stay few and short (AREA_MAX per area, RULE_MAX characters): every chat reads them.
+# Rules stay few and short (AREA_MAX per area, RULE_MAX characters): every chat reads them. Longer
+# words go in details (DETAILS_MAX). In a full area a new rule comes with merge: {into, text, was}
+# and waits on the Feedback board: The user merges it (the target gets the text, this one turns off with
+# merged_into) or keeps both (2026-10-10). The app's LearnedRule has the same fields.
 AREAS = ["storyboard", "script", "sound", "cut", "picture", "captions", "graphics", "thumbnail",
          "post-all", "post-linkedin", "post-x", "post-youtube", "post-vertical", "other"]
 EDIT_AREAS = ["sound", "cut", "picture", "captions", "graphics"]
 AREA_MAX = 10
 RULE_MAX = 220
+WAITING_MAX = 5  # rules waiting for the user's merge, per area
+DETAILS_MAX = 600
 CHECKS = {
     "loudness": "Integrated loudness in LUFS: {target, tolerance} (default -14 ± 1).",
     "peak": "True peak in dBTP: {max} (default -1).",
@@ -1134,12 +1515,31 @@ def read_lessons(split=True):
     for area in AREAS:
         try:
             with open(area_file(area)) as f:
-                rules += [dict(r, area=area) for r in json.load(f).get("rules", [])]
+                d = json.load(f)
         except FileNotFoundError:
-            pass
+            continue
         except (OSError, ValueError):
             bad.append(area)
+            continue
+        mine = d.get("rules") if isinstance(d, dict) else None
+        if not isinstance(mine, list):
+            bad.append(area)
+            continue
+        # A hand-edited rule without an id or text is skipped, and the file is never rewritten, so
+        # it stays as the user wrote it (2026-10-10: one such rule broke get_session in every chat).
+        good = [r for r in mine if isinstance(r, dict) and isinstance(r.get("id"), str) and r["id"]
+                and isinstance(r.get("text"), str) and r["text"].strip()]
+        if len(good) < len(mine):
+            bad.append(area)
+        rules += [dict(r, area=area) for r in good]
     return {"rules": rules, "unreadable": bad}
+
+
+def need_writable(d, area):
+    """write_lessons leaves an unreadable area file alone, so a change there would be lost."""
+    if area in d.get("unreadable", []):
+        raise ValueError("Nothing written. The user's rules file %s does not read: it is not JSON with a "
+                         "rules list, or a rule has no id or text. Ask the user to fix the file." % area_file(area))
 
 
 def write_lessons(d):
@@ -1160,38 +1560,195 @@ def write_lessons(d):
         os.replace(tmp, p)
 
 
-# The steps this chat has read the rules for. A tool that writes for a step refuses once when they are
-# unread, and the refusal carries them, so no agent writes a post or an edit without them (2026-10-09:
-# "make sure the agents actually look into those"). One MCP process is one chat.
-RULES_SEEN = set()
+# The rules a chat has seen, so a tool shows them once per chat (2026-10-09: "make sure the agents
+# actually look into those"). Write tools refuse once when their step has unseen rules, and the
+# refusal carries them; get_session and next_path add them to their result instead.
+# Each message of a Takes chat starts a new MCP process, so memory alone forgot them after every
+# message (about 30 refusals in one chat, 2026-10-10). The state lives on disk per chat:
+# <root>/_library/.rules-seen/<chat>.json {"chat", "updated", "rules": {id: hash}, "comments": hash}.
+# A rule counts as seen while its hash (text and details) matches, so a changed rule shows again.
+# The app deletes the file when the chat compacts or a run ends early (Chat.swift forgetRules).
+SEEN = {}  # by chat id (None: the agent gives none, Codex or Cursor: one process is one chat), and
+           # for a chat whose file cannot be written
+SEEN_DAYS = 30  # Claude Code keeps a conversation 30 days
+
+
+def chat_id():
+    """The Claude Code conversation: the same id for every message and after a restart of Takes
+    (claude sets CLAUDE_CODE_SESSION_ID for its MCP servers). A Takes chat that runs on Codex sets
+    TAKES_CHAT_ID instead (2026-10-11). None for other agents. A Codex or pi process started from a
+    Claude Code Bash tool inherits the id and shares that chat's seen file."""
+    v = (os.environ.get("TAKES_CHAT_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
+    return v if re.fullmatch(r"[A-Za-z0-9-]{8,64}", v) else None
+
+
+def seen_file():
+    c = chat_id()
+    return os.path.join(root(), LIB, ".rules-seen", c + ".json") if c else None
+
+
+def read_seen():
+    c = chat_id()
+    if c in SEEN or not c:
+        d = SEEN.get(c) or {}
+    else:
+        try:
+            with open(seen_file()) as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            d = {}
+    rules = d.get("rules") if isinstance(d, dict) else None
+    return {"rules": dict(rules) if isinstance(rules, dict) else {},
+            "comments": d.get("comments") if isinstance(d, dict) else None}
+
+
+def write_seen(d):
+    """Writes the whole file at once (a temp file, then replace). When it cannot, memory keeps it."""
+    c, p = chat_id(), seen_file()
+    if p:
+        out = {"chat": c, "updated": now_iso(), "rules": d["rules"], "comments": d.get("comments")}
+        tmp = "%s.%d.tmp" % (p, os.getpid())
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(tmp, "w") as f:
+                json.dump(out, f)
+            os.replace(tmp, p)
+            SEEN.pop(c, None)
+            prune_seen(os.path.dirname(p))
+            return
+        except OSError:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    SEEN[c] = d
+
+
+def prune_seen(folder):
+    """Seen files of chats older than Claude Code keeps them."""
+    old = time.time() - SEEN_DAYS * 86400
+    for f in os.listdir(folder):
+        try:
+            if os.path.getmtime(os.path.join(folder, f)) < old:
+                os.remove(os.path.join(folder, f))
+        except OSError:
+            pass
+
+
+def forget_seen():
+    """For tests: this chat starts again with nothing seen."""
+    SEEN.clear()
+    p = seen_file()
+    if p and os.path.exists(p):
+        os.remove(p)
+
+
+def short_hash(text):
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+
+
+def rule_hash(r):
+    return short_hash((r.get("text") or "") + "\n" + (r.get("details") or ""))
+
+
+def comments_text():
+    return read_text(lessons_path()).strip() or None
+
+
+def unseen_rules(areas):
+    """The rules of these steps this chat has not seen (or that changed since), and the comment
+    copilot's lessons when 'comments' is one of the steps and they are new to it."""
+    seen = read_seen()
+    rules = [r for r in read_lessons()["rules"] if r["area"] in areas and r.get("on", True)
+             and not r.get("merged_into") and seen["rules"].get(r["id"]) != rule_hash(r)]
+    text = comments_text() if "comments" in areas else None
+    if text and seen["comments"] == short_hash(text):
+        text = None
+    return rules, text
+
+
+def mark_seen(rules, comments=None):
+    if not rules and not comments:
+        return
+    d = read_seen()
+    d["rules"].update({r["id"]: rule_hash(r) for r in rules})
+    if comments:
+        d["comments"] = short_hash(comments)
+    write_seen(d)
+
+
+def rule_lines(rules, comments=None):
+    lines = []
+    for r in rules:
+        lines.append("- %s: %s" % (r["id"], r["text"]))
+        if r.get("details"):
+            lines.append("  details: %s" % r["details"])
+    if comments:
+        lines.append(comments)
+    return lines
 
 
 def need_rules(*areas):
-    want = [x for x in areas if x not in RULES_SEEN]
-    if not want:
+    """Write tools: refuse once per chat when the step has rules this chat has not seen. The
+    refusal carries them and marks them seen, so the same call goes through when sent again."""
+    rules, comments = unseen_rules(areas)
+    if not rules and not comments:
         return
-    RULES_SEEN.update(want)
-    rules = [r for r in read_lessons()["rules"] if r.get("on", True) and r["area"] in want]
-    lines = ["- %s: %s" % (r["id"], r["text"]) for r in rules]
-    if "comments" in want:
-        text = read_text(lessons_path()).strip()
-        if text:
-            lines.append(text)
-    if not lines:
-        return
-    raise ValueError("Nothing written yet. First read the user's rules for %s; they come from his comments. "
-                     "Check your work against each one, then call again:\n%s" % (", ".join(want), "\n".join(lines)))
+    mark_seen(rules, comments)
+    raise ValueError("Nothing written yet. These are the user's rules for %s (from past comments). Check your work "
+                     "against each one, then send the same call again: it goes through.\n%s"
+                     % (", ".join(areas), "\n".join(rule_lines(rules, comments))))
+
+
+def show_rules(*areas):
+    """Read tools: the rules of these steps that this chat has not seen, marked seen. None when there
+    are none. It never refuses."""
+    rules, comments = unseen_rules(areas)
+    if not rules and not comments:
+        return None
+    mark_seen(rules, comments)
+    return {"steps": list(areas), "new": rule_lines(rules, comments),
+            "note": "The user's rules from past comments. Follow each one in what you make next. "
+                    "Each shows once per chat; get_rules shows all."}
+
+
+def with_rules(out, *areas):
+    """A tool result with the unread rules of these steps as its first key (a cut-off result keeps
+    them). Every tool that writes an edit or a thumbnail file returns through this."""
+    r = show_rules(*areas)
+    return {"rules": r, **out} if r else out
+
+
+def next_steps(s):
+    """The steps a chat on this session most likely works on next: no takes yet, plan the video;
+    takes, edit them; edits, edit again and make the thumbnail."""
+    if not read_meta(s).get("takes"):
+        return ["script", "storyboard"]
+    d = os.path.join(s, "edits")
+    if os.path.isdir(d) and any(media_kind(f) == "video" for f in os.listdir(d)):
+        return EDIT_AREAS + ["thumbnail"]
+    return list(EDIT_AREAS)
 
 
 def rule_view(r):
     v = {"id": r["id"], "area": r["area"], "text": r["text"]}
+    if r.get("details"):
+        v["details"] = r["details"]
     if r.get("check"):
         v["check"] = r["check"]
     if r.get("repeats"):
         v["repeated"] = len(r["repeats"])
     if r.get("by") == "you":
         v["by_user"] = True
+    if r.get("merge"):
+        v["waiting_merge"] = {"into": r["merge"].get("into"), "text": r["merge"].get("text")}
     return v
+
+
+def counts(r):
+    """Counts toward the AREA_MAX of its area: on, not waiting for a merge, not merged away. The app's
+    LearnedRule.counts is the same, so the board and Takes agree when an area is full."""
+    return r.get("on", True) and not r.get("merge") and not r.get("merged_into")
 
 
 def comment_ref(s, cid):
@@ -1210,28 +1767,79 @@ def clean_check(c):
     return out
 
 
-def new_rule(d, area, text, check=None, by="takes", ref=None):
-    """Adds a rule to d (not written). Refuses a full area: merge or remove one first."""
+def clean_details(details):
+    if details is not None and not isinstance(details, str):
+        raise ValueError("details is text, at most %d characters." % DETAILS_MAX)
+    details = " ".join((details or "").split())
+    if len(details) > DETAILS_MAX:
+        raise ValueError("details is at most %d characters." % DETAILS_MAX)
+    return details
+
+
+# Where a long rule splits into its sentence and details: a sentence end before an uppercase letter,
+# so "e.g. the" and "0.25 s. then" stay in one piece.
+SENTENCE_END = re.compile(r"[.!?] (?=[A-Z])")
+
+
+def new_rule(d, area, text, check=None, by="takes", ref=None, details=None, merge_into=None, merged=None,
+             notes=None):
+    """Adds a rule to d (not written). A full area needs merge_into and merged: the new rule waits on
+    the Feedback board until the user merges it or keeps both. notes gets 'split' and 'merge' for the
+    agent."""
+    notes = {} if notes is None else notes
     area = (area or "").strip().lower()
     if area not in AREAS:
         raise ValueError("area is one of: %s." % ", ".join(AREAS))
     text = " ".join((text or "").split())
     if not text:
         raise ValueError("Give the rule's text: one short sentence.")
+    details = clean_details(details)
     if len(text) > RULE_MAX:
-        raise ValueError("Rule is %d characters; keep it under %d. One rule, one sentence." % (len(text), RULE_MAX))
-    on = [r for r in d["rules"] if r["area"] == area and r.get("on", True)]
-    if len(on) >= AREA_MAX:
-        raise ValueError("The %s area has %d rules, the most it keeps. Merge two into one (set_rule id=... "
-                         "text=...) or remove one (set_rule id=... remove=true), then add this one. Or use "
-                         "lesson 'one-off'." % (area, len(on)))
+        m = None if details else SENTENCE_END.search(text)
+        if not m or not 40 <= m.start() + 1 <= RULE_MAX:
+            raise ValueError("Rule is %d characters. Put one sentence (at most %d) in text and the rest in "
+                             "details." % (len(text), RULE_MAX))
+        rest = " ".join(text[m.end():].split())
+        if len(rest) > DETAILS_MAX:
+            raise ValueError("Rule is %d characters. Put one sentence (at most %d) in text and at most %d "
+                             "characters in details." % (len(text), RULE_MAX, DETAILS_MAX))
+        text, details = text[:m.start() + 1], rest
+        notes["split"] = "Saved the first sentence as the rule and the rest as details."
+    need_writable(d, area)
+    mine = [r for r in d["rules"] if r["area"] == area and counts(r)]
+    merge = None
+    if merge_into:
+        target = next((r for r in mine if r["id"] == merge_into), None)
+        if target is None:
+            raise ValueError("merge_into is a rule in the %s area: %s." % (area, ", ".join(r["id"] for r in mine)))
+        merged = " ".join((merged or "").split())
+        if not merged or len(merged) > RULE_MAX:
+            raise ValueError("merged is one sentence of 1 to %d characters that holds both rules." % RULE_MAX)
+        merge = {"into": target["id"], "text": merged, "was": target["text"]}
+    elif len(mine) >= AREA_MAX:
+        raise ValueError("The %s area has %d rules, the most it keeps. Nothing written yet. Add merge_into (the "
+                         "id of the closest rule below) and merged (one sentence that holds both) to the rule, "
+                         "then send the call again. The user approves the merge on the Feedback board. Both rules "
+                         "are on until the user decides.\n%s" % (area, len(mine), "\n".join(rule_lines(mine))))
+    if merge and sum(1 for r in d["rules"] if r["area"] == area and r.get("merge")) >= WAITING_MAX:
+        raise ValueError("Nothing written. The user has %d merges to check in %s on the Feedback board. Add no "
+                         "rule there until the user decides. For a comment, use lesson '%s' or 'one-off'."
+                         % (WAITING_MAX, area, merge["into"]))
     n = 1 + max([int(r["id"].rsplit("-", 1)[1]) for r in d["rules"]
                  if r["id"].startswith(area + "-") and r["id"].rsplit("-", 1)[1].isdigit()] or [0])
     r = {"id": "%s-%d" % (area, n), "area": area, "text": text, "on": True, "by": by, "made": now_iso(),
          "from": [ref] if ref else [], "repeats": []}
+    if details:
+        r["details"] = details
     c = clean_check(check)
     if c:
         r["check"] = c
+    if merge:
+        r["merge"] = merge
+        pair = "“%s” into “%s”" % (text, merge["was"])
+        notes["merge"] = ((notes["merge"] + "; " + pair) if notes.get("merge") else
+                          "Waiting on the Feedback board. Tell the user in one line, with the rule texts and no ids, "
+                          "which rules it asks to merge: " + pair)
     d["rules"].append(r)
     return r
 
@@ -1245,29 +1853,37 @@ def t_get_rules(a):
     if not areas:
         # Only the list of steps: every rule at once is ~4k tokens, and an agent needs one or two steps
         # (2026-10-09). area=all still gives everything, for the Feedback board.
-        on = [r for r in d["rules"] if r.get("on", True)]
-        steps = [{"area": x, "rules": n} for x in AREAS for n in [sum(r["area"] == x for r in on)] if n]
+        on = [r for r in d["rules"] if r.get("on", True) and not r.get("merged_into")]
+        steps = []
+        for x in AREAS:
+            n = sum(r["area"] == x for r in on)
+            if n:
+                steps.append({"area": x, "rules": n})
+                if sum(r["area"] == x and counts(r) for r in on) >= AREA_MAX:
+                    steps[-1]["full"] = True
         lines = [l for l in read_text(lessons_path()).splitlines() if l.lstrip().startswith("-")]
         steps.append({"area": "comments", "rules": len(lines)})
         return {"steps": steps, "note": "Call get_rules again with the steps you work on, e.g. area='post-all,"
                 "post-x', 'script', 'edit' (sound, cut, picture, captions, graphics), 'thumbnail', "
-                "'comments'. area='all' gives every rule."}
+                "'comments'. area='all' gives every rule. A full step needs merge_into and merged on a new rule."}
     if "all" in areas:
         areas = []
     # "post" is every post file; "edit" the five steps of an edit.
     areas = [y for x in (areas or []) for y in ([z for z in AREAS if z.startswith("post-")] if x == "post"
                                                 else EDIT_AREAS if x == "edit" else [x])]
-    RULES_SEEN.update(areas or AREAS + ["comments"])
-    rules = [rule_view(r) for r in d["rules"] if r.get("on", True) and (not areas or r["area"] in areas)]
-    out = {"rules": rules}
+    raw = [r for r in d["rules"] if r.get("on", True) and not r.get("merged_into")
+           and (not areas or r["area"] in areas)]
+    out = {"rules": [rule_view(r) for r in raw]}
     if not areas or "comments" in areas:
         out["comments"] = read_text(lessons_path())
+    mark_seen(raw, (out.get("comments") or "").strip() or None)
     out["note"] = ("Follow every rule here; they come from the user's comments. A rule the user wrote or changed "
                    "(by_user) wins over anything else. 'comments' holds the comment copilot's lessons. Before you "
                    "show an edit, run check_edit on it. When you resolve a comment, give it a lesson in "
                    "reply_comment: an existing rule id, 'new' with rule={area, text}, or 'one-off' (area 'post' "
                    "picks the platform from the commented file). Keep the set small: at most %d per area, so "
-                   "merge or sharpen a rule before you add one." % AREA_MAX)
+                   "sharpen a rule before you add one. A full area takes a new rule only with merge_into and "
+                   "merged; the user approves the merge on the Feedback board." % AREA_MAX)
     return out
 
 
@@ -1275,14 +1891,19 @@ def t_set_rule(a):
     """Add, change, turn off or remove one rule."""
     d = read_lessons()
     if not a.get("id"):
-        r = new_rule(d, a.get("area"), a.get("text"), a.get("check"), ref=a.get("from"))
+        notes = {}
+        r = new_rule(d, a.get("area"), a.get("text"), a.get("check"), ref=a.get("from"), details=a.get("details"),
+                     merge_into=a.get("merge_into"), merged=a.get("merged"), notes=notes)
         write_lessons(d)
-        return {"added": rule_view(r)}
+        return {"added": rule_view(r), **notes}
     r = next((x for x in d["rules"] if x["id"] == a["id"]), None)
     if r is None:
         raise ValueError("No rule %s. Use get_rules." % a["id"])
-    if r.get("by") == "you" and ("text" in a or "on" in a or a.get("remove")):
-        raise ValueError("The user wrote or changed rule %s. Ask him before you change it." % r["id"])
+    need_writable(d, r["area"])
+    if a.get("merge_into") or a.get("merged"):
+        raise ValueError("merge_into and merged go only with a new rule (no id).")
+    if r.get("by") == "you" and ("text" in a or "details" in a or "on" in a or a.get("remove")):
+        raise ValueError("The user wrote or changed rule %s. Ask the user before you change it." % r["id"])
     if a.get("remove"):
         d["rules"].remove(r)
         write_lessons(d)
@@ -1290,8 +1911,14 @@ def t_set_rule(a):
     if "text" in a:
         text = " ".join((a["text"] or "").split())
         if not text or len(text) > RULE_MAX:
-            raise ValueError("Rule text: one sentence, 1 to %d characters." % RULE_MAX)
+            raise ValueError("Rule text: one sentence, 1 to %d characters. Put the rest in details." % RULE_MAX)
         r["text"] = text
+    if "details" in a:
+        details = clean_details(a["details"])
+        if details:
+            r["details"] = details
+        else:
+            r.pop("details", None)
     if "check" in a:
         c = clean_check(a["check"])
         if c:
@@ -1305,7 +1932,7 @@ def t_set_rule(a):
     return {"changed": rule_view(r)}
 
 
-def apply_lesson(d, s, c, r):
+def apply_lesson(d, s, c, r, notes=None):
     """Puts the reply's lesson on comment c, and the comment on its rule. Returns the rule id or 'one-off'."""
     lesson = (r.get("lesson") or "").strip()
     ref = comment_ref(s, c["id"])
@@ -1317,7 +1944,9 @@ def apply_lesson(d, s, c, r):
         rule = dict(r.get("rule") or {})
         if (rule.get("area") or "").strip().lower() == "post":
             rule["area"] = post_area(c.get("file"))
-        made = new_rule(d, rule.get("area"), rule.get("text"), rule.get("check"), ref=ref)
+        made = new_rule(d, rule.get("area"), rule.get("text"), rule.get("check"), ref=ref,
+                        details=rule.get("details"), merge_into=rule.get("merge_into"), merged=rule.get("merged"),
+                        notes=notes)
         c["lesson"] = made["id"]
         c.pop("repeat", None)
         return made["id"]
@@ -1325,14 +1954,15 @@ def apply_lesson(d, s, c, r):
     if rule is None:
         raise ValueError("Comment %s: lesson is a rule id from get_rules, 'new' with rule={area, text}, "
                          "or 'one-off' (not '%s')." % (c["id"], lesson))
+    need_writable(d, rule["area"])
     c["lesson"] = rule["id"]
     # The rule was there before the user wrote the comment: the same mistake again.
     made, at = parse_iso(rule.get("made", "")), parse_iso((c.get("at") or "")[:19] + "Z")
     if made and at and made < at:
         c["repeat"] = True
-        if ref not in rule["repeats"]:
+        if ref not in rule.setdefault("repeats", []):
             rule["repeats"].append(ref)
-    elif ref not in rule["from"]:
+    elif ref not in rule.setdefault("from", []):
         rule["from"].append(ref)
     return rule["id"]
 
@@ -1397,39 +2027,1681 @@ def run_check(path, c):
     return res
 
 
+# Built-in checks run on every edit, rule or no rule: each one is a problem the user heard or saw that
+# the old checks passed (2026-10-10 audit: robotic voice, 8 kHz cut, echo, sound out of sync, green
+# picture, a half sentence, a frozen clip, a chapter track that froze a card). Each compares the
+# edit with the part of the take it came from, so a style choice is never a problem; only a change
+# from the take is. Limits are wide on purpose: widen them here, never per user.
+BUILTIN = {
+    "streams":       {"max_gap": 0.1},
+    "av_sync":       {"max": 0.04},
+    "frozen_video":  {"max": 8.0, "share": 0.5},
+    "band_balance":  {"max": 8.0, "highs": 12.0, "floor": 30.0, "cliff": 20.0},
+    "echo":          {"more": 0.08, "ratio": 1.4, "repeat": 0.12, "clear": 4.0},
+    "picture_drift": {"chroma": 3.0, "sat": 0.85, "blur": 1.3, "same": 0.5},
+    "words":         {"edge": 0.08, "twice": 0.5},
+    "regression":    {"margin": 0.05, "cut": 0.15, "cut_share": 0.6},
+}
+CHECK_BUDGET = 60   # seconds for all built-ins in one call; what is not done by then skips
+CHECK_TIMEOUT = 60  # seconds for one built-in
+CHECKS_CACHE = ".checks-cache"  # <session>/.checks-cache/<file>.<mtime>.json: a dot folder, so no asset list shows it
+ENV_RATE = 8000     # the envelope reads the sound at 8 kHz: enough for loudness every 10 ms
+FRAME = 0.01        # one envelope value per 10 ms
+CHUNK = 5.0         # align: the edit is found in the take 5 s at a time
+NEAR = 10.0         # align: first look this far around where the last piece ended
+MATCH = 0.75        # align: a piece matches at this correlation or more (heavy echo: 0.79; another take: 0.6)
+BANDS = [125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+AUDIO_EXT = (".m4a", ".wav", ".mp3", ".aac", ".aif", ".aiff", ".flac", ".caf")
+NO_SOURCE = "Takes does not know which take this edit came from. Pass source."
+NOT_FOUND = "Takes could not find this edit in %s (heavy music, another take or another file)."
+GIVEN_SHARE = 0.25  # a source argument still needs this share of the edit's sound found in it
+OUT_OF_TIME = "Out of time. Run check_edit again; the second run is faster."
+LABELS = {"streams": "Extra track", "frozen_video": "Frozen picture", "echo": "Echo", "words": "Missing words",
+          "regression": "Fix undone"}
+
+
+class Skip(Exception):
+    """A check that cannot measure this edit: pass null, and the reason in skip."""
+
+
+def mmss(sec):
+    s = int(max(0.0, sec))
+    return "%d:%02d" % (s // 60, s % 60)
+
+
+def percentile(xs, q):
+    xs = sorted(xs)
+    if not xs:
+        return None
+    return xs[min(len(xs) - 1, max(0, int(round(q * (len(xs) - 1)))))]
+
+
+def median(xs):
+    xs = sorted(xs)
+    if not xs:
+        return None
+    m = len(xs) // 2
+    return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2.0
+
+
+def probe_streams(path):
+    """Every stream and chapter of a file, from one ffprobe."""
+    probe = find_tool("ffprobe")
+    if not probe:
+        raise ValueError("ffprobe is not installed. Open Takes and click Finish setup, or run brew install ffmpeg.")
+    r = subprocess.run([probe, "-v", "error", "-show_streams", "-show_chapters", "-show_format", "-of", "json", path],
+                       capture_output=True, text=True, timeout=60)
+    try:
+        d = json.loads(r.stdout or "{}")
+    except ValueError:
+        d = {}
+    streams = d.get("streams") or []
+    v = next((x for x in streams if x.get("codec_type") == "video"
+              and not (x.get("disposition") or {}).get("attached_pic")), None)
+    a = next((x for x in streams if x.get("codec_type") == "audio"), None)
+
+    def num(x, k):
+        try:
+            return float((x or {}).get(k))
+        except (TypeError, ValueError):
+            return None
+    dur = num(d.get("format"), "duration")
+    return {"streams": streams, "chapters": d.get("chapters") or [], "video": v, "audio": a, "duration": dur,
+            "fps": frac((v or {}).get("avg_frame_rate")) or frac((v or {}).get("r_frame_rate")) or 30.0,
+            "rate": int(num(a, "sample_rate") or 0),
+            "hdr": (v or {}).get("color_transfer") in ("arib-std-b67", "smpte2084"),
+            "v_start": num(v, "start_time") or 0.0, "a_start": num(a, "start_time") or 0.0,
+            "v_dur": num(v, "duration"), "a_dur": num(a, "duration")}
+
+
+def made_pieces(s, doc):
+    """cut_take's made_from of a words doc as pieces [{"take": (n, kind), "edit": [a, b], "src": [c, d]}];
+    a piece that does not read is left out, and so is another session's cut."""
+    made = (doc or {}).get("made_from") if isinstance((doc or {}).get("made_from"), dict) else None
+    if not made or made.get("session_id") not in (None, session_id(s)):
+        return [], None
+    out = []
+    for g in made.get("cut") or []:
+        try:
+            a, c, d = float(g["at"]), float(g["in"]), float(g["out"])
+            k = (int(g["take"]), g.get("kind") or "camera")
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        if d > c:
+            out.append({"take": k, "edit": [a, a + d - c], "src": [c, d]})
+    return out, made.get("grade") or made.get("lut")
+
+
+def work_pieces(s, rel, path):
+    """The made_from pieces of the cut_take cut an edit was rendered from: the edit's sound is found in
+    the newest _work cuts (same name first, at most 3), and each part found takes its cut's pieces."""
+    if rel.startswith(WORK_DIR + os.sep):
+        return [], None
+    base = split_version(os.path.basename(rel))[0]
+    found = []
+    for wj in glob.glob(os.path.join(glob.escape(os.path.join(s, WORK_DIR)), "*-v*.words.json")):
+        mp4 = wj[:-len(".words.json")] + ".mp4"
+        if os.path.isfile(mp4):
+            found.append((split_version(os.path.basename(mp4))[0] != base, -os.path.getmtime(wj), wj, mp4))
+    for _, _, wj, mp4 in sorted(found)[:3]:
+        pieces, grade = made_pieces(s, words_doc(mp4))
+        if not pieces:
+            continue
+        try:
+            al = align(envelope(s, path), envelope(s, mp4))
+        except (ValueError, OSError, subprocess.SubprocessError):
+            continue
+        if al["coverage"] < 0.5:
+            continue
+        out = []
+        for g in al["segments"]:  # edit -> cut -> take
+            a, b = g["edit"]
+            c = g["src"][0]
+            for x in pieces:
+                lo, hi = max(c, x["edit"][0]), min(c + b - a, x["edit"][1])
+                if hi - lo >= 0.3:
+                    off = x["src"][0] - x["edit"][0]
+                    out.append(dict({"take": x["take"], "edit": [round(a + lo - c, 2), round(a + hi - c, 2)],
+                                     "src": [round(lo + off, 2), round(hi + off, 2)]},
+                                    **({"rough": True} if g.get("rough") else {})))
+        if out:
+            return out, grade
+    return [], None
+
+
+def edit_source(s, rel, given=None):
+    """The take an edit was cut from: {path, known, segments, grade, offset}. The one reader of an edit's
+    provenance. Order: the source argument (align must still find the edit in it), the made_from of the
+    edit's own words file (cut_take writes it), the made_from of the _work cut the edit was rendered from,
+    else a guess (keeper camera take, else the newest camera take) that align must confirm (known False);
+    then the other takes are candidates too, newest first. segments: [{"edit": [a, b], "src": [c, d]}] in
+    seconds, both on the video clock, of the take with the most time in the edit (parts from other takes
+    are not in segments)."""
+    takes = read_meta(s).get("takes", [])
+    out = {"path": None, "known": False, "given": False, "segments": None, "grade": None, "offset": 0.0,
+           "candidates": []}
+    path = os.path.join(s, rel)
+    if given:
+        p = os.path.normpath(given if os.path.isabs(given) else os.path.join(s, given))
+        if not os.path.isfile(p) or os.path.relpath(p, s).startswith("..") or p == path:
+            raise ValueError("No take %s in this session. Pass a take file from get_session, e.g. "
+                             "'take-03-camera.mov'." % given)
+        out.update(path=p, known=True, given=True)
+    else:
+        pieces, grade = made_pieces(s, words_doc(path))
+        if not pieces:
+            pieces, grade = work_pieces(s, rel, path)
+        by = {}
+        for g in pieces:
+            by[g["take"]] = by.get(g["take"], 0.0) + g["edit"][1] - g["edit"][0]
+        if by:
+            n, kind = max(by, key=by.get)
+            try:
+                t = voice_take(s, n, kind)
+            except ValueError:
+                t = None
+            if t and os.path.isfile(os.path.join(s, t["file"])):
+                out.update(path=os.path.join(s, t["file"]), known=True, grade=grade,
+                           segments=[{k: v for k, v in g.items() if k != "take"} for g in pieces
+                                     if g["take"] == (n, kind)])
+        if not out["path"]:
+            cams = sorted((t for t in takes if t.get("kind") == "camera"), key=lambda t: t["number"]) \
+                or sorted(takes, key=lambda t: t["number"])
+            pick = next((t for t in cams if t.get("keeper")), cams[-1] if cams else None)
+            if pick and not os.path.isfile(os.path.join(s, pick["file"])):
+                out["missing"] = pick["file"]
+            elif pick:
+                out["path"] = os.path.join(s, pick["file"])
+                rest = sorted((t for t in takes if t is not pick), key=lambda t: (t.get("kind") != "camera", -t["number"]))
+                out["candidates"] = [p for p in (os.path.join(s, t["file"]) for t in rest) if os.path.isfile(p)][:3]
+    if out["path"]:
+        try:
+            out["offset"] = float((take_clock(out["path"]) or {}).get("audio_offset_s") or 0.0)
+        except ValueError:
+            pass
+    return out
+
+
+def envelope(s, path):
+    """Loudness every 10 ms (dBFS) of a file's sound on the video clock, cached per file and mtime."""
+    import array
+    st = os.stat(path)
+    rel = os.path.relpath(path, s)
+    name = (rel if not rel.startswith("..") else hashlib.sha1(path.encode()).hexdigest()[:10] + "-" +
+            os.path.basename(path)).replace(os.sep, "__")
+    d = os.path.join(s, CHECKS_CACHE)
+    p = os.path.join(d, "%s.%d-%d.json" % (name, int(st.st_mtime), st.st_size))
+    try:
+        with open(p) as f:
+            env = json.load(f)
+        if isinstance(env, list) and all(isinstance(x, (int, float)) for x in env):
+            return env
+    except (OSError, ValueError):
+        pass
+    r = subprocess.run([need_ffmpeg(), "-v", "error", "-i", path, "-vn", "-af", VIDEO_CLOCK, "-ac", "1",
+                        "-ar", str(ENV_RATE), "-f", "s16le", "-"], capture_output=True, timeout=600)
+    raw = r.stdout[:len(r.stdout) // 2 * 2]
+    a = array.array("h")
+    a.frombytes(raw)
+    if sys.byteorder == "big":
+        a.byteswap()
+    n = int(ENV_RATE * FRAME)
+    full = float(n) * 32768.0 * 32768.0
+    env = [round(10 * math.log10(sum(x * x for x in a[i:i + n]) / full + 1e-10), 1) for i in range(0, len(a) - n + 1, n)]
+    try:
+        os.makedirs(d, exist_ok=True)
+        for old in glob.glob(os.path.join(glob.escape(d), glob.escape(name) + ".*.json")):
+            os.remove(old)
+        with open(p + ".tmp", "w") as f:
+            json.dump(env, f, separators=(",", ":"))
+        os.replace(p + ".tmp", p)
+    except OSError:
+        pass  # a read-only session still gets its checks, only slower
+    return env
+
+
+def _ncc_search(chunk, src, lo, hi, step=1):
+    """(best position, correlation) of chunk in src[lo:hi] (positions every step)."""
+    import operator
+    n = len(chunk)
+    m = sum(chunk) / n
+    c = [x - m for x in chunk]
+    cn = math.sqrt(sum(x * x for x in c))
+    if cn < 1e-6:
+        return None, 0.0
+    lo, hi = max(0, lo), min(len(src) - n, hi)
+    if hi < lo:
+        return None, 0.0
+    best, at = -2.0, None
+    s1 = [0.0]
+    s2 = [0.0]
+    for x in src[lo:hi + n]:
+        s1.append(s1[-1] + x)
+        s2.append(s2[-1] + x * x)
+    mul = operator.mul
+    for p in range(lo, hi + 1, step):
+        k = p - lo
+        a, b = s1[k + n] - s1[k], s2[k + n] - s2[k]
+        var = b - a * a / n
+        if var <= 1e-6:
+            continue
+        r = sum(map(mul, c, src[p:p + n])) / (cn * math.sqrt(var))
+        if r > best:
+            best, at = r, p
+    return at, best
+
+
+def _coarse(env, k=5):
+    return [sum(env[i:i + k]) / k for i in range(0, len(env) - k + 1, k)]
+
+
+def align(edit_env, src_env):
+    """Which part of the take each part of the edit came from: the step every check that compares with the
+    take shares. Pure Python. The edit is found 5 s at a time (then 2 s where 5 s found nothing) by
+    correlation of the loudness: coarse every 50 ms, then every 10 ms. It looks near the pieces found
+    before first; a search of the whole take runs only on a miss. Pieces with the same offset merge into a
+    segment; its edges move to where the sound stops matching. Returns {"segments": [{"edit": [a, b],
+    "src": [c, d], "rough"?}], "coverage": share of the edit's sound}."""
+    # Pauses flat at 25 dB under the loud parts: room sound, echo and noise in them do not count. Music
+    # under the edit's voice lifts its pauses: then both are cut flat just over the music.
+    if not edit_env or not src_env:
+        return {"segments": [], "coverage": 0.0}
+    depth = max(8.0, min(25.0, percentile(edit_env, 0.95) - percentile(edit_env, 0.10) - 6))
+    fe, fs = (percentile(x, 0.95) - depth for x in (edit_env, src_env))
+    e = [max(x, fe) - fe for x in edit_env]
+    sv = [max(x, fs) - fs for x in src_env]
+    n, step = len(e), int(CHUNK / FRAME)
+    if n < 100 or len(sv) < 100:
+        return {"segments": [], "coverage": 0.0}
+    ec, sc = _coarse(e), _coarse(sv)
+    # A long edit cut from a long take jumps around: one whole-take search per 15 s of edit, at least 4.
+    budget = {"full": max(4, int(n * FRAME / 15))}
+    hits = []
+
+    def scan(size, thr, spans):
+        """Finds chunks of size frames (half overlapping) of the edit spans in the take, at correlation
+        thr or more; near the pieces found before first, then in the whole take."""
+        last = None
+        for lo, hi in spans:
+            for a in range(lo, max(lo + 1, hi - size // 2), size // 2):
+                L = min(size, n - a)
+                if L < size * 0.6:
+                    break
+                chunk = e[a:a + L]
+                if max(chunk) - min(chunk) < 6:  # a pause or a held tone: matches anything
+                    continue
+                cc = ec[a // 5:(a + L) // 5]
+                p, r = (None, 0.0)
+                near = [last] if last is not None else []
+                near += [off for x, y, off in hits if x - 3 * size <= a <= y + 3 * size]
+                for o in dict.fromkeys(near):  # near the pieces before and after first
+                    guess = (a + o) // 5
+                    p2, r2 = _ncc_search(cc, sc, guess - int(NEAR / 0.05), guess + int(NEAR / 0.05))
+                    if r2 > r:
+                        p, r = p2, r2
+                if r < thr and budget["full"] > 0:
+                    budget["full"] -= 1
+                    p2, r2 = _ncc_search(cc, sc, 0, len(sc))
+                    if r2 > r:
+                        p, r = p2, r2
+                if p is None or r < thr:
+                    continue
+                # The 50 ms match decides; 10 ms only places it (echo blurs single frames).
+                p, r = _ncc_search(chunk, sv, p * 5 - 8, p * 5 + 8)
+                if p is None or r < thr - 0.15:
+                    continue
+                hits.append((a, a + L, p - a))
+                last = p - a
+    scan(step, MATCH, [(0, n)])
+    # A cut every few seconds (ums and pauses out) leaves no 5 s piece whole: 2 s pieces where 5 s found
+    # nothing, with a higher bar (a short piece of another take can match too).
+    hits.sort()
+    free, at = [], 0
+    for x, y, _ in hits + [(n, n, 0)]:
+        if x - at >= 200:
+            free.append((at, x))
+        at = max(at, y)
+    budget["full"] += max(4, int(n * FRAME / 10))
+    scan(int(2.0 / FRAME), MATCH + 0.1, free)
+    hits.sort()
+    segs = []
+    for a, b, off in hits:
+        if segs and abs(segs[-1][2] - off) <= 2 and a <= segs[-1][1]:
+            segs[-1][1] = max(segs[-1][1], b)
+        else:
+            segs.append([a, b, off])
+    out = []
+    es, ss = _smooth(e), _smooth(sv)
+    for a, b, off in segs:
+        lo, hi, good = _edges(es, ss, a, b, off)
+        if hi - lo < b - a - 200:
+            # The sound changed too much to find the cut (heavy echo or noise): keep the matched pieces
+            # less 0.5 s at each end, and mark the edges rough (words does not judge them).
+            lo, hi, rough = a + 50, b - 50, True
+        else:
+            rough = False
+        if hi - lo >= 50:
+            out.append([lo, hi, off, rough, good])
+    out.sort(key=lambda x: x[0])
+    for i in range(len(out) - 1):
+        lo, hi = out[i + 1][0], out[i][1]
+        if hi > lo:
+            # Both reach into one stretch (a pause matches both): the cut goes where the fewest frames
+            # disagree, in the middle of the best places.
+            g1, g2 = out[i][4], out[i + 1][4]
+            cost = [sum(not g1(k) for k in range(lo, x)) + sum(not g2(k) for k in range(x, hi)) for x in range(lo, hi + 1)]
+            best = [lo + k for k, c in enumerate(cost) if c == min(cost)]
+            cut = best[len(best) // 2]
+            out[i][1], out[i + 1][0] = cut, cut
+    loud = [i for i in range(n) if e[i] > 1]
+    covered = sum(1 for i in loud if any(x[0] <= i < x[1] for x in out))
+    segments = [dict({"edit": [round(a * FRAME, 2), round(b * FRAME, 2)],
+                      "src": [round((a + off) * FRAME, 2), round((b + off) * FRAME, 2)]}, **({"rough": True} if rough else {}))
+                for a, b, off, rough, _ in out if b > a]
+    return {"segments": segments, "coverage": round(covered / float(len(loud)), 3) if loud else 0.0}
+
+
+def _smooth(x):
+    return [(x[max(0, i - 1)] + x[i] + x[min(len(x) - 1, i + 1)]) / 3.0 for i in range(len(x))]
+
+
+def _edges(e, sv, a, b, off):
+    """Grows (and trims) a matched piece to where the edit's sound stops following the take: (lo, hi,
+    good), good(i) says whether edit frame i follows the take at this offset. Levels
+    above the pause floor (0); a filter or a gain change moves the whole piece, so that shift is taken off.
+    e and sv come smoothed over 30 ms: a filter changes how fast a word starts."""
+    core = [i for i in range(a, b) if 0 <= i + off < len(sv)]
+    gain = median([e[i] - sv[i + off] for i in core if e[i] > 3 and sv[i + off] > 3]) or 0.0
+    # Echo or noise in the edit moves single frames: the limit grows with how far the matched core moves.
+    tol = max(4.0, (percentile([abs(e[i] - sv[i + off] - gain) for i in core], 0.7) or 0.0) + 2.0)
+
+    def good(i):
+        j = i + off
+        if i < 0 or i >= len(e) or j < 0 or j >= len(sv):
+            return False
+        return (e[i] < 1 and sv[j] < 1) or abs(e[i] - sv[j] - gain) < tol
+    w = 15
+
+    def ok(i):  # most of the 150 ms from i on follow the take
+        return sum(good(k) for k in range(i, i + w)) >= w * 0.6
+    mid = (a + b) // 2
+    lo = mid
+    while lo > 0 and ok(lo - w):
+        lo -= 1
+    while lo < mid and not good(lo):
+        lo += 1
+    hi = mid
+    while hi < len(e) and ok(hi):
+        hi += 1
+    hi = min(len(e), hi + w - 1)
+    while hi > lo and not good(hi - 1):
+        hi -= 1
+    return lo, hi, good
+
+
+def grey_frames(path, start, dur, rate, size=(32, 18)):
+    """Small grey frames of path from start for dur seconds at rate per second: a list of byte strings."""
+    w, h = size
+    r = subprocess.run([need_ffmpeg(), "-v", "error", "-ss", "%.3f" % max(0.0, start), "-i", path,
+                        "-t", "%.3f" % dur, "-an", "-vf", "fps=%g,scale=%d:%d,format=gray" % (rate, w, h),
+                        "-f", "rawvideo", "-"], capture_output=True, timeout=120)
+    raw = r.stdout
+    return [raw[i:i + w * h] for i in range(0, len(raw) - w * h + 1, w * h)]
+
+
+def _mad(a, b):
+    return sum(abs(x - y) for x, y in zip(a, b)) / float(max(1, len(a)))
+
+
+def ssim(a, b):
+    """Global SSIM of two grey frames of the same size (bytes)."""
+    n = float(len(a))
+    if not n or len(a) != len(b):
+        return 0.0
+    ma, mb = sum(a) / n, sum(b) / n
+    va = sum((x - ma) ** 2 for x in a) / n
+    vb = sum((x - mb) ** 2 for x in b) / n
+    cov = sum((x - ma) * (y - mb) for x, y in zip(a, b)) / n
+    c1, c2 = (0.01 * 255) ** 2, (0.03 * 255) ** 2
+    return ((2 * ma * mb + c1) * (2 * cov + c2)) / ((ma * ma + mb * mb + c1) * (va + vb + c2))
+
+
+def frame_stats(path, t, hdr=False, crop=None, size=None):
+    """(U, V, saturation, blur, grey 64x36 bytes) of the frame at t, at 720 px high (size: (w, h) instead).
+    crop: (x, y, w, h) in pixels of the shown frame, cut out first. An HDR file is tone-mapped to bt709
+    first, as a viewer's SDR screen shows it."""
+    tmp = tempfile.mkdtemp(prefix="takes-frame-")
+    meta = os.path.join(tmp, "m.txt")
+    tone = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,"
+            "zscale=t=bt709:m=bt709:r=tv," if hdr else "")
+    blur = "blurdetect," if has_filter("blurdetect") else ""  # an older ffmpeg: no blur, the rest still runs
+    cut = "crop=%d:%d:%d:%d," % (crop[2], crop[3], crop[0], crop[1]) if crop else ""
+    scale = "scale=%d:%d:flags=area" % size if size else "scale=-2:720"
+    graph = ("[0:v]%s%s%s,format=yuv420p,split[a][b];[a]signalstats,%smetadata=print:file=%s[m];"
+             "[b]scale=64:36,format=gray[g]" % (tone, cut, scale, blur, meta.replace("\\", "/").replace(":", "\\:")))
+    try:
+        r = subprocess.run([need_ffmpeg(), "-v", "error", "-ss", "%.3f" % max(0.0, t), "-i", path, "-frames:v", "1",
+                            "-filter_complex", graph, "-map", "[m]", "-f", "null", os.devnull,
+                            "-map", "[g]", "-frames:v", "1", "-f", "rawvideo", "-"], capture_output=True, timeout=60)
+        text = read_text(meta) if os.path.exists(meta) else ""
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if r.returncode != 0:
+        raise ValueError("ffmpeg: " + ((r.stderr or b"").decode(errors="replace").strip().splitlines() or ["failed"])[-1])
+    val = {k: float(v) for k, v in re.findall(r"lavfi\.(signalstats\.\w+|blur)=(-?[\d.]+)", text)}
+    if "signalstats.UAVG" not in val:
+        raise ValueError("No picture at %.2f s." % t)
+    return (val["signalstats.UAVG"], val["signalstats.VAVG"], val.get("signalstats.SATAVG", 0.0),
+            val.get("blur"), r.stdout[:64 * 36])
+
+
+FILTERS = {}
+
+
+def has_filter(name):
+    if name not in FILTERS:
+        r = subprocess.run([need_ffmpeg(), "-hide_banner", "-filters"], capture_output=True, text=True, timeout=30)
+        FILTERS[name] = bool(re.search(r"\s%s\s" % re.escape(name), r.stdout or ""))
+    return FILTERS[name]
+
+
+def band_levels(path, ranges, gate=None):
+    """Per octave band (125 Hz to 16 kHz), the median level of the speech frames (100 ms frames within
+    12 dB of the loudest) minus the 1 kHz band, over ranges [[a, b]] of the file (video clock). One ffmpeg."""
+    ranges = [[a, b] for a, b in ranges if b - a >= 0.3][:60]
+    if not ranges:
+        raise Skip("Too little sound to measure.")
+    sel = "+".join("between(t,%.3f,%.3f)" % (a, b) for a, b in ranges)
+    tmp = tempfile.mkdtemp(prefix="takes-bands-")
+    stats = ("asetnsamples=n=4800:p=0,astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=RMS_level,"
+             "ametadata=print:key=lavfi.astats.Overall.RMS_level:file=%s")
+    parts = ["[0:a]%s,aselect='%s',asetpts=N/SR/TB,aformat=channel_layouts=mono,aresample=48000,asplit=%d%s"
+             % (VIDEO_CLOCK, sel, len(BANDS) + 1, "".join("[i%d]" % i for i in range(len(BANDS) + 1)))]
+    for i, c in enumerate(BANDS):
+        lo, hi = c / math.sqrt(2), min(c * math.sqrt(2), 23500)
+        steep = ",".join(["highpass=f=%d:poles=2" % lo] * 3 + ["lowpass=f=%d:poles=2" % hi] * 3)
+        parts.append("[i%d]%s,%s,anullsink" % (i, steep, stats % os.path.join(tmp, "b%d.txt" % i)))
+    parts.append("[i%d]%s[o]" % (len(BANDS), stats % os.path.join(tmp, "full.txt")))
+    try:
+        r = subprocess.run([need_ffmpeg(), "-v", "error", "-i", path, "-filter_complex", ";".join(parts),
+                            "-map", "[o]", "-f", "null", "-"], capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            raise ValueError("ffmpeg: " + ((r.stderr or "").strip().splitlines() or ["failed"])[-1])
+
+        def read(name):
+            try:
+                text = read_text(os.path.join(tmp, name))
+            except OSError:
+                return []
+            return [float(x) if x not in ("-inf", "inf", "nan") else -120.0
+                    for x in re.findall(r"RMS_level=(-?inf|nan|-?[\d.]+)", text)]
+        full = read("full.txt")
+        bands = [read("b%d.txt" % i) for i in range(len(BANDS))]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if len(full) < 10:
+        raise Skip("Too little sound to measure.")
+    top = percentile(full, 0.95)
+    speech = [i for i, x in enumerate(full) if x >= top - 12]
+    lv = {c: median([b[i] for i in speech if i < len(b)]) for c, b in zip(BANDS, bands)}
+    ref = lv.get(1000)
+    if ref is None:
+        raise Skip("Too little sound to measure.")
+    return {c: round(v - ref, 1) for c, v in lv.items() if v is not None}
+
+
+def voice_tails(edit, take):
+    """(edit, take): median seconds the voice takes to die away after a word ends, from the last loud
+    10 ms to 30 dB under the loudest (or 4 dB over the room's floor). The word ends come from the take, and
+    the edit is read at the same moments, so echo that only lengthens a word still counts. edit and take
+    are lists of envelope pieces, frame for frame the same sound (align)."""
+    def levels(pieces):
+        allv = [x for p in pieces for x in p]
+        if len(allv) < 200:
+            raise Skip("Too little sound to measure the room.")
+        top, floor = percentile(allv, 0.95), percentile(allv, 0.10)
+        if top - floor < 25:
+            raise Skip("Music or noise under the voice. Takes cannot measure the room.")
+        return top - 12, max(top - 30, floor + 4)
+
+    def tail(env, ps, i, lo):
+        """Frames until env is down at lo; the take's next word ends the count (the echo runs into it)."""
+        j = i
+        while j < min(len(env), len(ps)) and env[j] > lo and ps[j] < hs and j - i < 80:
+            j += 1
+        return (j - i + 1) * FRAME if j < min(len(env), len(ps)) and j - i < 80 else None
+    hs, ls = levels(take)
+    _, le = levels(edit)
+    te, ts = [], []
+    for pe, ps in zip(edit, take):
+        for i in range(1, min(len(pe), len(ps)) - 6):
+            if ps[i - 1] >= hs > max(ps[i:i + 6]):  # a word ends, then 60 ms or more without a word
+                a, b = tail(pe, ps, i, le), tail(ps, ps, i, ls)
+                if a is not None and b is not None:
+                    te.append(a)
+                    ts.append(b)
+    if len(ts) < 5:
+        raise Skip("Too few pauses in the voice to measure the room.")
+    return median(te), median(ts)
+
+
+# Words: numbers and short forms said the same way on both sides ("10" = "ten", "it's" = "it is").
+ONES = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
+        "seventeen eighteen nineteen").split()
+TENS = "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()
+SHORT = {"can't": ["can", "not"], "won't": ["will", "not"], "let's": ["let", "us"], "n't": ["not"],
+         "'re": ["are"], "'ll": ["will"], "'ve": ["have"], "'m": ["am"], "'d": ["would"], "'s": ["is"]}
+
+
+def number_words(n):
+    if n < 20:
+        return [ONES[n]]
+    if n < 100:
+        return [TENS[n // 10]] + ([ONES[n % 10]] if n % 10 else [])
+    if n < 1000:
+        return [ONES[n // 100], "hundred"] + (number_words(n % 100) if n % 100 else [])
+    if n < 10 ** 6:
+        return number_words(n // 1000) + ["thousand"] + (number_words(n % 1000) if n % 1000 else [])
+    return [str(n)]
+
+
+def spoken(word):
+    """The tokens a word says: 'It's' -> ['it', 'is'], '10' -> ['ten'], '2,000' -> ['two', 'thousand']."""
+    w = norm_word(word.replace("’", "'").replace(",", ""))
+    if not w:
+        return []
+    if w.isdigit():
+        return number_words(int(w))
+    for k in ("can't", "won't", "let's"):
+        if w == k:
+            return list(SHORT[k])
+    for k in ("n't", "'re", "'ll", "'ve", "'m", "'d", "'s"):
+        if w.endswith(k) and len(w) > len(k):
+            return [w[:-len(k)]] + SHORT[k]
+    return [w.replace("'", "")]
+
+
+def sentence_ends(s, words):
+    """For each take word: does a sentence end with it? From the script (script.md or a variant) mapped on
+    the take's words; a word the script does not cover ends a sentence at a pause of 0.35 s or more."""
+    from difflib import SequenceMatcher
+    toks, last = [], {}
+    for i, (_, _, w) in enumerate(words):
+        for t in spoken(w):
+            toks.append(t)
+            last[i] = len(toks) - 1
+    texts = [read_text(os.path.join(s, "script.md"))] if os.path.exists(os.path.join(s, "script.md")) else []
+    texts += [read_text(p) for p in sorted(glob.glob(os.path.join(glob.escape(s), "variants", "*.md")))]
+    best, mapped = 0, {}
+    for text in texts:
+        stoks, ends = [], set()
+        for piece in re.split(r"(?<=[.!?])\s+|\n+", script_plain(text or "")):
+            tk = [t for w in piece.split() for t in spoken(w)]
+            if tk:
+                stoks += tk
+                ends.add(len(stoks) - 1)
+        sm = SequenceMatcher(None, toks, stoks, autojunk=False)
+        m = {}
+        for b in sm.get_matching_blocks():
+            for k in range(b.size):
+                m[b.a + k] = (b.b + k) in ends
+        if len(m) > best:
+            best, mapped = len(m), m
+    use = toks and best >= 0.3 * len(toks)
+    out = []
+    for i, (st, en, _) in enumerate(words):
+        if i == len(words) - 1:
+            out.append(True)
+        elif use and last.get(i) in mapped:
+            out.append(mapped[last[i]])
+        else:
+            out.append(words[i + 1][0] - en >= 0.35)
+    return out
+
+
+def need_source(ctx):
+    if not ctx["known"] or not ctx["segments"]:
+        raise Skip(ctx["why"])
+
+
+def chk_streams(ctx):
+    p, lim = ctx["probe"], BUILTIN["streams"]
+    extra = [x for x in p["streams"] if x.get("codec_type") in ("data", "subtitle", "attachment")]
+    want = "no data, subtitle or chapter track; sound and picture within %g s of the same length" % lim["max_gap"]
+    if extra or p["chapters"]:
+        return (len(extra) + len(p["chapters"]), [], "The file has an extra track that can freeze the video.",
+                {"want": want, "fix": "%d data/subtitle tracks and %d chapters. Copy it to the next version "
+                 "(next_path) without them: ffmpeg -i <file> -map 0:v:0? -map 0:a:0? -c copy -map_chapters -1 "
+                 "-dn -sn <new file>." % (len(extra), len(p["chapters"]))})
+    if p["video"] and p["audio"] and p["v_dur"] and p["a_dur"]:
+        gap = round(p["a_dur"] - p["v_dur"], 2)
+        if abs(gap) > lim["max_gap"]:
+            return (gap, [], "The sound stops before the picture ends." if gap < 0 else
+                    "The sound goes on after the picture ends.",
+                    {"want": want, "label": "Sound length",
+                     "fix": "Sound is %.2f s %s than the picture. Pad or trim the sound to the picture's length "
+                            "(apad + -shortest, or atrim) in the next version." % (abs(gap), "shorter" if gap < 0 else "longer")})
+        return (gap, [], None, {"want": want})
+    return (0, [], None, {"want": want})
+
+
+def picture_offset(ctx):
+    """Seconds the sound is late against the picture, from the take: where the edit's picture is in the
+    take, against where its sound is (align). Raises Skip when the picture does not show it clearly."""
+    segs = sorted(ctx["segments"], key=lambda g: g["edit"][1] - g["edit"][0])
+    g = segs[-1]
+    if g["edit"][1] - g["edit"][0] < 3.0:
+        raise Skip("No part of the edit is long enough to check the sync.")
+    off = g["src"][0] - g["edit"][0]
+    rate = float(min(30, round(ctx["src_probe"]["fps"] or 30)))
+    width = 2.0
+    mid = (g["edit"][0] + g["edit"][1]) / 2.0
+    xe = round((mid - width / 2) * rate) / rate
+    xs = round((xe + off - 1.0) * rate) / rate
+    if xs < 0:
+        xs = 0.0
+    E = grey_frames(ctx["path"], xe, width, rate)
+    S = grey_frames(ctx["src"]["path"], xs, width + 2.0, rate)
+    if len(E) < rate * width * 0.8 or len(S) < len(E) + rate:
+        raise Skip("Takes could not read the picture to check the sync.")
+    if sum(_mad(E[i], E[i + 1]) for i in range(len(E) - 1)) / (len(E) - 1) < 0.5:
+        raise Skip("The picture does not move. Takes cannot check the sync.")
+    scores = [sum(_mad(E[i], S[k + i]) for i in range(len(E))) / len(E) for k in range(len(S) - len(E) + 1)]
+    k = min(range(len(scores)), key=scores.__getitem__)
+    if scores[k] > 0.7 * median(scores):
+        raise Skip("The picture does not show a clear match in the take. Takes cannot check the sync.")
+    d = 0.0
+    if 0 < k < len(scores) - 1:
+        den = scores[k - 1] - 2 * scores[k] + scores[k + 1]
+        d = 0.5 * (scores[k - 1] - scores[k + 1]) / den if den > 1e-9 else 0.0
+    return round((xs + (k + d) / rate - xe) - off, 3)
+
+
+def secs(x):
+    """0.2 -> '0.2', 0.05 -> '0.05': what the user reads."""
+    return ("%.1f" % abs(x)) if abs(x) >= 0.095 else ("%.2f" % abs(x)).rstrip("0").rstrip(".")
+
+
+def chk_av_sync(ctx):
+    p, lim = ctx["probe"], BUILTIN["av_sync"]
+    if not p["audio"]:
+        raise Skip("The edit has no sound.")
+    late = round(p["a_start"] - p["v_start"], 3)
+    how = "file start times"
+    if ctx["known"] and ctx["segments"] and ctx["src_probe"] and ctx["src_probe"]["video"]:
+        # What a viewer sees wins over the container's start times (a copy of a take keeps its own).
+        try:
+            late, how = picture_offset(ctx), "picture against the take"
+        except Skip:
+            pass
+    want = "sound within %g s of the picture" % lim["max"]
+    if abs(late) <= lim["max"]:
+        return (late, [], None, {"want": want})
+    word = "late" if late > 0 else "early"
+    return (late, [], "The sound is %s by %s s." % (word, secs(late)),
+            {"want": want, "label": "Sound " + word,
+             "fix": "Sound is %.2f s %s (%s). Render the next version with the voice on the video clock "
+                    "(aresample=async=1:first_pts=0, or cut_take) and both streams starting at 0. The take's own "
+                    "audio offset is %.2f s." % (abs(late), word, how, ctx["src"]["offset"] if ctx["src"] else 0.0)})
+
+
+def chk_frozen_video(ctx):
+    p, lim = ctx["probe"], BUILTIN["frozen_video"]
+    # Software decode: on an M-series Mac it ran 5x faster than -hwaccel videotoolbox here (2026-10-11,
+    # 84 s of 1080p: 1.2 s against 5.9 s), as it uses every core.
+    r = subprocess.run([need_ffmpeg(), "-v", "info", "-hide_banner", "-nostats", "-i", ctx["path"], "-an", "-vf",
+                        "fps=5,scale=320:-2,freezedetect=n=-60dB:d=2", "-f", "null", "-"],
+                       capture_output=True, text=True, timeout=300)
+    starts = [float(x) for x in re.findall(r"freeze_start:\s*(-?[\d.]+)", r.stderr or "")]
+    ends = [float(x) for x in re.findall(r"freeze_end:\s*(-?[\d.]+)", r.stderr or "")]
+    total = p["duration"] or media_seconds(ctx["path"])
+    freezes = []
+    for i, a in enumerate(starts):  # a keyframe can split one still into two: join them
+        b = ends[i] if i < len(ends) else total
+        if freezes and a - freezes[-1][1] < 0.5:
+            freezes[-1] = (freezes[-1][0], b)
+        else:
+            freezes.append((a, b))
+    segs = ctx["segments"] if ctx["known"] else []
+    bad = []
+    for a, b in freezes:
+        laps = [(max(a, g["edit"][0]), min(b, g["edit"][1]), g) for g in segs or []]
+        laps = [(x, y, g) for x, y, g in laps if y - x > 0]
+        loose = (b - a) - sum(y - x for x, y, _ in laps)
+        if loose > lim["max"] or loose > lim["share"] * total:
+            bad.append((a, b))
+            continue
+        for x, y, g in laps:
+            if y - x < 2.0:
+                continue
+            off = g["src"][0] - g["edit"][0]
+            f1 = grey_frames(ctx["src"]["path"], x + off + 0.1, 0.2, 5, (64, 36))[:1]
+            f2 = grey_frames(ctx["src"]["path"], y + off - 0.3, 0.2, 5, (64, 36))[:1]
+            if f1 and f2 and _mad(f1[0], f2[0]) > 3:  # the take moves here; the edit does not
+                bad.append((x, y))
+                break
+    want = "no still picture over %g s where the take moves" % lim["max"]
+    if not bad:
+        return (round(max([b - a for a, b in freezes] or [0.0]), 2), [], None, {"want": want})
+    a, b = max(bad, key=lambda x: x[1] - x[0])
+    return (round(b - a, 2), [x for x, _ in bad], "The picture stops from %s to %s." % (mmss(a), mmss(b)),
+            {"want": want, "fix": "The picture holds still for %.1f s from %.2f s. Check the cut or the render "
+                                  "there: a held frame, a still image or a stream that ends early." % (b - a, a)})
+
+
+def chk_band_balance(ctx):
+    p, lim = ctx["probe"], BUILTIN["band_balance"]
+    if not p["audio"]:
+        raise Skip("The edit has no sound.")
+    want = "within %g dB of the take at 125 Hz to 4 kHz" % lim["max"]
+    known = ctx["known"] and ctx["segments"]
+    ranges = [g["edit"] for g in ctx["segments"]] if known else [[0.0, p["duration"] or media_seconds(ctx["path"])]]
+    ranges, used = [list(r) for r in ranges], 0.0
+    for r in ranges:  # at most 600 s of sound
+        r[1] = min(r[1], r[0] + max(0.0, 600 - used))
+        used += r[1] - r[0]
+    le = band_levels(ctx["path"], ranges)
+    floor = None
+    if p["rate"] >= 44100 and le.get(16000) is not None and le[16000] < -lim["floor"] \
+            and le[16000] < le.get(8000, 0.0) - lim["cliff"]:
+        floor = le[16000]
+    dull = ("The voice sounds dull. It lost its high tones.",
+            "Keep the sound at 48 kHz from take to export (no 16 or 22 kHz step) and do not low-pass the voice. "
+            "Use the take's clean voice once.")
+    if not known:
+        if floor is not None:
+            return (floor, [], dull[0], {"want": want, "label": "Dull voice",
+                                         "fix": "16 kHz band is %d dB under 1 kHz and falls off a cliff after 8 kHz. %s"
+                                                % (-floor, dull[1])})
+        raise Skip(ctx["why"])
+    ls = band_levels(ctx["src"]["path"], [g["src"] for g in ctx["segments"] if g["edit"][0] < 600])
+    diffs = {c: round(le[c] - ls[c], 1) for c in BANDS if c != 1000 and c in le and c in ls and ls[c] > -60}
+    bad = [(c, d) for c, d in diffs.items() if (c <= 4000 and abs(d) > lim["max"]) or (c >= 8000 and d < -lim["highs"])]
+    if not bad and floor is None:
+        return (max(diffs.values(), key=abs) if diffs else 0.0, [], None, {"want": want})
+    if not bad:
+        return (floor, [], dull[0], {"want": want, "label": "Dull voice",
+                                     "fix": "16 kHz band is %d dB under 1 kHz. %s" % (-floor, dull[1])})
+    c, d = max(bad, key=lambda x: abs(x[1]))
+    name = "%d Hz" % c if c < 1000 else "%d kHz" % (c // 1000)
+    if d < 0 and c < 1000:
+        say, label, fix = ("The voice sounds thin. It lost its low tones.", "Thin voice",
+                           "Use the take's clean voice once. Do not run the voice chain twice and do not high-pass the voice.")
+    elif d < 0:
+        say, label, fix = dull[0], "Dull voice", dull[1]
+    elif c < 1000:
+        say, label, fix = ("The voice sounds boomy. It has more low tones than the take.", "Boomy voice",
+                           "Take out the low boost (EQ or a second voice chain).")
+    else:
+        say, label, fix = ("The voice sounds sharp. It has more high tones than the take.", "Sharp voice",
+                           "Take out the high boost (EQ or a second voice chain).")
+    return (d, [], say, {"want": want, "label": label,
+                         "fix": "%s band is %d dB %s the take. %s" % (name, abs(d), "under" if d < 0 else "over", fix)})
+
+
+def solve(A, b):
+    """x of A x = b (Gauss-Jordan with pivots); None when A is singular."""
+    n = len(b)
+    M = [list(row) + [b[i]] for i, row in enumerate(A)]
+    for c in range(n):
+        p = max(range(c, n), key=lambda r: abs(M[r][c]))
+        M[c], M[p] = M[p], M[c]
+        if abs(M[c][c]) < 1e-12:
+            return None
+        for r in range(n):
+            if r != c and M[r][c]:
+                f = M[r][c] / M[c][c]
+                M[r] = [x - f * y for x, y in zip(M[r], M[c])]
+    return [M[i][n] / M[i][i] for i in range(n)]
+
+
+def voice_repeat(edit, take, lo=-4, hi=22):
+    """(delay s, share, noise): the edit's sound level as the take's, plus copies of it 40 to 200 ms later (an
+    echo the take does not have). Least squares of the edit's level every 10 ms on the take's at lags
+    lo..hi frames, both as the change from the frame before (so the slow rise and fall of words does not
+    blur the lags). Music, noise or room tone that is not in the take only adds noise to the fit, so it
+    does not hide an echo. share: the loudest copy (two lags next to each other) over the voice itself
+    (the lags around the peak), in amplitude: aecho with decay 0.4 reads 0.25 to 0.35, a clean cut under
+    0.07 (2026-10-11, real takes and synthetic). noise: the root mean square of the other lags 40 to
+    200 ms, on the same scale: an echo is 5 to 17 times it, a clean or cleaned voice at most 3.2 times.
+    edit and take are lists of envelope pieces in dB, frame for frame the same sound (align)."""
+    import operator
+    mul = operator.mul
+    lags = list(range(lo, hi + 1))
+    n = len(lags)
+    G = [[0.0] * n for _ in range(n)]
+    r = [0.0] * n
+    count = 0
+    for pe, ps in zip(edit, take):
+        L = min(len(pe), len(ps)) - 1
+        if L - hi + lo < 50 or count > 30000:
+            continue
+        E = [10 ** (x / 20.0) for x in pe[:L + 1]]
+        S = [10 ** (x / 20.0) for x in ps[:L + 1]]
+        E = [y - x for x, y in zip(E, E[1:])]
+        S = [y - x for x, y in zip(S, S[1:])]
+        Y = E[hi:L + lo]
+        X = [S[hi - k:L + lo - k] for k in lags]
+        for a in range(n):
+            r[a] += sum(map(mul, X[a], Y))
+            for b in range(a, n):
+                G[a][b] += sum(map(mul, X[a], X[b]))
+        count += len(Y)
+    if count < 300:
+        raise Skip("Too little voice to measure the echo.")
+    for a in range(n):
+        for b in range(a):
+            G[a][b] = G[b][a]
+    ridge = 1e-3 * sum(G[i][i] for i in range(n)) / n
+    for i in range(n):
+        G[i][i] += ridge
+    h = solve(G, r)
+    if not h:
+        raise Skip("Takes could not measure the echo.")
+    k0 = max(range(len(h)), key=lambda i: h[i])
+    main = sum(h[max(0, k0 - 2):k0 + 3])
+    if main <= 0:
+        raise Skip("The edit's sound does not follow the take. Takes cannot measure the echo.")
+    best, at = 0.0, None
+    for j in range(k0 + 4, min(len(h) - 1, k0 + 20)):
+        v = max(0.0, h[j]) + max(0.0, h[j + 1])
+        if v > best:
+            best, at = v, j
+    if at is None:
+        return 0.0, 0.0
+    win = [(i, max(0.0, h[i])) for i in range(max(0, k0 - 2), min(len(h), k0 + 3))]
+    c0 = sum(i * v for i, v in win) / max(1e-12, sum(v for _, v in win))
+    lag = at + max(0.0, h[at + 1]) / best - c0
+    rest = [h[j] for j in range(k0 + 4, min(len(h), k0 + 21)) if j not in (at, at + 1)]
+    noise = math.sqrt(sum(x * x for x in rest) / len(rest)) if rest else 0.0
+    return round(lag * FRAME, 3), round(best / main, 3), round(noise / main, 3)
+
+
+def chk_echo(ctx):
+    lim = BUILTIN["echo"]
+    if not ctx["probe"]["audio"]:
+        raise Skip("The edit has no sound.")
+    need_source(ctx)
+    ee, es = ctx["env_e"], ctx["env_s"]
+    # The voice alone, when the edit has it beside it (a cut_take cut's .wav): no music in the way.
+    stem = os.path.splitext(ctx["path"])[0] + ".wav"
+    if os.path.isfile(stem):
+        try:
+            v = envelope(ctx["s"], stem)
+            if abs(len(v) - len(ee)) * FRAME < 0.5:
+                ee = v
+        except (ValueError, OSError, subprocess.SubprocessError):
+            pass
+    pe, ps, used = [], [], 0.0
+    for g in ctx["segments"]:
+        if used > 600:
+            break
+        used += g["edit"][1] - g["edit"][0]
+        pe.append(ee[int(g["edit"][0] / FRAME):int(g["edit"][1] / FRAME)])
+        ps.append(es[int(g["src"][0] / FRAME):int(g["src"][1] / FRAME)])
+    tails = repeat = why = None
+    try:
+        tails = voice_tails(pe, ps)
+    except Skip as e:
+        why = e
+    try:
+        repeat = voice_repeat(pe, ps)
+    except Skip as e:
+        why = why or e
+    if tails is None and repeat is None:
+        raise why
+    want = ("voice tail at most %g s longer than the take's; no repeat of the voice 40 to 200 ms later over %d %% "
+            "of its level" % (lim["more"], round(lim["repeat"] * 100)))
+    fix = "Use the take's clean voice once; do not run the voice chain twice or add reverb or aecho."
+    if tails:
+        te, ts = tails
+        more = round(te - ts, 2)
+        if more > lim["more"] and te > lim["ratio"] * ts:
+            return (more, [], "The voice has more echo than the take.",
+                    {"want": want, "fix": "The voice dies away in %.2f s, the take's in %.2f s. %s" % (te, ts, fix)})
+    # A repeat counts when it stands out of the fit's noise: a cleaned voice (ClearVoice, Resemble Enhance)
+    # is not the take's sound times a number, and its fit swings by 15 % at every lag (2026-10-11).
+    if repeat and repeat[1] > lim["repeat"] and repeat[1] > lim["clear"] * repeat[2]:
+        return (repeat[1], [], "The voice has more echo than the take.",
+                {"want": want, "fix": "The voice repeats %d ms later at %d %% of its level. The take does not. %s"
+                                      % (round(repeat[0] * 1000), round(repeat[1] * 100), fix)})
+    out = {"want": want}
+    if tails is None:
+        out["note"] = "%s Takes measured only the repeat of the voice." % why
+    return (round(tails[0] - tails[1], 2) if tails else repeat[1], [], None, out)
+
+
+def ncc_bytes(a, b):
+    n = float(len(a))
+    if not n or len(a) != len(b):
+        return 0.0
+    ma, mb = sum(a) / n, sum(b) / n
+    va = sum((x - ma) ** 2 for x in a)
+    vb = sum((x - mb) ** 2 for x in b)
+    if va < 1e-6 or vb < 1e-6:
+        return 1.0 if abs(ma - mb) < 4 else 0.0
+    return sum((x - ma) * (y - mb) for x, y in zip(a, b)) / math.sqrt(va * vb)
+
+
+def shown_size(v):
+    """(width, height) of a video stream as a player shows it: a 90 degree rotation swaps them."""
+    w, h = int((v or {}).get("width") or 0), int((v or {}).get("height") or 0)
+    rot = 0.0
+    for d in (v or {}).get("side_data_list") or []:
+        try:
+            rot = float(d.get("rotation") or rot)
+        except (TypeError, ValueError):
+            pass
+    try:
+        rot = float(((v or {}).get("tags") or {}).get("rotate") or rot)
+    except (TypeError, ValueError):
+        pass
+    return (h, w) if int(round(abs(rot))) % 180 == 90 else (w, h)
+
+
+def recipe_region(s, rel, take_size):
+    """The part of the take (x, y, w, h in its pixels) that render_edit put in the frame, from the edit's
+    recipe: frame.crop, then the centre cut to the frame's shape. None without a recipe."""
+    try:
+        r = load_recipe(s, recipe_path(rel))
+    except ValueError:
+        return None
+    f = (r or {}).get("frame") if isinstance((r or {}).get("frame"), dict) else None
+    tw, th = take_size
+    if not f or not f.get("w") or not f.get("h") or not tw or not th:
+        return None
+    c = f.get("crop") if isinstance(f.get("crop"), dict) else None
+    try:
+        x, y, w, h = (float(c[k]) for k in ("x", "y", "w", "h")) if c else (0.0, 0.0, float(tw), float(th))
+        a = float(f["w"]) / float(f["h"])
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return None
+    if w / h > a:
+        x, w = x + (w - h * a) / 2.0, h * a
+    else:
+        y, h = y + (h - w / a) / 2.0, w / a
+    return clamp_region((x, y, w, h), take_size)
+
+
+def clamp_region(r, size):
+    x, y, w, h = (int(round(v)) for v in r)
+    w, h = max(2, min(w, size[0])) // 2 * 2, max(2, min(h, size[1])) // 2 * 2
+    return (max(0, min(x, size[0] - w)), max(0, min(y, size[1] - h)), w, h)
+
+
+REGION_PX = 240.0  # find_region: the take's long side in pixels for the search
+
+
+def find_region(edit, te, take, ts, edit_size, take_size):
+    """(x, y, w, h in take pixels, correlation): where the edit's frame at te sits in the take's frame at ts.
+    A reframe (a 9:16 cut of a 16:9 take, a punch-in) is a crop of the take, scaled: small grey frames,
+    every crop size from the full frame down to half of it, every place, the best correlation."""
+    import operator
+    (ew, eh), (tw, th) = edit_size, take_size
+    k = REGION_PX / max(tw, th)
+    sw, sh = max(8, int(round(tw * k))), max(8, int(round(th * k)))
+    raw = grey_frames(take, ts, 0.25, 4, (sw, sh))
+    if not raw:
+        return None, 0.0
+    T = [list(raw[0][r * sw:(r + 1) * sw]) for r in range(sh)]
+    I1 = [[0.0] * (sw + 1) for _ in range(sh + 1)]
+    I2 = [[0.0] * (sw + 1) for _ in range(sh + 1)]
+    for r in range(sh):
+        a1 = a2 = 0.0
+        for c in range(sw):
+            v = T[r][c]
+            a1 += v
+            a2 += v * v
+            I1[r + 1][c + 1] = I1[r][c + 1] + a1
+            I2[r + 1][c + 1] = I2[r][c + 1] + a2
+    a = float(ew) / eh
+    w0, h0 = (th * a, float(th)) if a <= float(tw) / th else (float(tw), tw / a)
+    mul, edits = operator.mul, {}
+
+    def score(f, x, y):
+        cw, ch = edits[f][0]
+        n = cw * ch
+        s1 = I1[y + ch][x + cw] - I1[y][x + cw] - I1[y + ch][x] + I1[y][x]
+        s2 = I2[y + ch][x + cw] - I2[y][x + cw] - I2[y + ch][x] + I2[y][x]
+        var = s2 - s1 * s1 / n
+        E, en = edits[f][1], edits[f][2]
+        if var <= 1e-6 or en <= 1e-6:
+            return -1.0
+        return sum(sum(map(mul, E[r], T[y + r][x:x + cw])) for r in range(ch)) / math.sqrt(var * en)
+
+    def prep(f):
+        """The edit's frame at the size of a crop of f of the take, mean taken off; None when too small."""
+        if f not in edits:
+            cw, ch = int(round(w0 * f * k)), int(round(h0 * f * k))
+            fr = grey_frames(edit, te, 0.25, 4, (cw, ch)) if 12 <= cw <= sw and 12 <= ch <= sh else None
+            if fr:
+                m = sum(fr[0]) / float(cw * ch)
+                E = [[fr[0][r * cw + c] - m for c in range(cw)] for r in range(ch)]
+                edits[f] = ((cw, ch), E, sum(v * v for row in E for v in row))
+            else:
+                edits[f] = None
+        return edits[f]
+
+    def places(f, xs=None, ys=None, step=2):
+        if not prep(f):
+            return []
+        cw, ch = edits[f][0]
+        xs = xs or range(0, sw - cw + 1, step)
+        ys = ys or range(0, sh - ch + 1, step)
+        return [(score(f, x, y), f, x, y) for x in xs if 0 <= x <= sw - cw for y in ys if 0 <= y <= sh - ch]
+    found = []
+    for f in (1.0, 0.9, 0.8, 0.7, 0.6, 0.5):
+        found += places(f)
+        if f == 1.0 and found and max(found)[0] >= 0.99:
+            break  # the whole frame, or a full-height cut of it: the usual edit
+    if not found:
+        return None, 0.0
+    for step in (0.05, 0.025):  # finer: the sizes between two steps around the same middle, every pixel
+        _, bf, bx, by = max(found)
+        mx, my = bx + edits[bf][0][0] / 2.0, by + edits[bf][0][1] / 2.0
+        for f in (round(bf - step, 3), bf, round(bf + step, 3)):
+            if 0.45 <= f <= 1.0 and prep(f):
+                x0, y0 = int(round(mx - edits[f][0][0] / 2.0)), int(round(my - edits[f][0][1] / 2.0))
+                found += places(f, range(x0 - 3, x0 + 4), range(y0 - 3, y0 + 4), 1)
+    top = max(found)
+    # The biggest crop that matches as well wins: a still frame matches its own middle too.
+    sc, f, x, y = max((v for v in found if v[0] >= top[0] - 0.005), key=lambda v: (v[1], v[0]))
+    return clamp_region((x / k, y / k, w0 * f, h0 * f), take_size), sc
+
+
+def chk_picture_drift(ctx):
+    lim = BUILTIN["picture_drift"]
+    need_source(ctx)
+    sp = ctx["src_probe"]
+    if not sp or not sp["video"]:
+        raise Skip("The take has no picture.")
+    hdr = sp["hdr"] or ctx["probe"]["hdr"]
+    tone = not hdr or has_filter("zscale")
+    inner = [(g["edit"][0] + 0.3, g["edit"][1] - 0.3, g["src"][0] - g["edit"][0]) for g in ctx["segments"]
+             if g["edit"][1] - g["edit"][0] > 1.0]
+    total = sum(b - a for a, b, _ in inner)
+    if total <= 0:
+        raise Skip("Too few frames match the take to compare the picture.")
+    times, n = [], 12
+    for i in range(n):
+        x = (i + 0.5) * total / n
+        for a, b, off in inner:
+            if x <= b - a:
+                times.append((a + x, a + x + off))
+                break
+            x -= b - a
+    # The part of the take in the edit's frame: the recipe's crop, else found in the picture (a 9:16 cut
+    # of a 16:9 take or a punch-in was "too few frames match" before, 2026-10-11). Both sides are then
+    # compared at the smaller one's own size, so a softer picture reads the same at 9:16 and at 16:9.
+    es, ts = shown_size(ctx["probe"]["video"]), shown_size(sp["video"])
+    region = recipe_region(ctx["s"], ctx["rel"], ts) if all(es) and all(ts) else None
+    if region is None and all(es) and all(ts):
+        for te, tt in (times[len(times) // 2], times[len(times) // 4], times[3 * len(times) // 4]):
+            region, sc = find_region(ctx["path"], te, ctx["src"]["path"], tt, es, ts)
+            if region and sc >= 0.8:
+                break
+            region = None
+        if region is None:
+            raise Skip("Takes could not find the edit's picture in the take.")
+    if region and region == (0, 0, ts[0] // 2 * 2, ts[1] // 2 * 2):
+        region = None
+    rw, rh = (region[2], region[3]) if region else ts
+    cw, ch = (es if es[0] * es[1] <= rw * rh else (rw, rh)) if all(es) and rw else (0, 0)
+    if cw * ch > 1920 * 1080:  # a 4K pair: both at 1080p, still the same scale on both sides
+        k = math.sqrt(1920 * 1080.0 / (cw * ch))
+        cw, ch = cw * k, ch * k
+    size = (max(2, int(cw) // 2 * 2), max(2, int(ch) // 2 * 2)) if cw and ch else None
+
+    def pair(t):
+        try:
+            return (frame_stats(ctx["path"], t[0], ctx["probe"]["hdr"] and tone, size=size),
+                    frame_stats(ctx["src"]["path"], t[1], sp["hdr"] and tone, crop=region, size=size))
+        except ValueError:
+            return None
+    with concurrent.futures.ThreadPoolExecutor(4) as ex:
+        pairs = [x for x in ex.map(pair, times) if x and ncc_bytes(x[0][4], x[1][4]) >= lim["same"]]
+    if len(pairs) < 4:
+        raise Skip("Too few frames match the take to compare the picture.")
+    du = median([e[0] - s[0] for e, s in pairs])
+    dv = median([e[1] - s[1] for e, s in pairs])
+    src_sat = median([s[2] for e, s in pairs])
+    # A grey take has no colour to lose: 0 / 0 read as "washed out" on every edit of it (2026-10-11).
+    sat = median([e[2] for e, s in pairs]) / src_sat if src_sat > 1.0 else 1.0
+    blurs = [(e[3], s[3]) for e, s in pairs if e[3] is not None and s[3] is not None and s[3] > 0]
+    blur = median([e / s for e, s in blurs]) if blurs else 1.0
+    color = tone and not ctx["src"].get("grade")
+    found = []  # (how far over the limit, value, say end, label)
+    if du < -lim["chroma"] and dv < -lim["chroma"]:
+        found.append((min(du, dv) / -lim["chroma"], round(min(du, dv), 1), "greener than the take.", "Picture color"))
+    elif color and max(abs(du), abs(dv)) > lim["chroma"]:
+        found.append((max(abs(du), abs(dv)) / lim["chroma"], round(max(du, dv, key=abs), 1),
+                      "a different color than the take.", "Picture color"))
+    if color and sat < lim["sat"]:
+        found.append((lim["sat"] / max(sat, 1e-6), round(sat, 2), "more washed out than the take.", "Picture color"))
+    if blur > lim["blur"]:
+        found.append((blur / lim["blur"], round(blur, 2), "softer than the take.", "Soft picture"))
+    want = "U and V within %g, saturation at least %g x and blur at most %g x the take" % (lim["chroma"], lim["sat"], lim["blur"])
+    extra = {"want": want}
+    if not tone:
+        extra["note"] = "The take is HDR and this ffmpeg has no zscale, so Takes did not compare the colors."
+    elif ctx["src"].get("grade"):
+        extra["note"] = "The edit has a grade, so only green and blur are compared."
+    if not found:
+        return (round(max(abs(du), abs(dv)), 1), [], None, extra)
+    _, value, end, label = max(found)
+    extra.update(label=label, fix="Against the take: U %+.1f, V %+.1f, saturation %.2f x, blur %.2f x (%d frames). "
+                                  "Render the next version without the color change or scale filter; an HDR take needs "
+                                  "tone mapping to bt709 (zscale + tonemap)." % (du, dv, sat, blur, len(pairs)))
+    return (value, [], "The picture is " + end, extra)
+
+
+def quote(ws):
+    return "“%s”" % " ".join(w for _, _, w in ws)
+
+
+def chk_words(ctx):
+    lim = BUILTIN["words"]
+    need_source(ctx)
+    if not is_ready(words_doc(ctx["src"]["path"])):
+        # Older transcripts (Apple's) stretch words over the pauses: every cut would look like a cut word.
+        raise Skip("The take has no transcript yet." if not os.path.exists(os.path.splitext(ctx["src"]["path"])[0]
+                                                                           + ".words.json") else
+                   "The take has no exact word times yet. cut_take and rough_cut make them.")
+    words = sorted(transcript_words(ctx["src"]["path"]) or [])
+    if not words:
+        raise Skip("The take has no transcript yet.")
+    ends = sentence_ends(ctx["s"], words)
+    segs = sorted(ctx["segments"], key=lambda g: g["edit"][0])
+    inside = []
+    for g in segs:
+        c, d = g["src"]
+        inside.append([i for i, (a, b, _) in enumerate(words) if c <= (a + b) / 2.0 <= d])
+
+    def at(g, x):  # take time -> edit time
+        return g["edit"][0] + x - g["src"][0]
+
+    def filler(i):
+        return norm_word(words[i][2]) in FILLERS
+
+    def joins(i, j):
+        """The take's word j follows word i in the edit as said: next word, a retry or only ums between."""
+        if j <= i + 1:
+            return True
+        between = [k for k in range(i + 1, j) if not filler(k)]
+        return not between or norm_word(words[between[0]][2]) == norm_word(words[j][2])
+    # Voice in the edit that is in no segment (a pick-up from another take, a voice-over): what is said
+    # there is not known, so a cut next to it is not judged (a sentence can go on in the other take).
+    env = ctx["env_e"] or []
+    loud = (percentile(env, 0.95) or 0.0) - 25.0
+    spans = [(int(x["edit"][0] / FRAME), int(x["edit"][1] / FRAME)) for x in segs]
+
+    def open_voice(x, y):
+        lo, hi = max(0, int(x / FRAME)), min(len(env), int(y / FRAME))
+        return sum(1 for i in range(lo, hi) if env[i] > loud and not any(a <= i < b for a, b in spans)) * FRAME >= 0.2
+    missing, clipped, twice = [], [], []
+    for k, g in enumerate(segs):
+        c, d = g["src"]
+        if g.get("rough"):
+            continue  # its edges are not known to the word
+        open_in, open_out = open_voice(g["edit"][0] - 1.0, g["edit"][0]), open_voice(g["edit"][1], g["edit"][1] + 1.0)
+        for i, (a, b, w) in enumerate(words):
+            if b - a <= 0.05:
+                continue
+            if a < d - 0.02 and b > d + lim["edge"] and not open_out:
+                clipped.append((at(g, max(d, c)), [words[i]]))
+            elif b > c + 0.02 and a < c - lim["edge"] and not open_in:
+                clipped.append((at(g, c), [words[i]]))
+        ins = inside[k]
+        if not ins:
+            continue
+        last, first = ins[-1], ins[0]
+        nxt = next((inside[j][0] for j in range(k + 1, len(segs)) if inside[j]), None)
+        prv = next((inside[j][-1] for j in range(k - 1, -1, -1) if inside[j]), None)
+        if not ends[last] and not open_out and not (nxt is not None and joins(last, nxt)):
+            missing.append((at(g, words[last][1]), words[max(first, last - 3):last + 1], "stops"))
+        before = first - 1
+        while before >= 0 and filler(before):
+            before -= 1
+        if before >= 0 and not ends[before] and not open_in and not (prv is not None and joins(prv, first)):
+            missing.append((g["edit"][0], words[first:min(last, first + 3) + 1], "starts"))
+        if k + 1 < len(segs):
+            h = segs[k + 1]
+            lap = min(d, h["src"][1]) - max(c, h["src"][0])
+            if h["edit"][0] - g["edit"][1] < 0.5 and lap > lim["twice"] and not h.get("rough"):
+                said = [x for x in words if max(c, h["src"][0]) <= (x[0] + x[1]) / 2 <= min(d, h["src"][1])]
+                twice.append((h["edit"][0], said or words[ins[-1]:ins[-1] + 1], round(lap, 2)))
+    out = []
+    if missing:
+        t, ws, how = missing[0]
+        out.append((len(missing), [x[0] for x in missing],
+                    "The cut %s in the middle of a sentence at %s: %s." % (how, mmss(t), quote(ws)),
+                    {"label": "Missing words", "want": "every cut at a sentence end or joined to the rest of it",
+                     "fix": "%d cuts inside a sentence (first at %.2f s of the edit). Keep the whole sentence: move "
+                            "the cut to its end or add the rest from the take." % (len(missing), t)}))
+    if clipped:
+        t, ws = clipped[0]
+        out.append((len(clipped), [x[0] for x in clipped], "A word is cut off at %s: %s." % (mmss(t), quote(ws)),
+                    {"label": "Cut word", "want": "no word cut by more than %g s" % lim["edge"],
+                     "fix": "%d words cut at a segment edge (first at %.2f s). Move the cut into the pause next to "
+                            "the word (cut_take snaps cuts to word edges)." % (len(clipped), t)}))
+    if twice:
+        t, ws, lap = twice[0]
+        out.append((lap, [x[0] for x in twice], "Words are said twice at %s: %s." % (mmss(t), quote(ws[:4])),
+                    {"label": "Words twice", "want": "back-to-back cuts overlap by at most %g s of the take" % lim["twice"],
+                     "fix": "Two back-to-back cuts repeat %.2f s of the take at %.2f s. Start the second cut where the "
+                            "first one ends." % (lap, t)}))
+    return out or (0, [], None, {"want": "every cut at a sentence end, no cut word, nothing said twice"})
+
+
+def one_frame(path, t):
+    f = grey_frames(path, t, 0.25, 4, (64, 36))
+    return f[0] if f else None
+
+
+def version_segments(s, rel):
+    """(take path, segments) of an edit version, as check_edit finds them: its made_from, else align
+    with the guessed take. (None, []) when the version is not found in a take."""
+    path = os.path.join(s, rel)
+    try:
+        src = edit_source(s, rel)
+        if src["segments"]:
+            return src["path"], src["segments"]
+        if src["path"] and probe_streams(path)["audio"]:
+            al = align(envelope(s, path), envelope(s, src["path"]))
+            if al["segments"] and al["coverage"] >= 0.5:
+                return src["path"], al["segments"]
+    except (ValueError, OSError, subprocess.SubprocessError):
+        pass
+    return None, []
+
+
+def span_union(spans):
+    out = []
+    for a, b in sorted(spans):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        elif b > a:
+            out.append((a, b))
+    return out
+
+
+def span_minus(spans, cut):
+    out = []
+    for a, b in spans:
+        pieces = [(a, b)]
+        for c, d in cut:
+            pieces = [p for x, y in pieces for p in ((x, min(y, c)), (max(x, d), y)) if p[1] - p[0] > 1e-6]
+        out += pieces
+    return out
+
+
+def words_undone(ctx, c, fix, start, end):
+    """cut_undone when the take times are not known: the words (each version's words.json) said in the
+    comment's range, with the two words before them, that the fixed version does not say and this file
+    says again."""
+    s = ctx["s"]
+    wa, wb, wc = (transcript_words(os.path.join(s, f)) for f in (c["file"], fix["file"], ctx["path"]))
+    if not wa or not wb or not wc:
+        return None
+
+    def toks(ws, lo=None, hi=None):
+        return [(t, w) for w in ws if lo is None or lo <= (w[0] + w[1]) / 2.0 <= hi for t in spoken(w[2])]
+    cut = toks(wa, start, end)
+    before = [x for x in toks(wa) if (x[1][0] + x[1][1]) / 2.0 < start][-2:]
+    if not cut or not before:
+        return None
+    seq = [t for t, _ in before + cut]
+
+    def find(ws):
+        tk = toks(ws)
+        return next((tk[i + len(before)][1] for i in range(len(tk) - len(seq) + 1)
+                     if [t for t, _ in tk[i:i + len(seq)]] == seq), None)
+    if find(wb) is not None:
+        return None
+    w = find(wc)
+    if w is None:
+        return None
+    said = [x[1] for x in cut]
+    said = [x for i, x in enumerate(said) if x not in said[:i]]
+    return w[0], said, round(said[-1][1] - said[0][0], 2), [(said[0][0], said[-1][1])]
+
+
+def cut_undone(ctx, c, fix, seg_of):
+    """A part of the take that the comment's range had in its version, that the fixed version cut, and that
+    this file has again: (seconds in this file, take words or None, back seconds) or None. Only the take
+    times count, so a hiccup that comes back is found though the sound around it is the same."""
+    lim = BUILTIN["regression"]
+    start = float(c["start"])
+    end = float(c["end"]) if c.get("end") is not None and float(c["end"]) - start >= 0.1 else start + 1.0
+    pa, sa = seg_of(c["file"])
+    pb, sb = seg_of(fix["file"])
+    if not sa or not sb or pa != ctx["src"]["path"] or pb != pa:
+        return words_undone(ctx, c, fix, start, end)
+    had = []
+    for g in sa:
+        lo, hi = max(start, g["edit"][0]), min(end, g["edit"][1])
+        if hi - lo > 0:
+            off = g["src"][0] - g["edit"][0]
+            had.append((lo + off, hi + off))
+    # The fixed version's edges are known to about 0.05 s: a sliver there is not a cut.
+    gone = [(a, b) for a, b in span_minus(span_union(had), span_union([tuple(g["src"]) for g in sb]))
+            if b - a >= lim["cut"]]
+    if not gone:
+        return None
+    here = [(g["src"][0], g["src"][1], g["edit"][0]) for g in ctx["segments"]]
+    back, at = 0.0, None
+    for a, b in gone:
+        for c0, d0, e0 in here:
+            lo, hi = max(a, c0), min(b, d0)
+            if hi - lo > 0:
+                back += hi - lo
+                at = e0 + lo - c0 if at is None else min(at, e0 + lo - c0)
+    total = sum(b - a for a, b in gone)
+    if at is None or back < lim["cut"] or back < lim["cut_share"] * total:
+        return None
+    words = transcript_words(ctx["src"]["path"]) or []
+    said = [w for w in words if any(a <= (w[0] + w[1]) / 2.0 <= b for a, b in gone)]
+    return at, said or None, round(back, 2), gone
+
+
+def chk_regression(ctx):
+    """A fix the user approved that came undone: per resolved comment fixed in an earlier version of this
+    slug, is this file nearer the version he commented on than the fixed one, in sound and in picture?"""
+    lim, s, rel = BUILTIN["regression"], ctx["s"], ctx.get("line_rel") or ctx["rel"]
+    want = "no approved fix undone"
+    folder = os.path.dirname(rel)
+    base, ver, _ = split_version(os.path.basename(rel))
+    if ver is None:
+        return (0, [], None, {"want": want})
+
+    def same(f):
+        return bool(f) and os.path.dirname(f) == folder and split_version(os.path.basename(f))[0] == base
+
+    def version(f):
+        return split_version(os.path.basename(f))[1] or 0
+    comments = read_comments(s)["comments"]
+    cand = []
+    for c in comments:
+        if c.get("status") != "resolved" or c.get("start") is None or not same(c.get("file")):
+            continue
+        fix = next((r for r in reversed(c.get("replies") or []) if same(r.get("file"))), None)
+        if not fix or not (version(c["file"]) < version(fix["file"]) < ver):
+            continue
+        if os.path.isfile(os.path.join(s, c["file"])) and os.path.isfile(os.path.join(s, fix["file"])):
+            cand.append((c, fix))
+    cand = sorted(cand, key=lambda x: x[0].get("at") or "", reverse=True)[:20]
+    p, sound = ctx["probe"], ctx["probe"]["audio"]
+    env = envelope(s, ctx["path"]) if sound and cand else None
+    out, compared, segs = [], 0, {}
+
+    def seg_of(f):
+        if f not in segs:
+            segs[f] = version_segments(s, f)
+        return segs[f]
+    for c, fix in cand:
+        start = float(c["start"])
+        L = min(6.0, max(1.0, float(c.get("end") if c.get("end") is not None else start + 1.0) - start))
+        fa = float(fix["time"]) if fix.get("time") is not None else start
+        fv = version(fix["file"])
+        if any(o is not c and same(o.get("file")) and version(o["file"]) >= fv and o.get("start") is not None
+               and o["start"] < fa + L and (o.get("end") if o.get("end") is not None else o["start"]) > fa
+               for o in comments):
+            continue  # a comment on the fixed version or later asked to change this part again
+        name = os.path.splitext(os.path.basename(fix["file"]))[0]
+        back = cut_undone(ctx, c, fix, seg_of) if ctx["known"] and ctx["segments"] else None
+        if back:
+            at, said, secs_back, gone = back
+            what = quote(said[:6]) if said else "the part of %.1f s" % sum(b - a for a, b in gone)
+            out.append((secs_back, [at], "A part you asked to cut is back at %s: %s (cut in %s)." % (mmss(at), what, name),
+                        {"comment": c["id"], "want": want,
+                         "fix": "Cut it again: %.2f s that %s cut (%.2f to %.2f s of %s) is in this version at "
+                                "%.2f s. Start from %s. If the change is on purpose, ask the user first."
+                                % (secs_back, name, start, float(c["end"] if c.get("end") is not None else start + 1.0),
+                                   os.path.splitext(os.path.basename(c["file"]))[0], at, name)}))
+            compared += 1
+            continue
+        broken, fixed = os.path.join(s, c["file"]), os.path.join(s, fix["file"])
+        votes, where = [], fa
+        if sound and probe_streams(broken)["audio"] and probe_streams(fixed)["audio"]:
+            eb, ef = envelope(s, broken), envelope(s, fixed)
+            n, fi, bi = int(L / FRAME), int(fa / FRAME), int(start / FRAME)
+            fw, bw = ef[fi:fi + n], eb[bi:bi + n]
+            if len(fw) == n and len(bw) == n:
+                q, _ = _ncc_search(fw, env, fi - int(NEAR / FRAME), fi + int(NEAR / FRAME))
+                q = fi if q is None else q
+                tw = env[q:q + n]
+                if len(tw) == n:
+                    where = q * FRAME
+
+                    def sim(x, y):
+                        return 1.0 / (1.0 + _mad(x, y) / 3.0)
+                    if sim(bw, fw) < 0.9:  # the fix changed the sound here
+                        votes.append(sim(tw, bw) - sim(tw, fw))
+        if p["video"]:
+            fb, ff_, ft = one_frame(broken, start + L / 2), one_frame(fixed, fa + L / 2), one_frame(ctx["path"], where + L / 2)
+            if fb and ff_ and ft and ssim(fb, ff_) < 0.95:  # the fix changed the picture here
+                votes.append(ssim(ft, fb) - ssim(ft, ff_))
+        compared += 1
+        if votes and all(v >= lim["margin"] for v in votes):
+            text = re.sub(r"\s+", " ", c.get("text") or "").strip()
+            text = text if len(text) <= 40 else text[:39].rstrip() + "…"
+            out.append((round(min(votes), 2), [where],
+                        "A fix you approved changed at %s: “%s” (fixed in %s)." % (mmss(where), text, name),
+                        {"comment": c["id"], "want": want,
+                         "fix": "Start from %s at %s. If the change is on purpose, ask the user first." % (name, mmss(fa))}))
+    return out or (compared, [], None, {"want": want})
+
+
+PICTURE_CHECKS = ("av_sync", "frozen_video", "picture_drift")
+
+
+def run_builtin(s, rel, path, given=None, as_rel=None):
+    """The built-in checks of one file, in a fixed order: streams, then align, then the rest in parallel."""
+    t0 = time.time()
+    p = probe_streams(path)
+    if not p["video"] and not p["audio"]:
+        raise ValueError("Takes cannot read this file (no video or sound stream). Render it again.")
+    src = edit_source(s, rel, given)
+    ctx = {"s": s, "rel": rel, "path": path, "probe": p, "line_rel": as_rel or rel, "src": src, "src_probe": None, "env_e": None,
+           "env_s": None, "segments": None, "known": False,
+           "why": NO_SOURCE if src["path"] else "The take file %s is missing." % src["missing"] if src.get("missing")
+           else "The session has no take to compare with."}
+
+    def run(name, fn):
+        try:
+            got = fn(ctx)
+        except Skip as e:
+            return [{"check": name, "pass": None, "skip": str(e)}]
+        except (ValueError, OSError, subprocess.SubprocessError) as e:
+            return [{"check": name, "pass": None, "error": str(e)}]
+        out = []
+        for value, at, say, extra in (got if isinstance(got, list) else [got]):
+            r = {"check": name}
+            if extra.get("comment"):
+                r["comment"] = extra["comment"]
+            if say:
+                r["label"] = extra.get("label") or LABELS.get(name)
+            r["pass"] = say is None
+            r["value"] = value
+            if extra.get("want"):
+                r["want"] = extra["want"]
+            if at:
+                r["at"] = [round(x, 2) for x in at[:12]]
+            if say:
+                r["say"], r["fix"] = say, extra.get("fix")
+            if extra.get("note"):
+                r["note"] = extra["note"]
+            out.append(r)
+        return out
+    results = run("streams", chk_streams)
+    if src["path"] and p["audio"]:
+        try:
+            ctx["src_probe"] = probe_streams(src["path"])
+            if ctx["src_probe"]["audio"]:
+                with concurrent.futures.ThreadPoolExecutor(2) as ex:
+                    fe, fs = ex.submit(envelope, s, path), ex.submit(envelope, s, src["path"])
+                    ctx["env_e"], ctx["env_s"] = fe.result(), fs.result()
+                if src["segments"]:
+                    ctx["segments"], ctx["known"] = src["segments"], True
+                else:
+                    al = align(ctx["env_e"], ctx["env_s"])
+                    for other in src["candidates"] if al["coverage"] < 0.5 else []:
+                        # Not the guessed take: the edit may come from another one.
+                        sp = probe_streams(other)
+                        if not sp["audio"] or time.time() - t0 > CHECK_BUDGET / 3:
+                            continue
+                        env = envelope(s, other)
+                        a2 = align(ctx["env_e"], env)
+                        if a2["coverage"] > al["coverage"]:
+                            al, ctx["env_s"], ctx["src_probe"] = a2, env, sp
+                            src.update(path=other, offset=float((take_clock(other) or {}).get("audio_offset_s") or 0.0))
+                        if al["coverage"] >= 0.5:
+                            break
+                    ctx["segments"] = al["segments"]
+                    ctx["known"] = bool(al["segments"]) and al["coverage"] >= (GIVEN_SHARE if src["given"] else 0.5)
+                    if src["given"] and not ctx["known"]:
+                        ctx["why"] = NOT_FOUND % os.path.basename(src["path"])
+            else:
+                ctx["why"] = "The take has no sound, so Takes cannot find the edit in it."
+        except (ValueError, OSError, subprocess.SubprocessError) as e:
+            ctx["why"] = "Takes could not read the take: %s" % e
+    elif src["path"]:
+        ctx["why"] = "The edit has no sound, so Takes cannot find it in the take."
+    names = ["av_sync", "frozen_video", "band_balance", "echo", "picture_drift", "words", "regression"]
+    if not p["video"]:
+        names = [n for n in names if n not in PICTURE_CHECKS]  # a sound-only edit: picture checks are not listed
+    ex = concurrent.futures.ThreadPoolExecutor(4)
+    futures = [(n, ex.submit(run, n, globals()["chk_" + n])) for n in names]
+    for n, f in futures:
+        left = CHECK_BUDGET - (time.time() - t0)
+        try:
+            results += f.result(timeout=max(0.0, min(CHECK_TIMEOUT, left)))
+        except concurrent.futures.TimeoutError:
+            results.append({"check": n, "pass": None, "skip": OUT_OF_TIME})
+    ex.shutdown(wait=False, cancel_futures=True)
+    return results, ctx
+
+
+def save_check(s, rel, entry):
+    """Sets checks.json[rel] under a lock; every other entry stays. A checks.json that does not read is
+    kept aside as .checks-unreadable-<time>.json and a new one starts."""
+    import fcntl
+    cp = os.path.join(s, "checks.json")
+    with open(os.path.join(s, ".checks.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            saved = {}
+            if os.path.exists(cp):
+                try:
+                    with open(cp) as fh:
+                        saved = json.load(fh)
+                    if not isinstance(saved, dict):
+                        raise ValueError("not an object")
+                except ValueError:
+                    os.replace(cp, os.path.join(s, ".checks-unreadable-%s.json" % time.strftime("%Y%m%d-%H%M%S")))
+                    saved = {}
+            saved[rel] = entry
+            tmp = os.path.join(s, ".checks.json.tmp")
+            with open(tmp, "w") as fh:
+                json.dump(saved, fh, indent=2, ensure_ascii=False)
+            os.replace(tmp, cp)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def t_check_edit(a):
-    """Runs every rule that has a check on one video, and saves the result for the Feedback board."""
+    """The built-in checks (the edit against its take), then every learned rule that has a check. Saves the
+    result in checks.json for the app (the line under the player, the Assets badge, the Feedback board)."""
     s = resolve_session(a["session"])
-    f = a["file"]
-    path = f if os.path.isabs(f) else os.path.join(s, f)
+    f = a.get("file")
+    if not f:
+        raise ValueError("Give file: an edit from get_session, e.g. 'edits/<name>-v2.mp4'.")
+    path = os.path.normpath(f if os.path.isabs(f) else os.path.join(s, f))
+    rel = os.path.relpath(path, s)
+    if rel.startswith(".."):
+        raise ValueError("%s is not in this session. Pass an edit from get_session, e.g. 'edits/<name>-v2.mp4'." % f)
     if not os.path.isfile(path):
-        raise ValueError("No file %s." % f)
+        raise ValueError("No file %s. Use get_session for the edit files, or next_path for a new one." % f)
+    # A render of render_edit: the line of versions comes from its recipe's parent.
+    rec = None
+    try:
+        rec = load_recipe(s, recipe_path(rel))
+    except ValueError:
+        pass
+    entry = check_file(s, rel, path, a.get("source"), lineage_rel(rec) if rec and rel.startswith(RENDERS + os.sep) else None)
+    results = entry["results"]
     rules = [r for r in read_lessons()["rules"] if r.get("on", True) and r.get("check")]
-    results = []
+    failed = [x for x in results if x["pass"] is False]
+    idle = [x for x in results if x["pass"] is None]
+    if failed:
+        note = ("%d problem%s. Fix each one, make a new version (render_edit base=<name> changes={...}) and check it "
+                "before you show it." % (len(failed), "" if len(failed) == 1 else "s"))
+    else:
+        note = "Every check passes. Look at the stills for the rules without a check."
+    if idle:
+        note += " %d check%s did not run; skip or error says why." % (len(idle), "" if len(idle) == 1 else "s")
+    if not rules:
+        note += (" No rule has a check yet. When a rule is repeated and a number can test it, add a check with "
+                 "set_rule (kinds: %s)." % ", ".join(sorted(CHECKS)))
+    return dict({"file": rel}, **entry, note=note)
+
+
+def check_file(s, rel, path, source=None, as_rel=None):
+    """Every check of one file, saved in checks.json. as_rel: the edits/ path whose line of versions the
+    regression check reads (a render of render_edit is not in edits/ yet)."""
+    results, ctx = run_builtin(s, rel, path, source, as_rel)
+    rules = [r for r in read_lessons()["rules"] if r.get("on", True) and r.get("check")]
     for r in rules:
         try:
             res = run_check(path, r["check"])
         except ValueError as e:
             res = {"pass": None, "error": str(e)}
+        if res["pass"] is False:
+            res = dict(res, label="Rule: " + (r["text"] if len(r["text"]) <= 30 else r["text"][:29].rstrip() + "…"),
+                       say=r["text"])
         results.append(dict({"rule": r["id"], "text": r["text"]}, **res))
-    rel = os.path.relpath(path, s)
-    cp = os.path.join(s, "checks.json")
+    failed = [x for x in results if x["pass"] is False]
+    entry = {"v": 2, "at": now_iso(), "mtime": os.path.getmtime(path),
+             "source": os.path.relpath(ctx["src"]["path"], s) if ctx["src"]["path"] else None,
+             "known": bool(ctx["known"]), "passed": not failed, "results": results}
+    save_check(s, rel, entry)
+    return entry
+
+
+def check_states(s):
+    """get_session's checks: the check state of each edit's newest version (None without edits)."""
+    d = os.path.join(s, "edits")
+    if not os.path.isdir(d):
+        return None
+    newest = {}
+    for f in os.listdir(d):
+        if f.startswith(".") or f.endswith(".words.json") or not (
+                media_kind(f) == "video" or os.path.splitext(f)[1].lower() in AUDIO_EXT):
+            continue
+        base, v, _ = split_version(f)
+        if base not in newest or (v or 0) > newest[base][0]:
+            newest[base] = (v or 0, f)
+    if not newest:
+        return None
     try:
-        with open(cp) as fh:
+        with open(os.path.join(s, "checks.json")) as fh:
             saved = json.load(fh)
+        saved = saved if isinstance(saved, dict) else {}
     except (OSError, ValueError):
         saved = {}
-    saved[rel] = {"at": now_iso(), "results": [{"rule": x["rule"], "pass": x["pass"]} for x in results]}
-    tmp = cp + ".tmp"
-    with open(tmp, "w") as fh:
-        json.dump(saved, fh, indent=2)
-    os.replace(tmp, cp)
-    failed = [x for x in results if x["pass"] is False]
-    return {"file": rel, "results": results, "passed": not failed,
-            "note": ("Fix each failed check and run check_edit again before you show the edit."
-                     if failed else "All checks pass. Rules without a check: look at the stills.")
-            if rules else "No rule has a check yet. When a rule is repeated and a number can test it, "
-                          "add a check with set_rule (kinds: %s)." % ", ".join(sorted(CHECKS))}
+    out = {}
+    for base in sorted(newest):
+        rel = "edits/" + newest[base][1]
+        e = saved.get(rel)
+        if not isinstance(e, dict) or e.get("v") != 2:
+            out[rel] = {"state": "unchecked"}
+        elif os.path.getmtime(os.path.join(s, rel)) > float(e.get("mtime") or 0) + 1:
+            out[rel] = {"state": "stale"}
+        else:
+            probs = [x.get("label") or x.get("check") or "Rule" for x in e.get("results") or []
+                     if isinstance(x, dict) and x.get("pass") is False]
+            out[rel] = {"state": "problems", "problems": probs} if probs else {"state": "passed"}
+    return out
 
 
 def read_hooks(s):
@@ -1768,9 +4040,7 @@ def shot_image(s, f, sketch, fmt):
 
 
 def start_sketches(s, retry=False):
-    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--sketch-run", s] + (["--retry"] if retry else []),
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True)
+    spawn_detached(["--sketch-run", s] + (["--retry"] if retry else []))
 
 
 def sketch_run(s, retry=False):
@@ -2456,7 +4726,7 @@ def t_design_voice(a):
         if s:
             note_model(s, os.path.relpath(f, s), "ElevenLabs voice design")
         samples.append({"save": p.get("generated_voice_id"), "file": os.path.relpath(f, s) if s else f})
-    return {"samples": samples, "note": "The user listens on the Assets tab. Save his pick with design_voice "
+    return {"samples": samples, "note": "The user listens on the Assets tab. Save the pick with design_voice "
                                         "save=<save> name=<name>."}
 
 
@@ -2583,7 +4853,7 @@ def eleven_transcribe(src):
     """Word times from ElevenLabs Scribe, saved as <stem>.words.json next to the file."""
     with tempfile.TemporaryDirectory() as tmp:
         mp3 = os.path.join(tmp, "a.mp3")
-        ff("-i", src, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "64k", mp3)
+        extract_voice(src, mp3, rate=16000, codec="libmp3lame", extra=("-b:a", "64k"))
         res = eleven_http("POST", "/v1/speech-to-text", {"model_id": ELEVEN_STT_MODEL,
                                                           "timestamps_granularity": "word"}, files={"file": mp3})
     words = [{"word": w.get("text", "").strip(), "start": w.get("start"), "end": w.get("end")}
@@ -2615,9 +4885,23 @@ def splice(base, piece, start, end, out, length):
        "-map", "[o]", "-ac", "1", "-ar", "48000", "-c:a", "pcm_f32le", out)
 
 
-def with_audio(video, wav, out):
-    ff("-i", video, "-i", wav, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k",
+def with_audio(video, wav, out, delay_s=0.0):
+    """video with wav as its sound. delay_s: the WAV starts that late after frame 0 (an old voice WAV,
+    see voice_offset)."""
+    delay = ["-af", "adelay=%d:all=1" % round(delay_s * 1000)] if delay_s and delay_s > 0.0005 else []
+    ff("-i", video, "-i", wav, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", *delay, "-c:a", "aac", "-b:a", "256k",
        "-shortest", "-movflags", "+faststart", out)
+
+
+def base_offset(s, src, cleaned):
+    """Where second 0 of an audio base for splice sits on the take's video clock: a cleaned voice WAV
+    starts voice_offset late; the take's own sound comes out of splice from its first sample."""
+    t = next((t for t in read_meta(s).get("takes", []) if os.path.join(s, t["file"]) == src), None)
+    if not t:
+        return 0.0
+    if cleaned:
+        return voice_offset(s, voice_key(t["number"], t["kind"]))
+    return float((take_clock(src) or {}).get("audio_offset_s") or 0.0)
 
 
 def t_fix_words(a):
@@ -2649,6 +4933,9 @@ def t_fix_words(a):
         raise ValueError("end must come after start.")
     vid, vname = resolve_voice(a.get("voice"))
     base, cleaned = voice_source(s, src)
+    delay = base_offset(s, src, cleaned)
+    if cleaned and delay and (words_doc(src) or {}).get("clock") == "video":
+        start, end = max(0.0, start - delay), max(0.0, end - delay)  # video-clock words on an old voice WAV
     stem = slug(os.path.splitext(os.path.basename(src))[0]) + "-fix"
     rel = next_generated(s, stem, ".wav")
     with tempfile.TemporaryDirectory() as tmp:
@@ -2678,7 +4965,7 @@ def t_fix_words(a):
            "audio": "the take's cleaned voice" if cleaned else "the file's own audio"}
     if media_kind(src) == "video" and fit:
         vrel = rel[:-4] + ".mp4"
-        with_audio(src, os.path.join(s, rel), os.path.join(s, vrel))
+        with_audio(src, os.path.join(s, rel), os.path.join(s, vrel), delay)
         note_model(s, vrel, "ElevenLabs · " + vname)
         out["video"] = vrel
         out["note"] = ("Same length as the take, so its times still hold. The lips do not match the new words: "
@@ -2697,6 +4984,7 @@ def t_change_voice(a):
     src = session_file(s, a.get("file") or a.get("take") or "")
     vid, vname = resolve_voice(a.get("voice"))
     base, cleaned = voice_source(s, src)
+    delay = base_offset(s, src, cleaned)
     total = media_duration(base) or 0.0
     start = float(a["start"]) if a.get("start") is not None else 0.0
     end = float(a["end"]) if a.get("end") is not None else total
@@ -2725,10 +5013,738 @@ def t_change_voice(a):
            "audio": "the take's cleaned voice" if cleaned else "the file's own audio"}
     if media_kind(src) == "video":
         vrel = rel[:-4] + ".mp4"
-        with_audio(src, os.path.join(s, rel), os.path.join(s, vrel))
+        with_audio(src, os.path.join(s, rel), os.path.join(s, vrel), delay)
         note_model(s, vrel, "ElevenLabs · " + vname)
         out["video"] = vrel
     return out
+
+
+# ---------- jobs: long work that Takes runs (2026-10-10, same format as Sources/Takes/Jobs.swift) ----------
+#
+# A render, Demucs, Whisper or matting ran as a background Bash job in the chat. A steer, a Stop, a
+# compaction or a Takes quit ended the chat's process, and the render died with it. run_job starts
+# the command in a runner that is not a child of anything in the chat (spawn_detached), so it goes
+# on. The runner keeps <session>/.jobs/<id>.json up to date; the app shows it in the Jobs row and
+# tells the chat when it ends. Higgsfield and Replicate jobs (generated/.jobs) read the same way.
+#
+#   .jobs/<id>.json      the job (run_job writes it first, then only its runner)
+#   .jobs/<id>.log       what the command printed (<id>.log.1 is the older half)
+#   .jobs/<id>.lock      exists only while the runner holds it (flock); free = the runner is gone
+#   .jobs/<id>.told      the chat knows the job ended (made with O_EXCL by get_job or the app)
+#   .jobs/<id>.stop      who asked to stop: "you" (the app) or "takes" (stop_job)
+#   .jobs/<id>.partial/  what a failed or stopped job wrote, out of the session
+#   <root>/.jobs.claims  flock for new ids and outputs
+
+JOBS_DIR = ".jobs"
+JOB_LOG_MAX = 5 * 1024 * 1024
+JOB_WAIT_MAX = 50       # get_job's wait: the MCP loop is sequential, so a wait holds every other takes tool
+JOB_PARTIAL_DAYS = 7
+JOB_START_GRACE = 30    # a job that is "starting" this long without its runner is lost
+JOB_LEGACY_LOST = 90 * 60  # a lockless generated/.jobs file: the CLI may run 40 min, plus upload and download
+JOB_ENDED = ("done", "failed", "stopped", "lost")
+
+
+def job_timeout():
+    return float(os.environ.get("TAKES_JOB_TIMEOUT") or 2 * 3600)
+
+
+def job_log_max():
+    return int(os.environ.get("TAKES_JOB_LOG_MAX") or JOB_LOG_MAX)
+
+
+def spawn_detached(argv):
+    """Start `takes_mcp.py <argv>` so its parent is launchd at once: the chat's kill of its own
+    process tree (ClaudeChat.end walks pgrep -P) cannot reach it. Returns the runner's pid."""
+    p = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--detach"] + [str(x) for x in argv],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    line = p.stdout.readline()
+    p.stdout.close()
+    p.wait()
+    try:
+        return int(line.strip())
+    except ValueError:
+        return None
+
+
+def detach_exec(argv):
+    """`--detach`: fork; the parent prints the child's pid and exits, the child becomes argv."""
+    pid = os.fork()
+    if pid:
+        sys.stdout.write("%d\n" % pid)
+        sys.stdout.flush()
+        os._exit(0)
+    null = os.open(os.devnull, os.O_RDWR)
+    os.dup2(null, 1)
+    os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)] + argv)
+
+
+def job_lock(path):
+    """Hold path's lock for as long as this process lives. The file appears only already held: a
+    temp name is locked first, then renamed. Returns the fd (job_unlock lets it go)."""
+    import fcntl
+    tmp = "%s.%d" % (path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    os.rename(tmp, path)
+    return fd
+
+
+def job_unlock(fd, path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    os.close(fd)
+
+
+def lock_held(path):
+    import fcntl
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return False
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def jobs_dir(s):
+    return os.path.join(s, JOBS_DIR)
+
+
+def job_path(s, job_id, ext=".json", generate=False):
+    return os.path.join(hf_jobs_dir(s) if generate else jobs_dir(s), job_id + ext)
+
+
+def write_job(path, job):
+    with open(path + ".tmp", "w") as f:
+        json.dump(job, f, indent=2)
+    os.replace(path + ".tmp", path)
+
+
+def job_age(job, key="started"):
+    t = parse_iso(job.get(key) or "")
+    return (datetime.now(timezone.utc) - t).total_seconds() if t else None
+
+
+def job_lost(s, job, generate=False):
+    """The runner is gone though the file says it runs. Same rule as JobBoard.lost in Jobs.swift."""
+    status = job.get("status")
+    if status not in ("starting", "running"):
+        return False
+    lock = job_path(s, job["id"], ".lock", generate)
+    if lock_held(lock):
+        return False
+    age = job_age(job)
+    if generate:
+        # A free lock file: its runner died before it could remove it. No lock file at all: a job
+        # from before 2026-10-10, or a runner that has not started yet.
+        return os.path.exists(lock) or (age is not None and age > JOB_LEGACY_LOST)
+    return status == "running" or age is None or age > JOB_START_GRACE
+
+
+def norm_job(s, job, generate):
+    """One shape for both stores. Legacy "error" reads as failed; generate comes from the folder."""
+    j = dict(job)
+    if j.get("status") == "error":
+        j["status"] = "failed"
+    if generate:
+        j["type"] = "generate"
+        j["outputs"] = [j["file"]] if j.get("file") else []
+        j["label"] = j.get("label") or os.path.splitext(os.path.basename(j.get("file") or j["id"]))[0]
+    j.setdefault("outputs", [])
+    j.setdefault("label", j["id"])
+    return j
+
+
+def read_job(s, job_id, generate=False):
+    """The job, normalised and with the lost rule applied. A file that does not parse is never written over."""
+    p = job_path(s, job_id, ".json", generate)
+    try:
+        with open(p) as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict) or not raw.get("id"):
+            raise ValueError
+    except OSError:
+        raise ValueError("No job %s in %s." % (job_id, s))
+    except ValueError:
+        raise ValueError("Takes cannot read the job file %s. It is left as it is. Start it again with run_job."
+                         % os.path.relpath(p, s))
+    if job_lost(s, raw, generate):
+        # Read again: a runner that ended between the read and the lock check wrote its end first.
+        try:
+            with open(p) as f:
+                raw = json.load(f)
+        except (OSError, ValueError):
+            pass
+        if job_lost(s, raw, generate):
+            raw["status"] = "lost"
+            if not generate:  # the runner is dead, so nobody else writes this file now
+                raw["ended"] = raw.get("ended") or now_iso()
+                write_job(p, raw)
+    return norm_job(s, raw, generate)
+
+
+def all_jobs(s):
+    """Every job of a session, both stores, oldest first. Prunes old partial folders."""
+    out = []
+    for generate, d in ((False, jobs_dir(s)), (True, hf_jobs_dir(s))):
+        for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+            if not f.endswith(".json"):
+                continue
+            try:
+                j = read_job(s, f[:-5], generate)
+            except ValueError:
+                continue
+            out.append(j)
+            age = job_age(j, "ended")
+            part = job_path(s, j["id"], ".partial")
+            if not generate and age is not None and age > JOB_PARTIAL_DAYS * 86400 and os.path.isdir(part):
+                shutil.rmtree(part, ignore_errors=True)
+    return sorted(out, key=lambda j: j.get("started") or "")
+
+
+def job_files(job_id):
+    """Every file with this id in the library, both stores."""
+    if not re.fullmatch(r"[\w.\-]+", job_id or ""):
+        raise ValueError("A job id looks like job-7f3a1c (from run_job, higgsfield or replicate).")
+    r = root()
+    return ([(p, False) for p in glob.glob(os.path.join(glob.escape(r), "*", "*", JOBS_DIR, job_id + ".json"))]
+            + [(p, True) for p in glob.glob(os.path.join(glob.escape(r), "*", "*", GENERATED_DIR, JOBS_DIR, job_id + ".json"))])
+
+
+def find_job(job_id, session=None):
+    """(session folder, job). Without session the id must be unique in the library."""
+    if session:
+        s = resolve_session(session)
+        for generate in (False, True):
+            if os.path.exists(job_path(s, job_id, ".json", generate)):
+                return s, read_job(s, job_id, generate)
+        raise ValueError("No job %s in this session. get_job with session lists its jobs." % job_id)
+    found = job_files(job_id)
+    if not found:
+        raise ValueError("No job %s. get_job with session lists a session's jobs." % job_id)
+    if len(found) > 1:
+        raise ValueError("Several jobs have the id %s. Give session." % job_id)
+    p, generate = found[0]
+    s = os.path.dirname(os.path.dirname(p))
+    if generate:
+        s = os.path.dirname(s)
+    return s, read_job(s, job_id, generate)
+
+
+def log_tail(s, job_id, n=20):
+    lines = []
+    for p in (job_path(s, job_id, ".log.1"), job_path(s, job_id, ".log")):
+        try:
+            with open(p, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 16384))
+                lines += re.split(r"[\r\n]", f.read().decode("utf-8", "replace"))
+        except OSError:
+            pass
+    lines = [ANSI.sub("", x).rstrip() for x in lines if x.strip()]
+    return lines[-n:]
+
+
+def job_brief(s, job, tail=20):
+    """What get_job says about one job."""
+    out = {"job": job["id"], "status": job["status"], "label": job.get("label")}
+    if job.get("type") == "generate":
+        out["type"] = "generate"
+    started, ended = parse_iso(job.get("started") or ""), parse_iso(job.get("ended") or "")
+    if started:
+        out["elapsed_s"] = int(((ended or datetime.now(timezone.utc)) - started).total_seconds())
+    if job["status"] in ("starting", "running"):
+        for k in ("progress", "eta_s", "stage"):
+            if job.get(k) is not None:
+                out[k] = job[k]
+    if job.get("exit") is not None:
+        out["exit"] = job["exit"]
+    if job.get("error"):
+        out["error"] = job["error"]
+    if job.get("stopped_by"):
+        out["stopped_by"] = job["stopped_by"]
+    if job.get("type") != "generate":
+        out["cmd"] = job.get("cmd")  # what run_job needs to start it again, also after a compaction
+        out["log_tail"] = log_tail(s, job["id"], tail)
+    if job["status"] == "done":
+        out["outputs"] = [{"path": o, "bytes": os.path.getsize(os.path.join(s, o)) if os.path.exists(os.path.join(s, o)) else 0}
+                          for o in job.get("outputs") or []]
+    else:
+        out["outputs"] = job.get("outputs") or []
+    part = job_path(s, job["id"], ".partial")
+    if os.path.isdir(part):
+        out["partial"] = [os.path.relpath(os.path.join(part, f), s) for f in sorted(os.listdir(part))]
+    out["session"] = s
+    result = next((o for o in job.get("outputs") or [] if o.startswith(WORK_DIR + os.sep) and o.endswith(".json")
+                   and not o.endswith(".words.json")), None)
+    render = next((o for o in job.get("outputs") or [] if o.startswith(RENDERS + os.sep)), None)
+    if job["status"] == "done" and result and os.path.exists(os.path.join(s, result)):
+        out["result"] = cut_view(s, result)  # a cut_take or rough_cut: the same result as the tool
+        out["next"] = out["result"]["next"]
+    elif render and job["status"] == "done":  # render_edit: the checks it ran, then publish_edit
+        try:
+            r = load_recipe(s, os.path.join(RENDERS, job["id"] + RECIPE_EXT))
+        except ValueError:
+            r = None
+        if r and r.get("checks"):
+            out["result"] = render_view(s, job["id"], r)
+            out["next"] = out["result"]["next"]
+        else:
+            out["next"] = "This render is saved already: get_session shows the edit."
+    elif render and job["status"] == "lost":
+        out["next"] = ("The render stopped (the Mac restarted or the job quit). Call render_edit again with the same "
+                       "base and changes.")
+    elif render and job["status"] == "failed":
+        out["next"] = "Fix the recipe and call render_edit again (base=<name> changes={...}). log_tail says why."
+    elif job["status"] == "done" and any(media_kind(o) == "video" for o in job.get("outputs") or []):
+        out["next"] = "Run check_edit on it, then open_in_app."
+    elif job["status"] == "failed" and job.get("type") != "generate":
+        out["next"] = "Fix the command and run_job again with a new path from next_path."
+    elif job["status"] == "lost" and job.get("type") != "generate":
+        out["next"] = "Run it again: run_job with this cmd and label, and new outputs from next_path."
+    return out
+
+
+def claim_told(s, job):
+    """The chat knows this job ended: the app sends no note. True when this call made the file."""
+    try:
+        os.close(os.open(job_path(s, job["id"], ".told", job.get("type") == "generate"),
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+        return True
+    except OSError:
+        return False
+
+
+def claimed_outputs(s):
+    """Outputs of this session's starting or running jobs: {relative path: job id}."""
+    out = {}
+    for j in all_jobs(s):
+        if j["status"] in ("starting", "running") and j.get("type") != "generate":
+            for o in j.get("outputs") or []:
+                out[os.path.normpath(o)] = j["id"]
+    return out
+
+
+def job_output(s, o):
+    """One output of run_job as a path relative to the session, or an error that names the fix."""
+    o = str(o or "").strip()
+    if not o:
+        raise ValueError("An output is empty. Give each file the job writes, relative to the session.")
+    p = os.path.normpath(o if os.path.isabs(o) else os.path.join(s, o))
+    if not p.startswith(s.rstrip(os.sep) + os.sep):
+        raise ValueError("%s is outside the session. Get a path inside it from next_path." % o)
+    rel = os.path.relpath(p, s)
+    parts = rel.lower().split(os.sep)  # the Mac's volume ignores case: Stills/ is stills/
+    top = os.sep.join(rel.split(os.sep)[:2 if parts[0] == GENERATED_DIR else 1])
+    if top.lower() in ("stills", "assets", JOBS_DIR, os.path.join(GENERATED_DIR, JOBS_DIR)):
+        raise ValueError("%s/ is read only for jobs. Write to edits/ or thumbnails/ (next_path gives the path)." % top)
+    if top.lower() != WORK_DIR and re.match(r"take-\d+", os.path.basename(rel), re.I):
+        raise ValueError("%s is a take file. Never write over a take: get a new path from next_path." % rel)
+    if os.path.lexists(p):
+        raise ValueError("%s exists. Get a new path from next_path." % rel)
+    return rel
+
+
+def new_job_id(s):
+    while True:
+        job_id = "job-" + secrets.token_hex(3)
+        if not job_files(job_id) and not any(os.path.exists(job_path(s, job_id, ".json", g)) for g in (False, True)):
+            return job_id
+
+
+def from_chat():
+    """A job the Takes chat of a session started: the app tells that chat when it ends. Board chats
+    (TAKES_BOARD) and other agents get no note."""
+    return os.environ.get("TAKES_CHAT") == "1" and not os.environ.get("TAKES_BOARD")
+
+
+def start_job(s, cmd, outputs, label, estimate_s=None, job_id=None):
+    """Start cmd in the session folder as a job. The internal API: run_job and later tools that
+    run their own command call it. job_id: an id from new_job_id that the caller named files with.
+    Returns the job as written."""
+    import fcntl
+    outputs = [job_output(s, o) for o in outputs]
+    with open(os.path.join(root(), ".jobs.claims"), "a") as claims:
+        fcntl.flock(claims, fcntl.LOCK_EX)
+        busy = claimed_outputs(s)
+        for o in outputs:
+            if os.path.normpath(o) in busy:
+                raise ValueError("A running job already writes %s (%s). Wait with get_job or use next_path."
+                                 % (o, busy[os.path.normpath(o)]))
+        if job_id and any(os.path.exists(job_path(s, job_id, ".json", g)) for g in (False, True)):
+            raise ValueError("A job %s exists already. Try again." % job_id)
+        job = {"v": 1, "id": job_id or new_job_id(s), "label": label, "cmd": cmd, "outputs": outputs,
+               "from_chat": from_chat(), "status": "starting", "started": now_iso(), "updated": now_iso(),
+               "ended": None, "pid": None, "progress": None, "eta_s": None, "estimate_s": estimate_s,
+               "timeout_s": job_timeout(), "exit": None, "error": None, "stopped_by": None}
+        os.makedirs(jobs_dir(s), exist_ok=True)
+        write_job(job_path(s, job["id"]), job)
+    spawn_detached(["--job-run", s, job["id"]])
+    return job
+
+
+def job_session(ref):
+    """The session a job runs in: only a folder at <library>/<project>/<session>. The app and get_job
+    look for jobs there and nowhere else."""
+    ref = str(ref or "").strip()
+    bad = "Give session: Project/folder or the session's path (list_sessions)."
+    if not ref:
+        raise ValueError(bad)
+    try:
+        s = resolve_session(ref)
+    except ValueError as e:
+        raise ValueError(bad) if str(e).startswith("Not a session") else e
+    project = os.path.dirname(s)
+    if (os.path.realpath(os.path.dirname(project)) != os.path.realpath(root())
+            or os.path.basename(project).startswith((".", "_")) or os.path.basename(s).startswith((".", "_"))):
+        raise ValueError(bad)
+    return s
+
+
+def job_cmd(s, cmd):
+    """The runner works in the session folder by its inode: a path to it by name would break on a rename.
+    Only '<session>/' and the whole word '<session>' change: a sibling such as '<session>-2' stays."""
+    s = s.rstrip(os.sep)
+    cmd = cmd.replace(s + os.sep, "")
+    return re.sub(re.escape(s) + r"(?=$|[\s'\"`;|&)<>])", ".", cmd)
+
+
+def t_run_job(a):
+    s = job_session(a.get("session"))
+    cmd = a.get("cmd")
+    if not isinstance(cmd, str) or not cmd.strip():
+        raise ValueError("Give cmd: the shell command, with paths relative to the session folder.")
+    if len(cmd) > 8000:
+        raise ValueError("cmd is longer than 8000 characters. Put the steps in a script file and run that.")
+    cmd = job_cmd(s, cmd)
+    outputs = a.get("outputs")
+    if not isinstance(outputs, list):
+        raise ValueError("Give outputs: the files the job writes, relative to the session ([] if none).")
+    label = " ".join(str(a.get("label") or "").split())
+    if not label:
+        raise ValueError("Give a label: a few words the user sees, e.g. Render edit v3.")
+    if len(label) > 60:
+        raise ValueError("The label is longer than 60 characters. Use a few words, e.g. Render edit v3.")
+    job = start_job(s, cmd, outputs, label)
+    if job["from_chat"]:
+        then = "Otherwise tell the user in one line what runs and end your turn: Takes sends you a note when it ends."
+    else:  # only the Takes chat of a session gets a note: other agents must look
+        then = ("Otherwise tell the user in one line what runs. No note comes to you when it ends: "
+                "check later with get_job id=%s." % job["id"])
+    return {"job": job["id"], "status": job["status"], "label": label, "outputs": job["outputs"],
+            "note": "Takes runs it and shows it in the Jobs row. If it should end within about 2 min, wait with "
+                    "get_job wait_s=50. " + then}
+
+
+def t_get_job(a):
+    if a.get("id"):
+        s, job = find_job(a["id"], a.get("session"))
+        try:
+            wait = min(max(float(a.get("wait_s") or 0), 0), JOB_WAIT_MAX)
+        except (TypeError, ValueError):
+            raise ValueError("wait_s is seconds, 0 to %d." % JOB_WAIT_MAX)
+        end = time.time() + wait
+        while job["status"] in ("starting", "running") and time.time() < end:
+            time.sleep(min(0.5, max(0.01, end - time.time())))
+            s, job = find_job(a["id"], s if os.path.isdir(s) else None)
+        if job["status"] in JOB_ENDED:
+            claim_told(s, job)
+        return job_brief(s, job)
+    if not a.get("session"):
+        raise ValueError("Give id (from run_job) for one job, or session for its jobs.")
+    s = resolve_session(a["session"])
+    jobs = all_jobs(s)
+    live = [j for j in jobs if j["status"] in ("starting", "running")]
+    ended = [j for j in jobs if j["status"] in JOB_ENDED and (job_age(j, "ended") or 0) < 86400][-10:]
+    out = []
+    for j in live + ended[::-1]:
+        x = {"job": j["id"], "status": j["status"], "label": j.get("label")}
+        for k in ("progress", "eta_s") if j["status"] in ("starting", "running") else ():
+            if j.get(k) is not None:
+                x[k] = j[k]
+        if j.get("type") == "generate":
+            x["type"] = "generate"
+        out.append(x)
+    return {"jobs": out}
+
+
+def t_stop_job(a):
+    s, job = find_job(a.get("id") or "", a.get("session"))
+    if job.get("type") == "generate":
+        raise ValueError("Higgsfield and Replicate charge for a clip when it starts, so Takes cannot stop it.")
+    if job["status"] in JOB_ENDED:
+        return dict(job_brief(s, job), note="It already ended.")
+    with open(job_path(s, job["id"], ".stop") + ".tmp", "w") as f:
+        f.write("takes")
+    os.replace(job_path(s, job["id"], ".stop") + ".tmp", job_path(s, job["id"], ".stop"))
+    # Only while the runner holds its lock: a pid alone may belong to another process by now.
+    if job.get("pid") and lock_held(job_path(s, job["id"], ".lock")):
+        try:
+            os.kill(int(job["pid"]), signal.SIGTERM)
+        except (OSError, ValueError):
+            pass
+    end, sent = time.time() + 8, bool(job.get("pid"))
+    while job["status"] in ("starting", "running") and time.time() < end:
+        time.sleep(0.2)
+        job = read_job(s, job["id"])
+        if not sent and job.get("pid") and lock_held(job_path(s, job["id"], ".lock")):
+            sent = True  # it was starting: the runner holds its lock now
+            try:
+                os.kill(int(job["pid"]), signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
+    return job_brief(s, job)
+
+
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+PROGRESS_LINES = (re.compile(r"TAKES_PROGRESS\s+([0-9.]+)\s*(%?)"),
+                  re.compile(r"\bframe\s+(\d+)\s*/\s*(\d+)", re.I),
+                  re.compile(r"\b(\d+)\s*/\s*(\d+)\s+frames\b", re.I))
+FF_DURATION = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+FF_TIME = re.compile(r"\btime=\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+TRAILING_PCT = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%\s*(?:\||$)")
+
+
+def ffmpeg_timed(cmd):
+    """ffmpeg time= lines count only for one input and no -t/-to/-stream_loop: else Duration is not the
+    output's."""
+    words = cmd.split()
+    return (len([w for w in words if w == "-i"]) == 1
+            and not any(w in ("-t", "-to", "-stream_loop", "-loop") for w in words))
+
+
+def raw_progress(line, state):
+    m = PROGRESS_LINES[0].search(line)
+    if m:
+        v = float(m.group(1))
+        return v / 100 if m.group(2) or v > 1 else v
+    for r in PROGRESS_LINES[1:]:
+        m = r.search(line)
+        if m and int(m.group(2)) > 0:
+            return int(m.group(1)) / int(m.group(2))
+    m = FF_DURATION.search(line)
+    if m:
+        if state.get("duration") is None:
+            state["duration"] = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+        return None
+    m = FF_TIME.search(line)
+    if m and state.get("ffmpeg") and state.get("duration"):
+        v = (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) / state["duration"]
+        if v > 1.01:  # the output runs longer than Duration (a filter, a loop): time= says nothing
+            state.update(ffmpeg=False, p=None)
+            return None
+        return v
+    m = TRAILING_PCT.search(line)
+    if m and float(m.group(1)) <= 100:
+        return float(m.group(1)) / 100
+    return None
+
+
+def job_progress(line, state):
+    """One log line -> the new progress 0..1, or None. Within one step it never goes back by more than
+    0.02. After a step that reached 100% (a model download, a first pass) a lower value starts the next
+    step, and the bar with it: else the bar reads 100% for the rest of the job. state keeps duration,
+    ffmpeg, p (the bar, None when unknown) and step_t (when the step started)."""
+    v = raw_progress(ANSI.sub("", line), state)
+    if v is None:
+        return None
+    v = max(0.0, min(1.0, v))
+    p = state.get("p")
+    if p is not None and v < p - 0.02:
+        if p < 0.99:
+            return None
+        state["step_t"] = time.time()
+    state["p"] = v
+    return v
+
+
+def job_reason(lines):
+    """The last line that says something, for a failed job."""
+    for x in reversed(lines):
+        x = ANSI.sub("", x).strip()
+        if x and job_progress(x, {}) is None and not FF_TIME.search(x):
+            return x[:160]
+    return None
+
+
+def job_env(s=None, job_id=None):
+    """The command's environment: no variables of a Claude that started the chat, Homebrew first."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDECODE", "CLAUDE_CODE_"))}
+    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin" + (":" + env["PATH"] if env.get("PATH") else "")
+    if job_id:
+        env["TAKES_JOB_ID"] = job_id
+    if s:
+        env["TAKES_SESSION"] = s
+    return env
+
+
+def span(sec):
+    sec = int(round(sec))
+    if sec < 60:
+        return "%d s" % sec
+    if sec < 3600:
+        return "%d min" % (sec // 60)
+    return "1 hour" if sec < 7200 else "%d hours" % (sec // 3600)
+
+
+class JobStopped(Exception):
+    pass
+
+
+def job_run(s, job_id):
+    """`--job-run`: run one job to its end. Paths are relative to the session folder from here on: the
+    working folder follows the folder's inode, so a rename during the job loses nothing."""
+    import threading
+    if not os.path.isdir(s):  # renamed between the start and this line: .moves.json knows where it went
+        s = follow_moves(s, lib_root(s)) or s
+    os.chdir(s)
+    jp = os.path.join(JOBS_DIR, job_id + ".json")
+    lock_path = os.path.join(JOBS_DIR, job_id + ".lock")
+    lock = job_lock(lock_path)
+    stop_file = os.path.join(JOBS_DIR, job_id + ".stop")
+    with open(jp) as f:
+        job = json.load(f)
+    outputs = job.get("outputs") or []
+    existed = {o for o in outputs if os.path.lexists(o)}
+    t0 = time.time()
+    stopping = {"by": None}
+    signal.signal(signal.SIGTERM, lambda *_: stopping.update(by=stopping["by"] or "signal"))
+    job.update(status="running", pid=os.getpid(), updated=now_iso())
+    write_job(jp, job)
+    child = None
+    try:
+        try:  # the Mac does not idle-sleep under a render once the chat's own sleep block ends
+            subprocess.Popen(["/usr/bin/caffeinate", "-i", "-w", str(os.getpid())], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
+        if os.path.exists(stop_file):
+            raise JobStopped
+        child = subprocess.Popen(["/bin/zsh", "-c", job["cmd"]], cwd=".", start_new_session=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                 env=job_env(os.getcwd(), job_id))
+        state = {"ffmpeg": ffmpeg_timed(job["cmd"])}
+        seen = {"p": None, "lines": [], "stage": None}
+        log_name, cap = os.path.join(JOBS_DIR, job_id + ".log"), job_log_max()
+
+        def read():
+            log = open(log_name, "ab")
+            rest = b""
+            while True:
+                chunk = os.read(child.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                log.write(chunk)
+                log.flush()
+                if log.tell() >= cap:
+                    log.close()
+                    os.replace(log_name, log_name + ".1")
+                    log = open(log_name, "ab")
+                parts = re.split(rb"[\r\n]", rest + chunk)
+                rest = parts.pop()[-4096:]
+                for raw in parts:
+                    line = raw.decode("utf-8", "replace")
+                    if not line.strip():
+                        continue
+                    if line.startswith("TAKES_STAGE "):  # what the job does now, for the Jobs row
+                        seen["stage"] = line[len("TAKES_STAGE "):].strip()[:80] or None
+                        continue
+                    if job_progress(line, state) is None:
+                        seen["lines"] = (seen["lines"] + [line])[-50:]
+                    seen["p"] = state.get("p")
+            if rest.strip():
+                seen["lines"] = (seen["lines"] + [rest.decode("utf-8", "replace")])[-50:]
+            log.close()
+
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        deadline = t0 + float(job.get("timeout_s") or job_timeout())
+        shown, last_write = None, 0
+        timed_out = False
+        while child.poll() is None:
+            time.sleep(0.2)
+            if stopping["by"] or time.time() > deadline:
+                timed_out = not stopping["by"]
+                for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 2)):
+                    try:
+                        os.killpg(child.pid, sig)
+                    except OSError:
+                        pass
+                    try:
+                        child.wait(wait)
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
+                try:  # the command ended, but what it started in the background goes too
+                    os.killpg(child.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                break
+            if (seen["p"] != shown or seen["stage"] != job.get("stage")) and time.time() - last_write >= 2:
+                shown, last_write = seen["p"], time.time()
+                job["stage"] = seen["stage"]
+                elapsed, step = time.time() - t0, time.time() - state.get("step_t", t0)
+                eta = None
+                if shown and shown >= 0.05 and step >= 10:
+                    eta = int(step * (1 - shown) / shown)
+                elif job.get("estimate_s"):
+                    eta = max(0, int(job["estimate_s"] - elapsed))
+                job.update(progress=None if shown is None else round(shown, 4), eta_s=eta, updated=now_iso())
+                write_job(jp, job)
+        code = child.wait()
+        reader.join(2)
+        if seen["stage"]:
+            job["stage"] = seen["stage"]
+        if stopping["by"]:
+            raise JobStopped
+        if timed_out:
+            job.update(status="failed", error="It ran over %s, so Takes stopped it." % span(job.get("timeout_s") or job_timeout()))
+        elif code != 0:
+            job.update(status="failed", exit=code,
+                       error=job_reason(seen["lines"]) or "It ended with code %d." % code)
+        else:
+            missing = [o for o in outputs if not os.path.exists(o) or os.path.getsize(o) == 0]
+            job["exit"] = 0
+            if missing:
+                job.update(status="failed", error="It ended but did not write %s." % missing[0])
+            else:
+                job.update(status="done", progress=1)
+    except JobStopped:
+        by = None
+        try:
+            with open(stop_file) as f:
+                by = f.read().strip() or None
+        except OSError:
+            pass
+        job.update(status="stopped", stopped_by=by if by in ("you", "takes") else "you")
+    except Exception as e:  # the runner itself broke: say so, never leave "running"
+        if child and child.poll() is None:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        job.update(status="failed", error=("Takes could not run it: %s" % e)[:160])
+    if job["status"] in ("failed", "stopped"):
+        # What it wrote leaves the session, so a half-written file never reads as a result.
+        part = os.path.join(JOBS_DIR, job_id + ".partial")
+        for o in outputs:
+            if o not in existed and os.path.lexists(o):
+                os.makedirs(part, exist_ok=True)
+                dest = unique(os.path.join(part, os.path.basename(o)))
+                try:
+                    os.replace(o, dest)
+                except OSError:
+                    pass
+    job.update(ended=now_iso(), updated=now_iso(), eta_s=None)
+    write_job(jp, job)
+    job_unlock(lock, lock_path)
 
 
 # ---------- Higgsfield: AI video (2026-10-06) ----------
@@ -2944,7 +5960,8 @@ def t_higgsfield(a):
     n = (have[-1] if have else 0) + 1
     rel = os.path.join(GENERATED_DIR, "%s-v%d%s" % (name, n, ".mp4" if kind == "video" else ".png"))
     job = {"id": "%s-v%d" % (name, n), "file": rel, "kind": kind, "args": args, "shot": shot and shot["id"],
-           "status": "running", "started": now_iso()}
+           "status": "running", "started": now_iso(), "from_chat": from_chat()}
+    job["label"] = clip_label(hf_label(job), shot)
     path = hf_save_job(s, job)
     if shot:
         def mark(x):
@@ -2959,9 +5976,7 @@ def t_higgsfield(a):
 
 
 def start_higgsfield(s, job_path):
-    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--higgsfield-run", s, job_path],
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True)
+    spawn_detached(["--higgsfield-run", s, job_path])
 
 
 MEDIA_EXT = {"video": (".mp4", ".mov", ".webm", ".m4v"), "image": (".png", ".jpg", ".jpeg", ".webp")}
@@ -3002,9 +6017,15 @@ def hf_label(job):
     return " ".join([w.capitalize() for w in base.split("_") if w] + ([ver] if ver else []))
 
 
+def clip_label(model, shot):
+    """What the Jobs row says: 'Seedance 2.5 clip for shot 3'."""
+    return ("%s clip for shot %s" % (model, shot["id"]) if shot else "%s clip" % model)[:60]
+
+
 def higgsfield_run(s, job_path):
     """Detached: run the job, download the result, put it on its shot."""
     import urllib.request
+    lock = job_lock(job_path[:-5] + ".lock")  # held while it runs: get_job and the app read a free lock as lost
     job = json.load(open(job_path))
     cli = higgsfield_cli()
     try:
@@ -3043,6 +6064,7 @@ def higgsfield_run(s, job_path):
                 x["clip_error"] = job["error"]
             edit_shot(s, job["shot"], failed)
     hf_save_job(s, job)
+    job_unlock(lock, job_path[:-5] + ".lock")
 
 
 # ---------- Replicate: AI video, pay per clip (2026-10-09) ----------
@@ -3640,7 +6662,8 @@ def t_replicate(a):
     rel = os.path.join(GENERATED_DIR, "%s-v%d.mp4" % (name, n))
     job = {"id": "%s-v%d" % (name, n), "provider": "replicate", "file": rel, "kind": "video", "model": model,
            "version": info["version"] if ":" in model else None, "input": inp, "files": files,
-           "shot": shot and shot["id"], "status": "running", "started": now_iso()}
+           "shot": shot and shot["id"], "status": "running", "started": now_iso(),
+           "label": clip_label(rep_label(model), shot), "from_chat": from_chat()}
     path = hf_save_job(s, job)
     if shot:
         def mark(x):
@@ -3657,9 +6680,7 @@ def t_replicate(a):
 
 
 def start_replicate(s, job_path):
-    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--replicate-run", s, job_path],
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True)
+    spawn_detached(["--replicate-run", s, job_path])
 
 
 def rep_local(s, ref, shot):
@@ -3703,6 +6724,7 @@ def rep_download(url, dest):
 def replicate_run(s, job_path, poll=5):
     """Detached: upload the files, start the prediction, wait for it, download the video."""
     import time
+    lock = job_lock(job_path[:-5] + ".lock")
     job = json.load(open(job_path))
     try:
         inp = dict(job["input"])
@@ -3754,6 +6776,7 @@ def replicate_run(s, job_path, poll=5):
                 x["clip_error"] = job["error"]
             edit_shot(s, job["shot"], failed)
     hf_save_job(s, job)
+    job_unlock(lock, job_path[:-5] + ".lock")
 
 
 # ---------- the post (same format as Sources/Takes/Post.swift) ----------
@@ -3803,7 +6826,9 @@ if not BLOG:
 # (2026-10-09): the public copy sets SOCIAL = False and its server lists none of their tools.
 SOCIAL = False
 SOCIAL_TOOLS = {"get_comment_context", "add_comment_suggestion", "redraft_comment", "list_comment_suggestions",
-                "set_comment_posted", "set_comment_stats", "set_post_stats", "get_performance"}
+                "set_comment_posted", "set_comment_stats", "set_post_stats", "get_performance",
+                # Ideas (2026-10-10): The user's own list, admin only for now.
+                "add_idea", "list_ideas", "get_idea", "update_idea"}
 ARTICLE_CATEGORIES = ["Tech", "Life", "Business"]
 ARTICLE_SITE_REPO = "marvtub/personal-website"
 # The blog's components (components/mdx on the site); the app's preview draws each the same way.
@@ -3908,7 +6933,11 @@ def post_media(s, fm, p="linkedin"):
         files = [os.path.join(d, f) for f in os.listdir(d)] if os.path.isdir(d) else []
         files = [f for f in files if not os.path.basename(f).startswith(".") and media_kind(f) == kind]
         if files:
-            return max(files, key=os.path.getmtime)
+            # The newest file's name, then its highest version: a version saved late (publish_edit) or
+            # early (a Cover click) never hides a higher one.
+            top = split_version(os.path.basename(max(files, key=os.path.getmtime)))[0]
+            same = [f for f in files if split_version(os.path.basename(f))[0] == top]
+            return max(same, key=lambda f: (split_version(os.path.basename(f))[1] or 0, os.path.getmtime(f)))
     return None
 
 
@@ -3964,7 +6993,7 @@ def post_action(fm, text, comment=None, p="linkedin"):
     same_time = at and fm.get("scheduled_at") and \
         datetime.fromisoformat(at.replace("Z", "+00:00")) == datetime.fromisoformat(fm["scheduled_at"].replace("Z", "+00:00"))
     if status == "draft":
-        return "draft: The user has not marked it ready (schedule it only when he says so, and pass at)"
+        return "draft: The user has not marked it ready (schedule it only when the user says so, and pass at)"
     if status == "posted":
         if comment and not fm.get("first_comment_posted"):
             return ("add first_comment as the first comment under the live post (url), then "
@@ -4168,6 +7197,8 @@ def t_set_post(a):
         if not os.path.exists(os.path.join(s, rel)):
             raise ValueError("media %s does not exist in %s." % (rel, s))
         media = rel
+    if a.get("media") is not None:  # Takes picked it: publish_edit may move it to the next version
+        fm["media_by"] = "takes" if media else None
     fm["media"] = media
     if a.get("title") is not None:
         if p not in ("youtube", "vertical", "article"):
@@ -4197,14 +7228,14 @@ def t_set_post(a):
     if p == "x":
         long = [t["n"] for t in out["tweets"] if t["cut_in_feed"]]
         out["note"] = ("The user sees it as an X post (a thread when it has several tweets) in the app's post tab, "
-                       "X side. He edits it there and comments on selected text (get_comments file='%s'). "
+                       "X side. The user edits it there and comments on selected text (get_comments file='%s'). "
                        % pf(p, "post")) + \
             ("Tweets %s run over %d characters: the timeline cuts them with 'Show more' (fine with Premium)."
              % (", ".join(map(str, long)), X_FEED_CUT) if long else "")
     elif p == "article":
-        out["note"] = ("The user sees it as a post on his blog (Satoshi, the orange accent, the blog's "
+        out["note"] = ("The user sees it as a post on the blog (Satoshi, the orange accent, the blog's "
                        "components) in the post tab, Article side, and writes in it there (markdown beside the page). "
-                       "He comments on selected text (get_comments file='%s'); the quote may be the page's words "
+                       "The user comments on selected text (get_comments file='%s'); the quote may be the page's words "
                        "without markdown marks. Components you used: %s." % (pf(p, "post"), ", ".join(out["components"]) or "none"))
     elif p == "youtube":
         out["note"] = ("The user sees it as a YouTube watch page (player, title, description) in the post tab, YouTube "
@@ -4256,7 +7287,7 @@ def t_create_post_variants(a):
         made.append(sl)
     return {"platform": PLATFORMS[p]["name"], "created_variants": made,
             "note": "They show as tabs above the post in the app's post tab. Only the main post is scheduled: "
-                    "The user picks one with 'Use as main' (or you call use_post_variant when he asks)."}
+                    "The user picks one with 'Use as main' (or you call use_post_variant when the user asks)."}
 
 
 def t_use_post_variant(a):
@@ -4511,8 +7542,8 @@ def t_get_plan(a):
     v = plan_view()
     if not v:
         return {"plan": None,
-                "note": "No posting days yet. Ask the user which days he wants to post (recommend two a week, "
-                        "for example Tue and Thu, at a time his audience is online), then call set_plan."}
+                "note": "No posting days yet. Ask the user which days to post (recommend two a week, "
+                        "for example Tue and Thu, at a time the audience is online), then call set_plan."}
     v["note"] = ("videos = the cards on the Plan board, in order (plan_video adds or moves one; the user drags "
                  "them). A slot is filled by a ready, scheduled or posted post with a time on that day (filled_by); "
                  "a card on that day covers it as planned (planned). buffer = covered slots before the first "
@@ -4550,7 +7581,7 @@ def t_plan_video(a):
     """Puts a session's video card on a day of the Plan board, moves it, or takes it off."""
     d = read_plan_file()
     if not read_plan():
-        raise ValueError("No posting plan yet (or the Plan plugin is off). Ask the user for his days, then set_plan.")
+        raise ValueError("No posting plan yet (or the Plan plugin is off). Ask the user for the days, then set_plan.")
     path = resolve_session(a["session"])
     if not os.path.isfile(os.path.join(path, "session.json")):
         raise ValueError("Not a session: %s" % a["session"])
@@ -4584,12 +7615,11 @@ def t_plan_video(a):
 
 
 def t_create_session(a):
-    project = a.get("project") or "Inbox"
-    pdir = os.path.join(root(), project.replace("/", "-"))
+    pdir = os.path.join(root(), project_name(a.get("project") or "Inbox"))
     os.makedirs(pdir, exist_ok=True)
     title = a.get("title", "").strip()
     date = datetime.now().strftime("%Y-%m-%d")
-    folder = unique(os.path.join(pdir, "%s-%s" % (date, slug(title) or "untitled")))
+    folder = free_session_path(os.path.join(pdir, "%s-%s" % (date, slug(title) or "untitled")))
     os.makedirs(folder)
     meta = {"title": title or "Untitled", "createdAt": now_iso(), "named": bool(title), "takes": []}
     write_meta(folder, meta)
@@ -4603,7 +7633,7 @@ def t_create_session(a):
 
 
 def t_update_session(a):
-    s = resolve_session(a["session"])
+    s = old = resolve_session(a["session"])
     meta = read_meta(s)
     if "script" in a:
         need_rules("script")
@@ -4614,11 +7644,22 @@ def t_update_session(a):
         meta["named"] = True
         target = os.path.join(os.path.dirname(s), "%s-%s" % (meta["createdAt"][:10], slug(meta["title"])))
         if target != s:
-            target = unique(target)
+            meta.setdefault("id", session_id(s, meta))
+            target = free_session_path(target, meta["id"])
             os.rename(s, target)
+            record_move(s, target)
             s = target
     write_meta(s, meta)
-    return session_summary(s)
+    # The new path first: the agent keeps the path it read first and must see the change (2026-10-11).
+    summary = session_summary(s)
+    out = {"path": s}
+    if s != old:
+        out["moved_from"] = old
+    out["id"] = summary.pop("id")
+    out.update((k, v) for k, v in summary.items() if k != "path")
+    if s != old:
+        out["note"] = "The folder has a new name. Use this path or the id from now on; the old path still works."
+    return out
 
 
 def t_rename_take(a):
@@ -4741,9 +7782,427 @@ def t_import_take(a):
             done.append({"take": n, "kind": kind, "file": take["file"], "from": src,
                          "copied": not (inside or a.get("move")), "duration": d})
     write_meta(s, meta)
+    try:  # word times for the cut, in the background (a job in the Jobs row)
+        start_prepare(s, sorted({d["take"] for d in done}))
+    except Exception:
+        pass
     return {"session": os.path.relpath(s, root()), "imported": done,
             "note": "The takes show in the app's take list. The originals stay unless move=true "
                     "(files already inside the session folder are renamed in place)."}
+
+
+# ---------- Ideas (<root>/_library/ideas/, same format as Sources/Takes/Plugins/Private/Ideas.swift) ----------
+# The user's idea list (2026-10-10, admin only): one markdown file per idea with frontmatter, and
+# INDEX.md, a list that the app and this server write again after every change. He talks ideas into
+# any chat (often from the phone on a walk); the chat files them here.
+
+IDEA_STATUSES = ["new", "exploring", "doing", "done", "dropped"]
+IDEA_HEADINGS = {"new": "New", "exploring": "Exploring", "doing": "Doing", "done": "Done", "dropped": "Dropped"}
+IDEA_FIELDS = ["title", "status", "tags", "created", "updated", "source", "session"]
+IDEA_INDEX = "INDEX.md"
+
+
+def ideas_dir():
+    return os.path.join(root(), LIB, "ideas")
+
+
+def idea_now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def idea_tags(v):
+    if isinstance(v, list):
+        items = v
+    else:
+        items = str(v or "").split(",")
+    out = []
+    for x in items:
+        x = str(x).strip().lstrip("#").strip().lower()
+        if x and x not in out:
+            out.append(x)
+    return out
+
+
+def idea_path(idea_id):
+    idea_id = str(idea_id or "").strip()
+    if idea_id.endswith(".md"):
+        idea_id = idea_id[:-3]
+    if not idea_id or "/" in idea_id or idea_id.startswith(".") or idea_id.lower() == "index":
+        raise ValueError("No such idea: %r. Use an id from list_ideas." % idea_id)
+    return os.path.join(ideas_dir(), idea_id + ".md")
+
+
+def read_idea(path):
+    fields, body = parse_fm(read_text(path))
+    status = fields.get("status", "new").lower()
+    return {"id": os.path.basename(path)[:-3], "title": fields.get("title") or os.path.basename(path)[:-3],
+            "status": status if status in IDEA_STATUSES else "new", "tags": idea_tags(fields.get("tags")),
+            "created": fields.get("created", ""), "updated": fields.get("updated") or fields.get("created", ""),
+            "source": fields.get("source", ""), "session": fields.get("session", ""), "body": body.strip("\n")}
+
+
+def all_ideas():
+    d = ideas_dir()
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        if n.endswith(".md") and n != IDEA_INDEX and not n.startswith("."):
+            try:
+                out.append(read_idea(os.path.join(d, n)))
+            except (OSError, UnicodeDecodeError):
+                continue
+    return out
+
+
+def idea_index(ideas):
+    """INDEX.md. Ideas.swift writes the same text, so the app and the server never fight over it."""
+    lines = ["# Ideas", "", "Takes writes this list from the idea files. Change an idea in its own file.", ""]
+    if not ideas:
+        lines.append("No ideas yet.")
+    for st in IDEA_STATUSES:
+        group = sorted((i for i in ideas if i["status"] == st), key=lambda i: (i["created"], i["id"]), reverse=True)
+        if not group:
+            continue
+        lines += ["## %s (%d)" % (IDEA_HEADINGS[st], len(group)), ""]
+        for i in group:
+            line = "- [%s](%s.md)" % (i["title"].replace("]", ")").replace("[", "("), i["id"])
+            if i["created"]:
+                line += " · " + i["created"][:10]
+            if i["tags"]:
+                line += " · " + ", ".join(i["tags"])
+            lines.append(line)
+        lines.append("")
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def write_safely(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def write_idea_index():
+    path = os.path.join(ideas_dir(), IDEA_INDEX)
+    text = idea_index(all_ideas())
+    try:
+        if read_text(path) == text:
+            return
+    except OSError:
+        pass
+    write_safely(path, text)
+
+
+def render_idea(i):
+    fields = [(k, ", ".join(i[k]) if k == "tags" else i[k]) for k in IDEA_FIELDS if i.get(k)]
+    return render_fm(fields, "\n" + i["body"].strip("\n") + "\n" if i["body"].strip() else "")
+
+
+def idea_out(i, body=True):
+    o = {k: i[k] for k in ["id", "title", "status", "tags", "created", "updated", "source", "session"] if i.get(k)}
+    o["file"] = os.path.join(ideas_dir(), i["id"] + ".md")
+    thumb, state = idea_thumb(i["id"]), idea_thumb_state(i["id"])
+    if thumb:
+        o["thumbnail"] = os.path.join(ideas_dir(), thumb)
+    if state:
+        o["thumbnail_state"] = state
+    if body:
+        o["body"] = i["body"]
+    else:
+        first = next((l.strip() for l in i["body"].split("\n") if l.strip() and not l.startswith("#")), "")
+        o["summary"] = first[:160]
+    return o
+
+
+def t_add_idea(a):
+    title = str(a.get("title") or "").strip().replace("\n", " ")
+    if not title:
+        raise ValueError("An idea needs a title.")
+    status = str(a.get("status") or "new").lower()
+    if status not in IDEA_STATUSES:
+        raise ValueError("status is one of %s" % ", ".join(IDEA_STATUSES))
+    base = slug(title) or "idea"
+    os.makedirs(ideas_dir(), exist_ok=True)
+    n, idea_id = 1, base
+    while os.path.exists(os.path.join(ideas_dir(), idea_id + ".md")) or idea_id.lower() == "index":
+        n += 1
+        idea_id = "%s-%d" % (base, n)
+    now = idea_now()
+    i = {"id": idea_id, "title": title, "status": status, "tags": idea_tags(a.get("tags")), "created": now,
+         "updated": now, "source": str(a.get("source") or "agent").strip(), "session": "",
+         "body": str(a.get("text") or "").strip()}
+    write_safely(idea_path(idea_id), render_idea(i))
+    write_idea_index()
+    start_idea_thumb(idea_id, a.get("thumbnail_prompt"))
+    out = idea_out(i)
+    if not me_photos():
+        out["note"] = ("No photos of the user in %s yet, so no thumbnail. Tell him once: add 3-6 photos there "
+                       "(or from the phone's Ideas screen)." % me_dir())
+    return out
+
+
+# ---------- Idea thumbnails (2026-10-11) ----------
+# Every new idea gets a 16:9 thumbnail of the user, drawn in the background by GPT Image 2.5 Sunburst
+# (best quality with reference photos; Flare when Sunburst fails) from the photos of him in
+# <root>/_library/me/. The chat writes the prompt when it files an idea (add_idea thumbnail_prompt);
+# for an idea typed in the app, Gemini writes it from the idea and his thumbnail rules. Files:
+#   ideas/thumbnails/<id>-vN.png    the drawings, newest last (Ideas.swift shows the newest)
+#   ideas/thumbnails/.prompts.json  id -> the prompt it was drawn from (Redraw starts from it)
+#   ideas/thumbnails/.status.json   id -> {"state": "drawing" | "error" | "nophotos", "error", "since"}
+#   ideas/thumbnails/.models.json   file -> the model that drew it, as everywhere in Takes
+
+ME_DIR = "me"
+IDEA_THUMBS = "thumbnails"
+IDEA_THUMB_MODELS = ("sunburst", "flare")
+IDEA_THUMB_REFS = 4
+PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif")
+IDEA_THUMB_ASK = ("A 16:9 YouTube thumbnail for a video about the idea below. The man in it is the man in the "
+                  "reference photos: keep his face, hair, skin and build exactly as in them, a real photo of him, "
+                  "not a drawing. ")
+IDEA_PROMPT_SYSTEM = (
+    "You write one image prompt for a 16:9 YouTube thumbnail of the user, a creator who makes videos about AI "
+    "agents and building software. An image model draws it with photos of him as references, so describe "
+    "him only by pose, expression, clothes and place, never his face. One scene that shows the idea at a "
+    "glance: where he is, what he holds or does, one clear proof element, the light, the framing (his face "
+    "on one third, space on the other for a short title), and a two-word title line in bold text. Bright, "
+    "uncluttered, photographic. Follow his thumbnail rules. Answer with the prompt only, 60-120 words.")
+
+
+def me_dir():
+    return os.path.join(root(), LIB, ME_DIR)
+
+
+def me_photos():
+    """Photos of the user, newest first."""
+    d = me_dir()
+    try:
+        names = [n for n in os.listdir(d) if n.lower().endswith(PHOTO_EXTS) and not n.startswith(".")]
+    except OSError:
+        return []
+    return sorted((os.path.join(d, n) for n in names), key=lambda f: os.path.getmtime(f), reverse=True)
+
+
+def idea_thumbs_dir():
+    return os.path.join(ideas_dir(), IDEA_THUMBS)
+
+
+def idea_thumb(idea_id):
+    """The newest thumbnail of an idea, as "thumbnails/<id>-vN.png", or ""."""
+    have = versions_in(idea_thumbs_dir(), idea_id)
+    return "%s/%s-v%d.png" % (IDEA_THUMBS, idea_id, have[-1]) if have else ""
+
+
+def idea_json(name):
+    try:
+        with open(os.path.join(idea_thumbs_dir(), name)) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def set_idea_json(name, idea_id, value):
+    """One key of a thumbnails/.*.json file; None removes it. Locked: several drawings can end at once."""
+    import fcntl
+    os.makedirs(idea_thumbs_dir(), exist_ok=True)
+    with open(os.path.join(idea_thumbs_dir(), ".lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        d = idea_json(name)
+        if value is None:
+            d.pop(idea_id, None)
+        else:
+            d[idea_id] = value
+        write_safely(os.path.join(idea_thumbs_dir(), name), json.dumps(d, indent=2, ensure_ascii=False))
+
+
+def idea_thumb_state(idea_id):
+    """"drawing", "error: ...", "nophotos" or "". A drawing that ran 15 min is lost."""
+    st = idea_json(".status.json").get(idea_id) or {}
+    state = st.get("state") or ""
+    if state == "drawing" and time.time() - float(st.get("since") or 0) > 15 * 60:
+        return "error: The drawing stopped. Try again."
+    if state == "error":
+        return "error: " + (st.get("error") or "The drawing failed.")
+    return state
+
+
+def gemini_text(system, ask):
+    """One short text answer from Gemini."""
+    import urllib.request
+    key = gemini_key()
+    if not key:
+        raise ValueError("No Gemini key.")
+    body = {"contents": [{"parts": [{"text": ask}]}], "system_instruction": {"parts": [{"text": system}]},
+            "generationConfig": {"temperature": 0.7}}
+    req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % DESCRIBE_MODEL,
+                                 method="POST", data=json.dumps(body).encode(),
+                                 headers={"x-goog-api-key": key, "Content-Type": "application/json"})
+    try:
+        out = json.load(urllib.request.urlopen(req, timeout=120))
+    except urllib.error.HTTPError as e:
+        raise ValueError("Gemini said %s" % e.code)
+    return "".join(p.get("text", "") for p in out["candidates"][0]["content"]["parts"]).strip()
+
+
+def idea_thumb_prompt(i):
+    """A thumbnail prompt for an idea that has none: Gemini writes it from the idea and his thumbnail
+    rules; without Gemini, a plain one from the title."""
+    rules = [r["text"] for r in read_lessons()["rules"] if r.get("on", True) and r.get("area") == "thumbnail"]
+    ask = "Idea: %s\n\n%s\n\nHis thumbnail rules:\n%s" % (i["title"], i["body"][:2000], "\n".join("- " + r for r in rules))
+    if not os.environ.get("TAKES_IMAGE_CMD"):
+        try:
+            text = gemini_text(IDEA_PROMPT_SYSTEM, ask)
+            if len(text) > 40:
+                return text
+        except (ValueError, OSError, KeyError, IndexError):
+            pass
+    return ("The user, waist up, looking into the lens with a calm, natural closed-mouth smile, in a bright, "
+            "uncluttered place that fits the idea \"%s\", one clear object that shows it, soft daylight. His "
+            "face on the right third, space on the left for a bold two-word title about the idea." % i["title"])
+
+
+def start_idea_thumb(idea_id, prompt=None):
+    """Draw an idea's thumbnail in the background (a new version). False when switched off (tests)."""
+    idea_path(idea_id)
+    if prompt and str(prompt).strip():
+        set_idea_json(".prompts.json", idea_id, str(prompt).strip())
+    if os.environ.get("TAKES_IDEA_THUMBS") == "0":
+        return False
+    if not me_photos() and not os.environ.get("TAKES_IMAGE_CMD"):
+        set_idea_json(".status.json", idea_id, {"state": "nophotos"})
+        return False
+    set_idea_json(".status.json", idea_id, {"state": "drawing", "since": time.time()})
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--idea-thumb", idea_id],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    return True
+
+
+def idea_refs(photos, tmp):
+    """The photos as JPEGs of at most 1536 px (HEIC from the iPhone too), for GPT Image."""
+    out = []
+    for n, f in enumerate(photos):
+        dst = os.path.join(tmp, "me-%d.jpg" % n)
+        r = subprocess.run(["sips", "-s", "format", "jpeg", "-Z", "1536", f, "--out", dst], capture_output=True)
+        out.append(dst if r.returncode == 0 and os.path.exists(dst) else f)
+    return out
+
+
+def idea_thumb_run(idea_id):
+    """The background drawing of one idea's thumbnail (--idea-thumb)."""
+    import fcntl
+    import tempfile
+    os.makedirs(idea_thumbs_dir(), exist_ok=True)
+    lock = open(os.path.join(idea_thumbs_dir(), ".drawing-" + idea_id), "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        return  # it draws already
+    tmp = tempfile.mkdtemp(prefix="takes-idea-")
+    try:
+        p = idea_path(idea_id)
+        if not os.path.exists(p):
+            set_idea_json(".status.json", idea_id, None)
+            return
+        photos = me_photos()[:IDEA_THUMB_REFS]
+        if not photos and not os.environ.get("TAKES_IMAGE_CMD"):
+            set_idea_json(".status.json", idea_id, {"state": "nophotos"})
+            return
+        i = read_idea(p)
+        prompt = idea_json(".prompts.json").get(idea_id)
+        if not prompt:
+            prompt = idea_thumb_prompt(i)
+            set_idea_json(".prompts.json", idea_id, prompt)
+        have = versions_in(idea_thumbs_dir(), idea_id)
+        rel = "%s/%s-v%d.png" % (IDEA_THUMBS, idea_id, (have[-1] if have else 0) + 1)
+        label = draw_image(IDEA_THUMB_ASK + "\n\nIdea: %s\n\n%s" % (i["title"], prompt), os.path.join(ideas_dir(), rel),
+                           "16:9", images=idea_refs(photos, tmp), quality="high", models=IDEA_THUMB_MODELS)
+        note_model(ideas_dir(), rel, label)
+        set_idea_json(".status.json", idea_id, None)
+    except Exception as e:  # the app shows it, with Try again
+        set_idea_json(".status.json", idea_id, {"state": "error", "error": str(e)[:300]})
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            os.remove(lock.name)
+        except OSError:
+            pass
+        lock.close()
+
+
+def ideas_call(name, a):
+    """The app's side (takes_mcp.py --ideas draw '{"id", "prompt"?}'): a new thumbnail in the background."""
+    if name == "draw":
+        return {"drawing": start_idea_thumb(a.get("id"), a.get("prompt"))}
+    raise ValueError("Which call?")
+
+
+def t_list_ideas(a):
+    status = str(a.get("status") or "").lower()
+    tag = str(a.get("tag") or "").strip().lstrip("#").lower()
+    q = str(a.get("query") or "").strip().lower()
+    out = []
+    for i in all_ideas():
+        if status and status != "all" and i["status"] != status:
+            continue
+        if not status and i["status"] == "dropped":
+            continue
+        if tag and tag not in i["tags"]:
+            continue
+        if q and q not in (i["title"] + "\n" + i["body"] + "\n" + " ".join(i["tags"])).lower():
+            continue
+        out.append(i)
+    out.sort(key=lambda i: (i["updated"], i["id"]), reverse=True)
+    return {"ideas": [idea_out(i, body=False) for i in out], "index": os.path.join(ideas_dir(), IDEA_INDEX),
+            "statuses": IDEA_STATUSES}
+
+
+def t_get_idea(a):
+    p = idea_path(a.get("id"))
+    if not os.path.exists(p):
+        raise ValueError("No such idea: %s. Use an id from list_ideas." % a.get("id"))
+    out = idea_out(read_idea(p))
+    prompt = idea_json(".prompts.json").get(out["id"])
+    if prompt:
+        out["thumbnail_prompt"] = prompt
+    return out
+
+
+def t_update_idea(a):
+    p = idea_path(a.get("id"))
+    if not os.path.exists(p):
+        raise ValueError("No such idea: %s. Use an id from list_ideas." % a.get("id"))
+    i = read_idea(p)
+    if a.get("title") is not None:
+        title = str(a["title"]).strip().replace("\n", " ")
+        if not title:
+            raise ValueError("The title cannot be empty.")
+        i["title"] = title
+    if a.get("status") is not None:
+        st = str(a["status"]).lower()
+        if st not in IDEA_STATUSES:
+            raise ValueError("status is one of %s" % ", ".join(IDEA_STATUSES))
+        i["status"] = st
+    if a.get("tags") is not None:
+        i["tags"] = idea_tags(a["tags"])
+    if a.get("session") is not None:
+        i["session"] = str(a["session"]).strip()
+    if a.get("body") is not None:
+        i["body"] = str(a["body"]).strip()
+    if str(a.get("append") or "").strip():
+        note = "**%s**\n%s" % (idea_now(), str(a["append"]).strip())
+        i["body"] = (i["body"].rstrip() + "\n\n" + note) if i["body"].strip() else note
+    i["updated"] = idea_now()
+    write_safely(p, render_idea(i))
+    write_idea_index()
+    if a.get("redraw") or str(a.get("thumbnail_prompt") or "").strip():
+        start_idea_thumb(i["id"], a.get("thumbnail_prompt"))
+    return idea_out(i)
 
 
 # ---------- phone videos (AirDropped into Downloads) ----------
@@ -4999,7 +8458,7 @@ def t_get_performance(a):
                     "never a tab per post), read "
                     "the numbers the platform shows (LinkedIn: impressions, reactions, comments, reposts; "
                     "YouTube/TikTok/Instagram: views, likes, comments) and save them with set_post_stats. "
-                    "needs_url: find the post on his profile and pass url to set_post_stats. Only read; "
+                    "needs_url: find the post on the user's profile and pass url to set_post_stats. Only read; "
                     "never like, comment or post."}
 
 
@@ -5265,16 +8724,18 @@ def t_trash_sessions(a):
 
 
 def t_move_sessions(a):
-    dest = os.path.join(root(), a["project"].replace("/", "-"))
+    dest = os.path.join(root(), project_name(a["project"]))
     os.makedirs(dest, exist_ok=True)
     moved = []
     for x in a["sessions"]:
         s = resolve_session(x)
         if os.path.dirname(s) == dest:
             continue
-        target = unique(os.path.join(dest, os.path.basename(s)))
+        sid = session_id(s)
+        target = free_session_path(os.path.join(dest, os.path.basename(s)), sid)
         os.rename(s, target)
-        moved.append(os.path.relpath(target, root()))
+        record_move(s, target)
+        moved.append({"from": os.path.relpath(s, root()), "to": os.path.relpath(target, root()), "id": sid})
     return {"moved": moved}
 
 
@@ -5397,7 +8858,8 @@ def t_restore_script_version(a):
 #   take-01-camera.clean.wav  ClearVoice + voice chain (the script's plan)
 #   take-01-camera.dry.wav    the same voice chain without the model (strength 0 %)
 #   take-01-camera.wav        the mix edits use: clean and dry blended at `strength`, at `loudness`
-# All WAVs are 48 kHz mono float with the same timing as the take, so cut them with the take's times.
+# All WAVs are 48 kHz mono float. "clock": "video" (2026-10-11 on): second 0 is frame 0 of the take, so
+# cut them with the take's times. Without it the WAV starts at the take's first sound: see voice_offset.
 
 VOICE_LOUDNESS = {"normal": 0.0, "quiet": -4.0}  # dB from the script's -14 LUFS: -14 or -18 LUFS
 VOICE_DEFAULTS = {"strength": 1.0, "loudness": "normal", "on": True}
@@ -5495,7 +8957,15 @@ def voice_view(s, t):
             out[k] = v[k]
     if v.get("state") == "done" and v.get("on") and os.path.exists(f["mix"]):
         out["file"] = f["mix"]
-        out["use"] = "Use this WAV as the voice of this take in edits (same timing as the take file)."
+        late = 0.0 if v.get("clock") == "video" else voice_offset(s, key)
+        if late > 0.0005:
+            # Cleaned before 2026-10-11: the WAV starts at the take's first sound. No old file is rewritten.
+            out["starts_at_s"] = round(late, 3)
+            out["use"] = ("This WAV starts at the take's first sound, %.3f s after the video starts. cut_take puts it "
+                          "in place; by hand, delay it %.3f s (adelay=%d)." % (late, late, round(late * 1000)))
+        else:
+            out["use"] = ("Use this WAV as the voice of this take in edits: second 0 is frame 0 of the take. "
+                          "cut_take uses it for you.")
     return out
 
 
@@ -5529,7 +8999,12 @@ def voice_run(s, n, kind):
              seconds=t.get("duration") or media_duration(src))
     write_voice(s, key, v)
     os.environ["PATH"] = os.pathsep.join(["/opt/homebrew/bin", "/usr/local/bin", os.environ.get("PATH", "")])
+    wav = os.path.join(s, "voice", key + ".src.wav")
     try:
+        # The cleanup gets the take's sound on the video clock, so its WAVs are too (2026-10-11).
+        os.makedirs(os.path.dirname(wav), exist_ok=True)
+        extract_voice(src, wav)
+        src = wav
         if os.environ.get("TAKES_VOICE_CMD"):  # tests: a stand-in for the script
             base = json.loads(os.environ["TAKES_VOICE_CMD"]) + [src]
         else:
@@ -5556,10 +9031,13 @@ def voice_run(s, n, kind):
                  clipped=bool(d.get("clipped_runs", 0) > 20))
         write_voice(s, key, v)
         voice_mix(s, key)
-        v.update(state="done", finished=now_iso())
+        v.update(state="done", finished=now_iso(), clock="video")
         v.pop("error", None)
     except Exception as e:
         v.update(state="failed", error=str(e)[:400])
+    finally:
+        if os.path.exists(wav):
+            os.remove(wav)
     v.pop("pid", None)
     write_voice(s, key, v)
 
@@ -5570,16 +9048,14 @@ def start_voice(s, t):
     v = read_voice(s, key)
     if v and v.get("state") == "running":
         return
-    p = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--voice-run", s, str(t["number"]), t["kind"]],
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
+    pid = spawn_detached(["--voice-run", s, str(t["number"]), t["kind"]])
     try:
         with open(voice_files(s, key)["json"]) as f:
             now = json.load(f)
     except (OSError, ValueError):
         now = {}
-    if now.get("pid") != p.pid:  # the runner has not written yet
-        write_voice(s, key, dict(now or VOICE_DEFAULTS, state="running", pid=p.pid, started=now_iso()))
+    if pid and now.get("pid") != pid:  # the runner has not written yet
+        write_voice(s, key, dict(now or VOICE_DEFAULTS, state="running", pid=pid, started=now_iso()))
 
 
 def t_clean_voice(a):
@@ -5672,9 +9148,7 @@ def save_broll(src, folder, name=None, describe=True):
     if subprocess.run(["cp", "-c", src, target], capture_output=True).returncode != 0:
         shutil.copy2(src, target)
     if describe:
-        args = [sys.executable, os.path.abspath(__file__), "--broll-describe", target] + ([] if name else ["--rename"])
-        subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
+        spawn_detached(["--broll-describe", target] + ([] if name else ["--rename"]))
     return target
 
 
@@ -5875,7 +9349,7 @@ def broll_describe(path, rename=False):
 # Gemini's pick is only a first suggestion: the editing agent checks it and changes it with
 # set_best_cut ("by": "agent"; Gemini's range stays under "gemini").
 
-CUT_PROMPT = """You pick the best cut of one video take for an editor. The person, the user, records short talking videos. In this take he tries to say the given lines, often more than once, with false starts, pauses and retakes. Find the single best full delivery of the lines: clear, confident, no stumble, every word there. Give its start and end in seconds from the start of the video, tight: start just before the first word, end just after the last word (keep a natural breath, about 0.2 s). If no delivery has every word, pick the best one and set clean to false. If the shot has no lines (b-roll), pick the steadiest, best-looking stretch of about the given length."""
+CUT_PROMPT = """You pick the best cut of one video take for an editor. The person records short talking videos. In this take the person tries to say the given lines, often more than once, with false starts, pauses and retakes. Find the single best full delivery of the lines: clear, confident, no stumble, every word there. Give its start and end in seconds from the start of the video, tight: start just before the first word, end just after the last word (keep a natural breath, about 0.2 s). If no delivery has every word, pick the best one and set clean to false. If the shot has no lines (b-roll), pick the steadiest, best-looking stretch of about the given length."""
 
 CUT_SCHEMA = {
     "type": "OBJECT",
@@ -5883,8 +9357,8 @@ CUT_SCHEMA = {
         "start": {"type": "NUMBER"}, "end": {"type": "NUMBER"},
         "clean": {"type": "BOOLEAN", "description": "Every word of the lines is there, without a stumble."},
         "why": {"type": "STRING", "description": "One short sentence: why this one, and what was wrong with others."},
-        "said": {"type": "STRING", "description": "What he says in the picked range, word for word."},
-        "attempts": {"type": "INTEGER", "description": "How many times he started the lines."},
+        "said": {"type": "STRING", "description": "What the person says in the picked range, word for word."},
+        "attempts": {"type": "INTEGER", "description": "How many times the person started the lines."},
     },
     "required": ["start", "end", "clean", "why"],
 }
@@ -5961,10 +9435,2722 @@ def t_set_best_cut(a):
     return {"take": n, "best_cut": read_cuts(s)[str(n)]}
 
 
+# ---------- edit-ready takes (2026-10-11) ----------
+# A take is ready to edit when Takes saves it: prepare_take finds its words with faster-whisper (free,
+# on the Mac, mcp/prepare_take.py through uv) and writes them on the video clock next to the take:
+#
+#   take-03-camera.words.json  {"v": 2, "clock": "video", "source": "faster-whisper small", "language",
+#                               "audio_offset_s", "fps", "fps_mode", "duration", "prepared",
+#                               "words": [{word, start, end, filler?}], "sounds": [[start, end]],
+#                               "before": <the file that was there: Apple's words>}
+#
+# The app starts it when it saves a take (--prepare), import_take after an import, and cut_take and
+# rough_cut before they cut. One Whisper at a time on the Mac (<root>/.prepare.lock), and none while a
+# take records (<root>/.recording, written by the app).
+#
+# cut_take renders segments [{take, in, out, kind?}] (seconds of the take, video clock) into one clip
+# at a constant frame rate with the voice in sync. rough_cut finds the segments: each script line once
+# (the last full try), without false starts, stutters, ums and long pauses. Both write to the session's
+# _work/ folder (hidden on the Assets tab), the newest 5 versions per name:
+#   _work/<name>-vN.mp4         video + voice
+#   _work/<name>-vN.wav         the voice alone, 48 kHz 24-bit, same timing
+#   _work/<name>-vN.words.json  words in clip time, plus made_from: {session_id, cut: [{take, kind, in, out, at}]}
+#   _work/<name>-vN.json        {cut, moved, notes, length_s, fps, takes, voice_source} (+ dropped, missing, gap)
+# "cuts" (cuts.json, set_best_cut) keeps its own meaning: the best range of a take.
+
+PREP_MODEL = "small"
+PREP_LOCK = ".prepare.lock"
+PREP_OFFLINE = ".prepare-offline"
+PREP_OFFLINE_S = 3600
+PREP_WAIT_S = 2
+RECORDING = ".recording"
+FILLERS = {"um", "uh", "uhm", "umm", "uhh", "erm", "er", "ah", "hmm", "mm", "mhm"}
+WORK_DIR = "_work"
+WORK_KEEP = 5
+CUT_MAX = 200
+CUT_WAIT = 25
+DOWNLOAD_ERROR = ("Takes could not download the speech model. Connect to the internet. "
+                  "Takes tries again at the next cut.")
+MODEL_LABEL = "Getting the speech model (one time, about 500 MB)"
+ENCODERS = {}
+
+
+class PrepareError(ValueError):
+    pass
+
+
+def prep_model():
+    return os.environ.get("TAKES_PREP_MODEL") or PREP_MODEL
+
+
+def prep_script():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "prepare_take.py")
+
+
+def model_cached(model=None):
+    """The Hugging Face cache has the model (faster-whisper downloads it there on its first run)."""
+    hub = os.environ.get("HF_HUB_CACHE") or os.path.join(
+        os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface"), "hub")
+    pattern = os.path.join(glob.escape(hub), "models--Systran--faster-whisper-" + (model or prep_model()),
+                           "snapshots", "*", "model.bin")
+    return bool(glob.glob(pattern))
+
+
+def is_ready(doc, clock=None):
+    """A prepared words file (video clock). With clock: also made from this file (same length)."""
+    if not isinstance(doc, dict) or doc.get("clock") != "video" or not isinstance(doc.get("words"), list):
+        return False
+    d, c = doc.get("duration"), (clock or {}).get("duration")
+    return clock is None or d is None or c is None or abs(float(d) - float(c)) <= 0.05
+
+
+def voice_file(s, t):
+    return os.path.join(s, t["file"])
+
+
+def prepare_jobs(s):
+    """[(job, take numbers)] of the session's prepare jobs, oldest first."""
+    out = []
+    for j in all_jobs(s):
+        try:
+            argv = shlex.split(j.get("cmd") or "")
+        except ValueError:
+            continue
+        if "--prepare-run" in argv:
+            nums = set()
+            for x in argv[argv.index("--prepare-run") + 2:]:
+                if x.isdigit():
+                    nums.add(int(x))
+            out.append((j, nums))
+    return out
+
+
+def prepare_state(s, n, jobs=None):
+    """'ready', 'running', ('failed', reason) or 'missing'."""
+    if is_ready(words_doc(voice_file(s, voice_take(s, n)))):
+        return "ready"
+    mine = [j for j, nums in (prepare_jobs(s) if jobs is None else jobs) if int(n) in nums]
+    if any(j["status"] in ("starting", "running") for j in mine):
+        return "running"
+    if mine and mine[-1]["status"] in ("failed", "lost"):
+        return ("failed", mine[-1].get("error") or "It stopped before it finished.")
+    return "missing"
+
+
+def script_hints(s):
+    """Names and long words of the script, so Whisper spells them (same rule as VoiceFollow.hints)."""
+    seen, out, p = set(), [], os.path.join(s, "script.md")
+    for w in re.findall(r"[^\W_][\w'’-]*", read_text(p) if os.path.exists(p) else ""):
+        if (len(w) >= 7 or (w[0].isupper() and len(w) >= 3)) and w.lower() not in seen:
+            seen.add(w.lower())
+            out.append(w)
+    return out[:30]
+
+
+def say(line):
+    print(line, flush=True)
+
+
+def stop_now(*_):
+    """SIGTERM (stop_job) on a prepare or cut job: exit through the finally blocks, which remove its
+    scratch files. A SIGKILL skips them: sweep_work removes those at the next cut."""
+    sys.exit(143)
+
+
+def wait_for_recording(lib):
+    """While the app records a take, Whisper waits: its load could drop frames."""
+    told = False
+    while True:
+        try:
+            with open(os.path.join(lib, RECORDING)) as f:
+                pid = int(f.read().strip() or 0)
+        except (OSError, ValueError):
+            return
+        if not pid or not alive(pid):
+            return  # a marker of an app that is gone
+        if not told:
+            say("Waits for the recording to end.")
+            told = True
+        time.sleep(PREP_WAIT_S)
+
+
+def prepare_take(s, n, kind=None):
+    """Find the words of take n (its camera file, or kind's) and write them on the video clock.
+    Idempotent: a ready take is left as it is. Returns 'ready' or 'done'; raises PrepareError."""
+    import fcntl
+    voice_take(s, n, kind)
+    lib = lib_root(s)
+    here = os.path.basename(os.path.abspath(s))
+    fd = os.open(os.path.join(lib, PREP_LOCK), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            other = os.pread(fd, 512, 0).decode(errors="replace").strip().split(" ", 1)
+            where = " of %s" % other[1] if len(other) > 1 and other[1] != here else ""
+            say("Waits for take %s%s." % (other[0], where) if other[0] else "Waits for another take.")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, ("%d %s" % (int(n), here)).encode(), 0)
+        # After the lock: a take may have started to record while this one waited.
+        wait_for_recording(lib)
+        return prepare_locked(s, int(n), kind)
+    finally:
+        os.close(fd)
+
+
+def run_lines(cmd):
+    """Run cmd, print what it prints (the Jobs row reads it). (exit code, last plain line, a
+    TAKES_PROGRESS line came: the script itself ran, not only uv before it)."""
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True,
+                         errors="replace")
+    last, started = None, False
+    for line in p.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        x = line.strip()
+        if x.startswith("TAKES_PROGRESS"):
+            started = True
+        elif x:
+            last = x
+    return p.wait(), last, started
+
+
+def prep_offline(s):
+    """No speech model and no download: the app's saved takes stay quiet for an hour."""
+    with open(os.path.join(lib_root(s), PREP_OFFLINE), "w") as f:
+        f.write(now_iso())
+    return PrepareError(DOWNLOAD_ERROR)
+
+
+def prepare_locked(s, n, kind):
+    t = voice_take(s, n, kind)
+    src = voice_file(s, t)
+    name = os.path.splitext(t["file"])[0] + ".words.json"
+    if not os.path.exists(src):
+        raise PrepareError("Take %d has no file %s. Takes cannot find words in it." % (n, t["file"]))
+    clock = take_clock(src)
+    doc = words_doc(src)
+    if doc is None:
+        raise PrepareError("Takes cannot read %s. Takes did not change it. Move it out of the session folder, "
+                           "then try again: Takes finds the words again." % name)
+    if is_ready(doc, clock):
+        return "ready"
+    if not clock or clock.get("audio_offset_s") is None:
+        raise PrepareError("Take %d has no sound. Takes cannot find words in it." % n)
+    before = doc.get("before") if doc.get("v") == 2 else (doc or None)
+    m = re.match(r"apple ([a-z]{2})", str((doc if doc.get("v") != 2 else (before or {})).get("source") or ""))
+    lang = m.group(1) if m else None
+    hints = script_hints(s)
+    with tempfile.TemporaryDirectory() as tmp:
+        wav, out = os.path.join(tmp, "voice.wav"), os.path.join(tmp, "words.json")
+        extract_voice(src, wav, rate=16000, codec="pcm_s16le")
+        args = [wav, out] + (["--language", lang] if lang else []) + (["--hints", ",".join(hints)] if hints else []) \
+            + ["--model", prep_model()]
+        if os.environ.get("TAKES_PREP_CMD"):  # tests: a stand-in for the script
+            cmd = json.loads(os.environ["TAKES_PREP_CMD"]) + args
+        else:
+            cmd = ["/usr/sbin/taskpolicy", "-c", "utility"] if os.path.exists("/usr/sbin/taskpolicy") else []
+            try:
+                uv = ensure_uv()
+            except ValueError as e:
+                say(str(e))
+                raise prep_offline(s)
+            cmd += [uv, "run", "-q", "--python", "3.11", "--with", "faster-whisper", "--with", "numpy",
+                    prep_script()] + args
+        code, last, started = run_lines(cmd)
+        if code != 0:
+            # uv stops before the script when it cannot get the packages (offline, a proxy): the same fix.
+            if code == 3 or last == DOWNLOAD_ERROR or not started:
+                raise prep_offline(s)
+            raise PrepareError(last or "Takes could not find the words in take %d." % n)
+        with open(out) as f:
+            res = json.load(f)
+    words = []
+    for w in res.get("words") or []:
+        text = str(w.get("word") or "").strip()
+        if not text:
+            continue
+        e = {"word": text, "start": round(float(w["start"]), 3), "end": round(float(w["end"]), 3)}
+        if norm_word(text) in FILLERS:
+            e["filler"] = True
+        words.append(e)
+    new = {"v": 2, "clock": "video", "source": "faster-whisper " + prep_model(), "language": res.get("language"),
+           "audio_offset_s": clock["audio_offset_s"], "fps": clock["fps"], "fps_mode": clock["fps_mode"],
+           "duration": clock["duration"], "prepared": now_iso(), "onsets": 1, "words": words,
+           "sounds": [[round(float(a), 3), round(float(b), 3)] for a, b in res.get("sounds") or []]}
+    # Apple's Transcripts may have written its words while Whisper ran: they go under before too.
+    now = words_doc(src)
+    if isinstance(now, dict) and now.get("v") != 2 and now.get("words") and now != doc:
+        before = now
+    if before:
+        new["before"] = before
+    # Renamed while Whisper ran: the words go next to the take's new name.
+    try:
+        t = voice_take(s, n, kind)
+    except ValueError:
+        return "done"  # trashed meanwhile
+    path = os.path.join(s, os.path.splitext(t["file"])[0] + ".words.json")
+    with open(path + ".tmp", "w") as f:
+        json.dump(new, f, indent=1, ensure_ascii=False)
+    os.replace(path + ".tmp", path)
+    try:
+        os.remove(os.path.join(lib_root(s), PREP_OFFLINE))
+    except OSError:
+        pass
+    return "done"
+
+
+PREP_MOD = []
+
+
+def prep_mod():
+    """prepare_take.py as a module, for its onsets() pass (it needs no numpy)."""
+    if not PREP_MOD:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("prepare_take", prep_script())
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        PREP_MOD.append(m)
+    return PREP_MOD[0]
+
+
+def wav_voiced(path, hop_s, over_db):
+    """prepare_take.voiced_frames without numpy: a 16-bit mono WAV, 10 ms loudness frames, a frame
+    over_db above the 20th percentile is voiced."""
+    with wave.open(path, "rb") as f:
+        sr, width, ch, raw = f.getframerate(), f.getsampwidth(), f.getnchannels(), f.readframes(f.getnframes())
+    if width != 2 or ch != 1:
+        raise ValueError("needs a 16-bit mono WAV")
+    x = array.array("h")
+    x.frombytes(raw[:len(raw) // 2 * 2])
+    if sys.byteorder == "big":
+        x.byteswap()
+    hop = max(1, int(sr * hop_s))
+    db = []
+    for i in range(0, len(x) // hop * hop, hop):
+        seg = x[i:i + hop]
+        db.append(20 * math.log10(math.sqrt(sum(v * v for v in seg) / hop) / 32768.0 + 1e-9))
+    if not db:
+        return []
+    q = sorted(db)
+    pos = 0.2 * (len(q) - 1)  # numpy's linear percentile
+    lo = int(pos)
+    floor = q[lo] + (q[min(lo + 1, len(q) - 1)] - q[lo]) * (pos - lo)
+    return [d > floor + over_db for d in db]
+
+
+def ensure_onsets(s, t):
+    """A words file prepared before 2026-10-11 has first words after a pause 0.2 to 1 s early. The first
+    time Takes reads it for a cut, it runs only prepare_take's onsets() pass (no Whisper) on the take's
+    voice and marks the file "onsets": 1. No voice, or any failure: the file stays as it is."""
+    src = voice_file(s, t)
+    doc = words_doc(src)
+    if not is_ready(doc) or doc.get("onsets") or not os.path.exists(src):
+        return doc
+    c = take_clock(src)
+    if not c or c.get("audio_offset_s") is None:
+        return doc
+    try:
+        m = prep_mod()
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = os.path.join(tmp, "voice.wav")
+            extract_voice(src, wav, rate=16000, codec="pcm_s16le")
+            voiced = wav_voiced(wav, m.HOP, m.VOICED_DB)
+        words = m.onsets([dict(w) for w in doc["words"]], voiced)
+        for w in words:
+            w["start"] = round(float(w["start"]), 3)
+        new = dict(doc, words=words, onsets=1)
+        path = os.path.splitext(src)[0] + ".words.json"
+        if words_doc(src) != doc:
+            return words_doc(src)  # changed while this ran: leave it
+        with open(path + ".tmp", "w") as f:
+            json.dump(new, f, indent=1, ensure_ascii=False)
+        os.replace(path + ".tmp", path)
+        return new
+    except Exception:  # an old words file never fails the cut
+        return doc
+
+
+def start_prepare(s, numbers):
+    """One job that prepares these takes, one after the other."""
+    meta = read_meta(s)
+    numbers = sorted({int(n) for n in numbers})
+    cmd = "%s %s --prepare-run . %s" % (shlex.quote(sys.executable), shlex.quote(os.path.abspath(__file__)),
+                                        " ".join(str(n) for n in numbers))
+    cached = model_cached()
+    if not cached:
+        label = MODEL_LABEL
+    elif len(numbers) == 1:
+        label = "Finding words in take %d" % numbers[0]
+    else:
+        label = "Finding words in takes " + ", ".join(str(n) for n in numbers)
+        if len(label) > 60:
+            label = "Finding words in %d takes" % len(numbers)
+    secs = sum(next((t.get("duration") or 60 for t in meta.get("takes", []) if t["number"] == n), 60) for n in numbers)
+    return start_job(s, cmd, [], label, estimate_s=int(max(5, secs / 6) + (0 if cached else 120)))
+
+
+def app_prepare(session, n):
+    """`--prepare <session> <take>`: the app saved a take. Starts a job and returns at once. An offline
+    Mac without the model gets one failed row, then quiet for an hour (the next cut tries again)."""
+    s = resolve_session(session)
+    if not model_cached():
+        try:
+            if time.time() - os.path.getmtime(os.path.join(lib_root(s), PREP_OFFLINE)) < PREP_OFFLINE_S:
+                return None
+        except OSError:
+            pass
+    if prepare_state(s, n) in ("ready", "running"):
+        return None
+    return start_prepare(s, [n])
+
+
+def prepare_run(numbers):
+    """`--prepare-run . <take>...`: the prepare job's command, in the session folder."""
+    failed = None
+    for n in numbers:
+        try:
+            prepare_take(".", int(n))
+        except ValueError as e:
+            failed = str(e)
+            say(failed)
+        except Exception as e:  # the runner never ends on a traceback: the Jobs row shows the last line
+            failed = "Takes could not find the words in take %s: %s" % (n, e)
+            say(failed)
+    if failed:
+        say(failed)
+        sys.exit(1)
+
+
+# Cuts
+
+def frames(sec, fps):
+    return int(round(sec * fps))
+
+
+def snap_point(words, x, edge):
+    """A cut point inside a word moves to the nearer edge of that word, never into a neighbour word.
+    (new x, the word) or (x, None)."""
+    for k, w in enumerate(words):
+        if w["start"] < x < w["end"]:
+            prev_end = words[k - 1]["end"] if k else 0.0
+            next_start = words[k + 1]["start"] if k + 1 < len(words) else float("inf")
+            # A tie keeps the word: in goes to its start, out to its end.
+            near_start = (x - w["start"] <= w["end"] - x + 1e-6) if edge == "in" else (x - w["start"] < w["end"] - x - 1e-6)
+            if edge == "in":
+                y = max(w["start"] - 0.04, prev_end) if near_start else min(w["end"] + 0.02, next_start)
+            else:
+                y = max(w["start"] - 0.02, prev_end) if near_start else min(w["end"] + 0.06, next_start)
+            return y, w["word"]
+    return x, None
+
+
+def check_segments(s, segs):
+    """The segments as cut_take takes them, or an error that names the fix."""
+    shape = 'e.g. [{"take": 3, "in": 1.2, "out": 6.8}], seconds of the take'
+    if not isinstance(segs, list) or not segs:
+        raise ValueError("Give segments: the parts to keep, in order, %s." % shape)
+    if len(segs) > CUT_MAX:
+        raise ValueError("At most %d segments in one cut. Cut it in parts, or keep longer pauses." % CUT_MAX)
+    out = []
+    for i, g in enumerate(segs, 1):
+        if not isinstance(g, dict) or "in" not in g or "out" not in g or "take" not in g:
+            raise ValueError("Segment %d needs take, in and out, %s." % (i, shape))
+        try:
+            n = int(g["take"])
+        except (TypeError, ValueError):
+            raise ValueError("Segment %d: take is a take number, e.g. 3. get_session lists the takes." % i)
+        try:
+            t = voice_take(s, n, g.get("kind"))
+        except (TypeError, ValueError) as e:
+            raise ValueError("Segment %d: %s get_session lists the takes." % (i, e))
+        src = os.path.join(s, t["file"])
+        c = take_clock(src) if os.path.exists(src) else None
+        if not c:
+            raise ValueError("Segment %d: take %d has no video file Takes can read (%s)." % (i, t["number"], t["file"]))
+        dur = c.get("duration") or t.get("duration") or 0
+        try:
+            a, b = float(g["in"]), float(g["out"])
+        except (TypeError, ValueError):
+            raise ValueError("Segment %d: in and out are seconds, e.g. 1.24." % i)
+        if not (0 <= a < b <= dur + 0.001):
+            raise ValueError("Segment %d: take %d is %.3f s long. Give 0 <= in < out <= %.3f." % (i, t["number"], dur, dur))
+        if frames(b - a, c["fps"]) < 2:
+            raise ValueError("Segment %d is shorter than 2 frames. Make it longer or leave it out." % i)
+        g = dict(g)
+        g.update({"take": t["number"], "kind": t["kind"], "in": a, "out": min(b, dur)})
+        out.append(g)
+    return out
+
+
+def takes_label(verb, nums):
+    nums = list(dict.fromkeys(nums))
+    label = "%s take %d" % (verb, nums[0]) if len(nums) == 1 else "%s takes %s" % (verb, ", ".join(map(str, nums)))
+    return label if len(label) <= 60 else "%s %d takes" % (verb, len(nums))
+
+
+def work_files(name, n):
+    return [os.path.join(WORK_DIR, "%s-v%d%s" % (name, n, ext)) for ext in (".mp4", ".wav", ".words.json", ".json")]
+
+
+def prune_work(s, name, newest):
+    """Keep the newest WORK_KEEP versions of a name in _work/; older ones go to the Trash."""
+    d = os.path.join(s, WORK_DIR)
+    busy = {os.path.normpath(o) for o in claimed_outputs(s)}
+    have = sorted(set(versions_in(d, name)) | {newest})
+    old = []
+    for v in have[:-WORK_KEEP]:
+        files = [f for f in os.listdir(d) if f.startswith("%s-v%d." % (name, v))]
+        if any(os.path.normpath(os.path.join(WORK_DIR, f)) in busy for f in files):
+            continue
+        old += [os.path.join(d, f) for f in files]
+    if old:
+        try:
+            trash(old)
+        except (OSError, subprocess.CalledProcessError):
+            pass  # a full Trash never fails the cut
+
+
+def sweep_work(s):
+    """Leftovers of a cut that was stopped or killed: its hidden parts (.<name>-vN.cut/, .part.mp4,
+    .part.wav) and its claim (<name>-vN.request.json, with any output but the .json). A running
+    cut's files stay; a claim stays for a minute (its job may not be on the list yet)."""
+    d = os.path.join(s, WORK_DIR)
+    busy = {os.path.normpath(o) for o in claimed_outputs(s)}
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    for f in names:
+        m = re.match(r"^\.(.+-v\d+)\.(cut|part\.mp4|part\.wav)$", f) or re.match(r"^(.+-v\d+)\.request\.json$", f)
+        if not m or os.path.join(WORK_DIR, m.group(1) + ".mp4") in busy:
+            continue
+        p, stem = os.path.join(d, f), os.path.join(d, m.group(1))
+        try:
+            if f.startswith("."):
+                shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+            elif time.time() - os.path.getmtime(p) > 60:
+                for x in [p] + ([stem + ext for ext in (".mp4", ".wav", ".words.json")]
+                                if not os.path.exists(stem + ".json") else []):
+                    if os.path.exists(x):
+                        os.remove(x)
+        except OSError:
+            pass
+
+
+def start_cut(s, segs, name, extra=None):
+    """Claim the next version of _work/<name> and start the cut job. (job, version)."""
+    d = os.path.join(s, WORK_DIR)
+    os.makedirs(d, exist_ok=True)
+    sweep_work(s)
+    n = (versions_in(d, name) or [0])[-1] + 1
+    length = sum(frames(g["out"] - g["in"], 30) / 30 for g in segs)
+    big = any(min((take_clock(os.path.join(s, voice_take(s, g["take"], g["kind"])["file"])) or {}).get(k) or 0
+                  for k in ("width", "height")) > 1080 for g in segs[:1])
+    label = takes_label("Cutting", [g["take"] for g in segs])
+    for _ in range(100):
+        busy = claimed_outputs(s)
+        rels = work_files(name, n)
+        req = os.path.join(WORK_DIR, "%s-v%d.request.json" % (name, n))
+        if any(os.path.lexists(os.path.join(s, r)) or os.path.normpath(r) in busy for r in rels):
+            n += 1
+            continue
+        try:  # the request file claims the version: a second caller at the same moment takes the next one
+            fd = os.open(os.path.join(s, req), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            n += 1
+            continue
+        with os.fdopen(fd, "w") as f:
+            json.dump({"name": name, "version": n, "segments": segs, "extra": extra or {}}, f, ensure_ascii=False)
+        cmd = "%s %s --cut-run . %s" % (shlex.quote(sys.executable), shlex.quote(os.path.abspath(__file__)),
+                                        shlex.quote(req))
+        try:
+            job = start_job(s, cmd, rels, label, estimate_s=int(5 + length * (1.0 if big else 0.5)))
+        except ValueError as e:
+            os.remove(os.path.join(s, req))
+            if "already writes" in str(e) or "exists" in str(e):
+                n += 1
+                continue
+            raise
+        prune_work(s, name, n)
+        return job, n
+    raise ValueError("Takes could not find a free version in %s/. Try again." % WORK_DIR)
+
+
+def cut_view(s, rel):
+    """What cut_take, rough_cut and get_job say about a finished cut (_work/<name>-vN.json)."""
+    with open(os.path.join(s, rel)) as f:
+        r = json.load(f)
+    stem = os.path.join(s, rel[:-len(".json")])
+    out = {"video": stem + ".mp4", "voice": stem + ".wav", "words": stem + ".words.json",
+           "length_s": r.get("length_s"), "fps": r.get("fps"), "cut": r.get("cut"), "moved": r.get("moved") or []}
+    if r.get("rough"):
+        out["dropped"] = r.get("dropped") or []
+        out["missing"] = r.get("missing") or []
+    out["voice_source"] = r.get("voice_source")
+    out["notes"] = r.get("notes") or []
+    if r.get("rough"):
+        out["next"] = ("Show the user the clip (open_in_app with its path) and tell them, in plain words, what you "
+                       "dropped and which lines are missing. It is a first draft: improve it freely "
+                       "(edit cut, call cut_take).")
+    else:
+        out["next"] = "Look at a frame at each cut before you build on it."
+    return out
+
+
+def cut_result(s, job_id, name, n):
+    b = t_get_job({"id": job_id, "session": s, "wait_s": CUT_WAIT})
+    if b["status"] in ("starting", "running"):
+        return {"status": "running", "job": job_id,
+                "note": "Takes is still working. get_job with wait_s gives the result."}
+    if b["status"] != "done":
+        raise ValueError("The cut %s: %s" % (b["status"], b.get("error") or "see get_job id=%s." % job_id))
+    return cut_view(b["session"], os.path.join(WORK_DIR, "%s-v%d.json" % (name, n)))
+
+
+def t_cut_take(a):
+    s = job_session(a.get("session"))
+    if "segments" not in a and any(k in a for k in ("take", "start", "end", "in", "out")):
+        raise ValueError('cut_take takes segments: [{"take": 3, "in": 1.2, "out": 6.8}], seconds of the take.')
+    segs = check_segments(s, a.get("segments"))
+    nums = list(dict.fromkeys(g["take"] for g in segs))
+    name = "take-%02d" % nums[0] if len(nums) == 1 else "cut"
+    job, n = start_cut(s, segs, name)
+    return cut_result(s, job["id"], name, n)
+
+
+def has_encoder(name):
+    if name not in ENCODERS:
+        r = subprocess.run([need_ffmpeg(), "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=30)
+        ENCODERS[name] = (" %s " % name) in (r.stdout or "")
+    return ENCODERS[name]
+
+
+def video_codec(c):
+    """libx264 up to 1080p; VideoToolbox above (HEVC 10-bit for a 10-bit or HDR source)."""
+    big = min(c.get("width") or 0, c.get("height") or 0) > 1080
+    ten = "10" in (c.get("pix_fmt") or "") or c.get("color_transfer") in ("arib-std-b67", "smpte2084")
+    if not big and has_encoder("libx264"):
+        args = ["-c:v", "libx264", "-crf", "16", "-preset", "medium", "-pix_fmt", "yuv420p"]
+    elif not big:
+        args = ["-c:v", "h264_videotoolbox", "-b:v", "20M", "-pix_fmt", "yuv420p"]
+    elif ten:
+        args = ["-c:v", "hevc_videotoolbox", "-profile:v", "main10", "-tag:v", "hvc1", "-b:v", "40M",
+                "-pix_fmt", "p010le"]
+    else:
+        args = ["-c:v", "h264_videotoolbox", "-b:v", "40M", "-pix_fmt", "yuv420p"]
+    for k, flag in (("color_primaries", "-color_primaries"), ("color_transfer", "-color_trc"),
+                    ("color_space", "-colorspace")):
+        if c.get(k):
+            args += [flag, c[k]]
+    return args
+
+
+CUT_BATCH = 8  # segments per video pass: each input holds a decoder (about 70 MB up to 1080p)
+# ... above 1080p or 10-bit, each decoder on 4 threads: a 4K HEVC Main10 take, 150 segments, peaked at
+# 2.5 GB with 8 and all threads, 1.0 GB with 3 and 4 threads, in the same time (2026-10-11).
+CUT_BATCH_BIG = 3
+
+
+def cut_batch(c):
+    big = min(c.get("width") or 0, c.get("height") or 0) > 1080
+    return CUT_BATCH_BIG if big or "10" in (c.get("pix_fmt") or "") else CUT_BATCH
+
+
+def run_ff(cmd, total, lo=0.0, hi=1.0):
+    """Run ffmpeg with -progress on stdout; print TAKES_PROGRESS from lo to hi of the whole job."""
+    if RUN_LOG is not None:
+        RUN_LOG.append([str(x) for x in cmd])
+    with tempfile.TemporaryFile("w+") as err:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True)
+        for line in p.stdout:
+            if line.startswith("out_time_us=") and total:
+                try:
+                    say("TAKES_PROGRESS %.3f" % (lo + (hi - lo) * min(1.0, int(line.split("=")[1]) / 1e6 / total)))
+                except ValueError:
+                    pass
+        if p.wait() != 0:
+            err.seek(0)
+            raise ValueError("ffmpeg: " + ((err.read().strip().splitlines() or ["failed"])[-1]))
+
+
+def render_cut(segs, files, clocks, voices, mp4, wav, vargs=None):
+    """The clip: one seeked input per segment, each trimmed to whole frames at one fps. The sound goes
+    in one pass (from the same input as the picture, so the take's audio offset stays, or from the
+    clean voice). The picture goes in passes of a few segments (cut_batch), joined without a new encode: a
+    long cut never holds 150 decoders at once. vargs: the parts' codec (render_edit: ProRes, so its one
+    picture pass is the only lossy encode)."""
+    first = clocks[0]
+    fps, W, H = first["fps"], first["width"], first["height"]
+    layout = "mono" if all(voices) else "stereo"
+    lens = [max(2, frames(g["out"] - g["in"], fps)) / float(fps) for g in segs]
+    total = sum(lens)
+    base = [need_ffmpeg(), "-nostdin", "-v", "error", "-y", "-progress", "pipe:1", "-nostats"]
+    # Relative, like every path of the job: the session folder may get a new name while it runs.
+    # .<name>-vN.cut: sweep_work finds it when a stopped job leaves it.
+    tmp = mp4[:-len(".part.mp4")] + ".cut" if mp4.endswith(".part.mp4") else mp4 + ".cut"
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp)
+    try:
+        # Sound: every segment in one graph (sound decoders are small).
+        args, parts, n_in = [], [], 0
+        for k, g in enumerate(segs):
+            c, L = clocks[k], lens[k]
+            if voices[k]:
+                path, late = voices[k]
+                ss = g["in"] - late
+                pad = max(0.0, -ss)
+                args += ["-ss", "%.3f" % max(0.0, ss), "-t", "%.3f" % (L + 0.3), "-i", path]
+                a = "[%d:a]" % n_in + ("adelay=%d:all=1," % round(pad * 1000) if pad > 0.0005 else "")
+                n_in += 1
+            elif c.get("audio_offset_s") is not None:
+                args += ["-ss", "%.3f" % g["in"], "-t", "%.3f" % (L + 0.3), "-i", files[k]]
+                a = "[%d:a]%s," % (n_in, VIDEO_CLOCK)  # pads the take's late start
+                n_in += 1
+            else:
+                a = "anullsrc=r=48000:cl=%s," % layout
+            parts.append(a + "aresample=48000,atrim=0:%.6f,asetpts=PTS-STARTPTS,afade=t=in:d=0.008,"
+                         "afade=t=out:st=%.6f:d=0.008,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=%s[a%d]"
+                         % (L, max(0, L - 0.008), layout, k))
+        parts.append("".join("[a%d]" % k for k in range(len(segs))) + "concat=n=%d:v=0:a=1[aout]" % len(segs))
+        voice = os.path.join(tmp, "voice.wav")
+        run_ff(base + args + ["-filter_complex", ";".join(parts), "-map", "[aout]", "-c:a", "pcm_s24le",
+                              "-ar", "48000", voice], total, 0.0, 0.1)
+        # Picture, a batch of segments at a time, each part in the final codec.
+        names, step = [], min(cut_batch(c) for c in clocks)
+        for b in range(0, len(segs), step):
+            args, parts = [], []
+            for k in range(b, min(b + step, len(segs))):
+                g, c, n = segs[k], clocks[k], int(round(lens[k] * fps))
+                big = cut_batch(c) == CUT_BATCH_BIG  # 4 decoder threads: same speed, half the memory
+                args += (["-threads", "4"] if big else []) + ["-ss", "%.3f" % g["in"], "-t", "%.3f" % (lens[k] + 0.3),
+                                                             "-i", files[k]]
+                v = "[%d:v]fps=%d,trim=end_frame=%d,setpts=PTS-STARTPTS" % (k - b, fps, n)
+                if (c["width"], c["height"]) != (W, H):
+                    v += ",scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2" % (W, H, W, H)
+                parts.append(v + ",setsar=1[v%d]" % (k - b))
+            m = len(parts)
+            parts.append("".join("[v%d]" % k for k in range(m)) + "concat=n=%d:v=1:a=0[vout]" % m)
+            names.append("%03d.%s" % (b // step, "mov" if vargs else "mp4"))
+            done = sum(lens[:b])
+            run_ff(base + args + ["-filter_complex", ";".join(parts), "-map", "[vout]"] + (vargs or video_codec(first))
+                   + ["-r", str(fps), "-an", os.path.join(tmp, names[-1])], sum(lens[b:b + step]),
+                   0.1 + 0.85 * done / total, 0.1 + 0.85 * (done + sum(lens[b:b + step])) / total)
+        with open(os.path.join(tmp, "parts.txt"), "w") as f:
+            f.write("".join("file '%s'\n" % n for n in names))
+        run_ff(base + ["-f", "concat", "-safe", "0", "-i", os.path.join(tmp, "parts.txt"), "-i", voice,
+                       "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k", "-ar", "48000",
+                       "-movflags", "+faststart", mp4], total, 0.95, 1.0)
+        os.replace(voice, wav)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return total
+
+
+def cut_run(req):
+    """`--cut-run . _work/<name>-vN.request.json`: the cut job, in the session folder."""
+    s = "."
+    with open(req) as f:
+        r = json.load(f)
+    name, n, segs, extra = r["name"], r["version"], r["segments"], r.get("extra") or {}
+    stem = os.path.join(WORK_DIR, "%s-v%d" % (name, n))
+    notes, words, clocks, files, voices, moved = [], {}, [], [], [], []
+    for g in segs:
+        key = (g["take"], g["kind"])
+        if key in words:
+            continue
+        t = voice_take(s, g["take"], g["kind"])
+        doc = words_doc(t["file"])
+        if not is_ready(doc, take_clock(t["file"])):
+            try:
+                prepare_take(s, g["take"], g["kind"])
+            except ValueError as e:
+                notes.append("Take %d has no word times, so its cut points stay where you put them. %s" % (g["take"], e))
+            t = voice_take(s, g["take"], g["kind"])
+            doc = words_doc(t["file"])
+        doc = ensure_onsets(s, t) if is_ready(doc) else doc
+        words[key] = doc.get("words") if is_ready(doc) else None
+    say("Cuts the clip.")
+    for g in segs:
+        t = voice_take(s, g["take"], g["kind"])
+        c = take_clock(t["file"])
+        files.append(t["file"])
+        clocks.append(c)
+        fps, dur = c["fps"], c.get("duration") or g["out"]
+        ws = words[(g["take"], g["kind"])]
+        for edge in ("in", "out"):
+            was = g[edge]
+            x, word = snap_point(ws, was, edge) if ws else (was, None)
+            # An in-point goes to the frame at or before it: rounding up could clip the word's onset.
+            f = math.floor(x * fps + 1e-6) if edge == "in" else round(x * fps)
+            x = min(max(0.0, f / float(fps)), math.floor(dur * fps + 1e-6) / float(fps))
+            if word:
+                moved.append({"was": round(was, 3), "now": round(x, 3), "why": "inside '%s'" % word})
+            g[edge] = round(x, 3)
+        if frames(g["out"] - g["in"], fps) < 2:
+            g["out"] = round(min(g["in"] + 2.0 / fps, dur), 3)
+        key = voice_key(t["number"], t["kind"])
+        v, f = read_voice(s, key) or {}, voice_files(s, key)["mix"]
+        voices.append((f, voice_offset(s, key)) if v.get("state") == "done" and v.get("on", True)
+                      and os.path.exists(f) else None)
+    mp4, wav = os.path.join(WORK_DIR, ".%s-v%d.part.mp4" % (name, n)), os.path.join(WORK_DIR, ".%s-v%d.part.wav" % (name, n))
+    try:
+        render_cut(segs, files, clocks, voices, mp4, wav)
+        os.replace(mp4, stem + ".mp4")
+        os.replace(wav, stem + ".wav")
+    finally:
+        for p in (mp4, wav):
+            if os.path.exists(p):
+                os.remove(p)
+    fps = clocks[0]["fps"]
+    at, cut, clip_words = 0.0, [], []
+    for g in segs:
+        L = max(2, frames(g["out"] - g["in"], fps)) / float(fps)
+        cut.append(dict(g, at=round(at, 3)))
+        for w in words[(g["take"], g["kind"])] or []:
+            if w["end"] > g["in"] and w["start"] < g["in"] + L:
+                e = {"word": w["word"], "start": round(at + max(w["start"], g["in"]) - g["in"], 3),
+                     "end": round(at + min(w["end"], g["in"] + L) - g["in"], 3)}
+                if w.get("filler"):
+                    e["filler"] = True
+                clip_words.append(e)
+        at += L
+    on = [bool(x) for x in voices]
+    source = "clean voice" if all(on) else "take sound" if not any(on) else "%s, take sound for the rest" \
+        % takes_label("clean voice for", [g["take"] for g, x in zip(segs, on) if x])
+    made = {"session_id": session_id(s),
+            "cut": [{k: g[k] for k in ("take", "kind", "in", "out", "at")} for g in cut]}
+    with open(stem + ".words.json.tmp", "w") as f:
+        json.dump({"v": 2, "clock": "video", "source": "cut_take", "fps": fps, "duration": round(at, 3),
+                   "words": clip_words, "made_from": made}, f, indent=1, ensure_ascii=False)
+    os.replace(stem + ".words.json.tmp", stem + ".words.json")
+    out = dict(extra, cut=cut, moved=moved, notes=notes, length_s=round(at, 3), fps=fps, voice_source=source,
+               takes={str(g["take"]): c for g, c in zip(segs, clocks)})
+    with open(stem + ".json.tmp", "w") as f:
+        json.dump(out, f, indent=1, ensure_ascii=False)
+    os.replace(stem + ".json.tmp", stem + ".json")
+    try:
+        os.remove(req)
+    except OSError:
+        pass
+
+
+# Rough cut
+
+def script_plain(text):
+    """script.md as said: no headings, [stage notes], markdown marks or links."""
+    text = re.sub(r"^---\n.*?\n---\n", "", text, flags=re.S)
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"\[[^\]]*\]", " ", text)
+    lines = [l for l in text.splitlines() if not l.lstrip().startswith("#")]
+    return re.sub(r"[*_`>~]|^\s*[-+]\s+|^\s*\d+\.\s+", "", "\n".join(lines), flags=re.M)
+
+
+def script_tokens(text):
+    """(tokens, sentence index of each token, sentences as text)."""
+    toks, sent, sentences = [], [], []
+    for piece in re.split(r"(?<=[.!?])\s+|\n+", text or ""):
+        tk = [norm_word(w) for w in piece.split() if norm_word(w)]
+        if tk:
+            sentences.append(piece.strip())
+            toks += tk
+            sent += [len(sentences) - 1] * len(tk)
+    return toks, sent, sentences
+
+
+def match_phrase(items, stoks, pos):
+    """Give each word the script index it says, near pos (else anywhere). The longest run matched."""
+    from difflib import SequenceMatcher
+    for it in items:
+        it["si"] = None
+    p = [it["tok"] for it in items]
+
+    def blocks(lo, hi):
+        sm = SequenceMatcher(None, p, stoks[lo:hi], autojunk=False)
+        bs = sorted(((b.a, b.b + lo, b.size) for b in sm.get_matching_blocks() if b.size), key=lambda b: -b[2])
+        if not bs or (bs[0][2] < 2 and len(p) > 2):
+            return []
+        keep = [bs[0]]  # the longest run; a shorter one only close to what is kept (no stray "in the")
+        for b in bs[1:]:
+            near = any(abs(b[1] - (k[1] + k[2])) <= 4 or abs(k[1] - (b[1] + b[2])) <= 4 for k in keep)
+            if b[2] >= 3 or near:
+                keep.append(b)
+        return keep
+    found = blocks(max(0, pos - 40), min(len(stoks), pos + 200))
+    if max([x[2] for x in found] or [0]) < 3 and len(p) >= 3:
+        # Not near the last line (a take that starts later in the script): anywhere, but only a real run.
+        wide = blocks(0, len(stoks))
+        if max([x[2] for x in wide] or [0]) >= 3:
+            found = wide
+    for a, b, size in found:
+        for k in range(size):
+            items[a + k]["si"] = b + k
+    return max([x[2] for x in found] or [0])
+
+
+def said_between(items, sent_of, k):
+    """3+ words between the script words of the lines before and after line k: the line in other words."""
+    lines = [sent_of[x["si"]] if x["si"] is not None else None for x in items]
+    before = [i for i, ln in enumerate(lines) if ln is not None and ln < k]
+    after = [i for i, ln in enumerate(lines) if ln is not None and ln > k]
+    return bool(before and after) and after[0] - before[-1] > 3
+
+
+def whole_line(items, sent_of):
+    """The phrase says every script word of a line of 2+ words."""
+    si = {x["si"] for x in items if x["si"] is not None}
+    for k in {sent_of[i] for i in si}:
+        line = [i for i, sk in enumerate(sent_of) if sk == k]
+        if len(line) >= 2 and si.issuperset(line):
+            return True
+    return False
+
+
+def phrase_place(items):
+    """(start, length) of the longest run of words that say consecutive script words."""
+    best, run, prev = [], [], None
+    for x in items:
+        si = x["si"]
+        run = run + [si] if si is not None and prev is not None and si == prev + 1 else ([si] if si is not None else [])
+        prev = si
+        if len(run) > len(best):
+            best = run
+    return (best[0], len(best)) if best else (None, 0)
+
+
+def in_range(w, lo, hi):
+    """The word belongs to the range lo..hi: its end is inside, or most of it is."""
+    a, b = float(w["start"]), float(w.get("end") or w["start"])
+    return lo < b <= hi or min(b, hi) - max(a, lo) >= 0.5 * max(b - a, 1e-6)
+
+
+def plan_rough(words_by_take, script_text, gap=0.25):
+    """The thinking of rough_cut, without media: which words to keep, in which order, as segments.
+    words_by_take: {take: {"words": [...], "sounds": [[s, e]]}}, takes in the order to use. A word with
+    outside=True (not in the take's best_cut) is never kept: it goes to dropped.
+    Returns {"cut_list": [{take, in, out, text}], "dropped": [...], "missing": [...], "kept_text"}."""
+    stoks, sent_of, sentences = script_tokens(script_text)
+    sdouble = " " + " ".join(stoks) + " "
+    allw, sounds, units, dropped = {}, {}, [], []
+    for n, d in words_by_take.items():
+        ws = sorted((w for w in d.get("words") or [] if w.get("start") is not None),
+                    key=lambda w: float(w["start"]))
+        items = []
+        for i, w in enumerate(ws):
+            text = str(w.get("word") or "").strip()
+            tok = norm_word(text) or text.lower()  # "%" is said ("percent"): a word, never a filler
+            items.append({"take": n, "i": i, "word": text, "start": float(w["start"]),
+                          "end": float(w.get("end") or w["start"]), "tok": tok, "si": None,
+                          "why": "outside best_cut" if w.get("outside") else
+                          "filler" if w.get("filler") or tok in FILLERS else None})
+        allw[n] = items
+        sounds[n] = sorted([float(a), float(b)] for a, b in d.get("sounds") or [])
+        cur = []
+        for it in items:
+            if it["why"]:
+                if cur:
+                    units.append(cur)
+                cur = []
+                continue
+            if cur and (it["start"] - cur[-1]["end"] > 0.6
+                        or any(cur[-1]["end"] <= a and b <= it["start"] for a, b in sounds[n])):
+                units.append(cur)
+                cur = []
+            cur.append(it)
+        if cur:
+            units.append(cur)
+    # Stutters: 1-3 words said twice back to back; the first copy goes (unless the script says it twice).
+    for u in units:
+        i = 0
+        while i < len(u):
+            for k in (3, 2, 1):
+                a, b = [x["tok"] for x in u[i:i + k]], [x["tok"] for x in u[i + k:i + 2 * k]]
+                if len(a) == k and a == b and (" %s " % " ".join(a + b)) not in sdouble:
+                    for x in u[i:i + k]:
+                        x["why"] = "stutter"
+                    i += k
+                    break
+            else:
+                i += 1
+    units = [[x for x in u if not x["why"]] for u in units]
+    units = [u for u in units if u]
+    # A restart glued to the end of a try ("... came out of every | single video"): the phrase ends
+    # with the words it began with. Those words start the next phrase of the take.
+    for k in range(len(units) - 1):
+        u, nxt = units[k], units[k + 1]
+        for n in (3, 2, 1):
+            if (len(u) > 2 * n and [x["tok"] for x in u[-n:]] == [x["tok"] for x in u[:n]]
+                    and nxt[0]["take"] == u[0]["take"] and nxt[0]["start"] - u[-1]["end"] <= 2.0):
+                units[k + 1] = u[-n:] + nxt
+                units[k] = u[:-n]
+                break
+    if stoks:
+        # Map each phrase to the script; a run of 3+ unmatched words inside a phrase is a restart: its own phrase.
+        out, pos, last = [], 0, None
+        for u in units:
+            if u[0]["take"] != last:
+                pos, last = 0, u[0]["take"]
+            match_phrase(u, stoks, pos)
+            pieces, cur, run = [], [], []
+            for x in u:
+                if x["si"] is None:
+                    run.append(x)
+                    continue
+                if len(run) >= 3:
+                    pieces += [p for p in (cur, run) if p]
+                    cur = []
+                else:
+                    cur += run
+                run = []
+                cur.append(x)
+            if len(run) >= 3:
+                pieces += [p for p in (cur, run) if p]
+            else:
+                pieces.append(cur + run)
+            pieces = [p for p in pieces if p]
+            if len(pieces) > 1:
+                for p in pieces:
+                    if match_phrase(p, stoks, pos) < 3:  # not a restart: words off the script
+                        for x in p:
+                            x["si"] = None
+            for p in pieces:
+                start, longest = phrase_place(p)
+                out.append((p, longest))
+                if start is not None:
+                    pos = start + longest  # the next phrase looks near the end of this one
+        # Tries: the phrases of a take in order, until one goes back in the script (a retake of those
+        # lines). Going back needs a run of 4+ script words or a whole line: a shorter run ("look at
+        # the") is common words, so that phrase stays off the script, after the one it followed.
+        tries, hi = [], -1
+        for k, (p, _) in enumerate(out):
+            start, longest = phrase_place(p)
+            back = start is not None and start < hi
+            nxt = out[k + 1][0] if k + 1 < len(out) and out[k + 1][0][0]["take"] == p[0]["take"] else None
+            n_start, n_longest = phrase_place(nxt) if nxt else (None, 0)
+            # "Every", a pause, "single video I posted": the next phrase goes on, so this one starts the try.
+            goes_on = n_start is not None and 0 <= n_start - (start or 0) - longest <= 3 and longest + n_longest >= 4
+            if back and longest < 4 and not goes_on and not whole_line(p, sent_of):
+                for x in p:
+                    x["si"] = None
+                back = False
+            if not tries or p[0]["take"] != tries[-1][0]["take"] or back:
+                tries.append([])
+                hi = -1
+                if back:  # "Okay. So," before a retake: words of the restart, not of the line
+                    lead = next((i for i, x in enumerate(p) if x["si"] is not None), 0)
+                    for x in p[:lead] if lead <= 3 else ():
+                        x["why"] = x["why"] or "retake"
+            # Inside the phrase too: a short run of words back in the script is common words.
+            run = []
+            for x in p + [{"si": None}]:
+                if x["si"] is not None and (not run or x["si"] == run[-1]["si"] + 1):
+                    run.append(x)
+                    continue
+                if run and run[0]["si"] < hi and len(run) < 4:
+                    for y in run:
+                        y["si"] = None
+                elif run:
+                    hi = max(hi, run[-1]["si"])
+                run = [x] if x["si"] is not None else []
+            tries[-1] += p
+        # Each word belongs to a line: the line of its script word, else of the script word before it
+        # in the try (else after it).
+        cover = {}
+        for ti, q in enumerate(tries):
+            k = next((sent_of[x["si"]] for x in q if x["si"] is not None), None)
+            for x in q:
+                if x["si"] is not None:
+                    k = sent_of[x["si"]]
+                    cover.setdefault(k, {}).setdefault(ti, set()).add(x["si"])
+                x["line"], x["try"] = k, ti
+        # Retakes: each line once, from the last try that says most of it (60% of the script words of
+        # the best try of that line). The same line in the other tries goes.
+        # A try that stops inside its last line ("Takes is free and", then nothing or "okay so") is no
+        # full try of that line.
+        stopped = set()
+        for ti, q in enumerate(tries):
+            m = [i for i, x in enumerate(q) if x["si"] is not None]
+            if m and len(q) - 1 - m[-1] < 3:
+                last = max(x["si"] for x in q if x["si"] is not None)
+                if last < max(i for i, sk in enumerate(sent_of) if sk == sent_of[last]) - 1:
+                    stopped.add((ti, sent_of[last]))
+        strong = {}
+        for k, by_try in cover.items():
+            full = {ti: v for ti, v in by_try.items() if (ti, k) not in stopped} or by_try
+            best = max(len(v) for v in full.values())
+            strong[k] = max(ti for ti, v in full.items() if len(v) >= 0.6 * best)
+        # A try owns the lines it says best, and every line between them that it says in some words:
+        # an ad-lib of a line in a later full try beats a closer wording in an earlier one (one flow).
+        owner = {}
+        for ti in reversed(range(len(tries))):
+            mine = [k for k, o in strong.items() if o == ti]
+            for k in range(min(mine), max(mine) + 1) if mine else ():
+                if k not in owner and (ti in cover.get(k, {}) or said_between(tries[ti], sent_of, k)):
+                    owner[k] = ti
+        for k, o in strong.items():
+            owner.setdefault(k, o)
+        for q in tries:
+            for x in q:
+                if x["line"] is not None and owner[x["line"]] != x["try"] and not x["why"]:
+                    x["why"] = "retake"
+        # A kept piece of 1-2 words of a line kept elsewhere in 3+ words is a leftover of a retake.
+        # (An um or a stutter inside a piece does not split it.)
+        runs, cut = [], True
+        for q in tries:
+            cut = True
+            for x in q:
+                if x["why"]:
+                    cut = cut or x["why"] == "retake"
+                    continue
+                if cut:
+                    runs.append([])
+                runs[-1].append(x)
+                cut = False
+        big = {x["line"] for r in runs if len(r) >= 3 for x in r}
+        for r in runs:
+            if len(r) <= 2 and all(x["line"] is not None and x["line"] in big for x in r):
+                for x in r:
+                    x["why"] = "retake"
+        # Order: by line; in a line, the words of its try in the order said.
+        ordered, last = [], -1
+        for q in tries:
+            for x in q:
+                last = x["line"] if x["line"] is not None else last
+                ordered.append(((last, x["try"], x["i"]), x))
+        ordered = [[x for _, x in sorted(ordered, key=lambda e: e[0])]]
+    else:
+        for i, p in enumerate(units):
+            pt = [x["tok"] for x in p]
+            if len(pt) < 3:
+                continue
+            for q in units[i + 1:]:
+                if q[0]["take"] != p[0]["take"] or q[0]["start"] - p[-1]["end"] > 15:
+                    continue
+                if [x["tok"] for x in q[:3]] == pt[:3]:
+                    for x in p:
+                        x["why"] = x["why"] or "retake"
+                    break
+        ordered = units
+    # Segments: kept words next to each other in one take, with pauses up to gap.
+    kept = [x for u in ordered for x in u if not x["why"]]
+    groups = []
+    for x in kept:
+        g = groups[-1] if groups else None
+        if (g and g[-1]["take"] == x["take"] and x["i"] == g[-1]["i"] + 1 and x["start"] - g[-1]["end"] <= gap
+                and not any(g[-1]["end"] <= a and b <= x["start"] for a, b in sounds[x["take"]])):
+            g.append(x)
+        else:
+            groups.append([x])
+    cut_list = []
+    for g in groups:
+        n, first, last = g[0]["take"], g[0], g[-1]
+        ws = allw[n]
+        prev_end = max([ws[first["i"] - 1]["end"]] if first["i"] else [0.0])
+        prev_end = max([prev_end] + [b for a, b in sounds[n] if b <= first["start"]])
+        nxt = [ws[last["i"] + 1]["start"]] if last["i"] + 1 < len(ws) else []
+        nxt += [a for a, b in sounds[n] if a >= last["end"]]
+        a = first["start"] - 0.08
+        if first["i"] or any(b <= first["start"] for _, b in sounds[n]):
+            a = max(a, prev_end + 0.02)  # never into the word or sound before
+        a = max(0.0, min(first["start"], a))
+        b = max(last["end"], min(last["end"] + 0.12, (min(nxt) - 0.02) if nxt else float("inf")))
+        cut_list.append({"take": n, "in": round(a, 3), "out": round(b, 3), "text": " ".join(x["word"] for x in g)})
+    # What went, grouped: consecutive words of one take with the same reason.
+    gone = sorted((x for n in allw for x in allw[n] if x["why"]), key=lambda x: (list(allw).index(x["take"]), x["i"]))
+    for x in gone:
+        d = dropped[-1] if dropped else None
+        if d and d["take"] == x["take"] and d["why"] == x["why"] and d["_i"] == x["i"] - 1:
+            d.update(end=x["end"], text=d["text"] + " " + x["word"], _i=x["i"])
+        else:
+            dropped.append({"take": x["take"], "start": x["start"], "end": x["end"], "text": x["word"], "why": x["why"],
+                            "_i": x["i"]})
+    for n in allw:
+        for a, b in sounds[n]:
+            dropped.append({"take": n, "start": a, "end": b, "text": "", "why": "sound", "_i": -1})
+    dropped.sort(key=lambda d: (list(allw).index(d["take"]), d["start"]))
+    for d in dropped:
+        d.pop("_i")
+        d["start"], d["end"] = round(d["start"], 3), round(d["end"], 3)
+    missing = []
+    if stoks:
+        kept_si = {x["si"] for x in kept if x["si"] is not None}
+        for k, text in enumerate(sentences):
+            idx = [i for i, sk in enumerate(sent_of) if sk == k]
+            if sum(1 for i in idx if i in kept_si) < 0.6 * len(idx):
+                said_in = sorted({x["take"] for n in allw for x in allw[n] if x["si"] is not None and sent_of[x["si"]] == k},
+                                 key=list(allw).index)
+                missing.append({"text": text, "said_in": said_in})
+    return {"cut_list": cut_list, "dropped": dropped, "missing": missing,
+            "kept_text": " ".join(x["word"] for x in kept)}
+
+
+def t_rough_cut(a):
+    s = job_session(a.get("session"))
+    meta = read_meta(s)
+    numbers = sorted({t["number"] for t in meta.get("takes", [])})
+    if not numbers:
+        raise ValueError("This session has no takes yet.")
+    if a.get("takes"):
+        try:
+            if not isinstance(a["takes"], list):
+                raise TypeError
+            takes = [int(x) for x in a["takes"]]
+        except (TypeError, ValueError):
+            raise ValueError("takes is a list of take numbers, e.g. [3, 5].")
+        bad = [n for n in takes if n not in numbers]
+        if bad:
+            raise ValueError("No take %d in this session. get_session lists the takes." % bad[0])
+    else:
+        keepers = sorted({t["number"] for t in meta.get("takes", []) if t.get("keeper")})
+        takes = keepers or numbers
+    takes = list(dict.fromkeys(takes))
+    try:
+        gap = float(a.get("gap", 0.25))
+    except (TypeError, ValueError):
+        raise ValueError("gap is seconds, 0.1 to 1.0.")
+    if not 0.1 <= gap <= 1.0:
+        raise ValueError("gap is seconds, 0.1 to 1.0.")
+    jobs = prepare_jobs(s)
+    waiting = [n for n in takes if not is_ready(words_doc(voice_file(s, voice_take(s, n))))]
+    if waiting:
+        running = [j for j, nums in jobs if j["status"] in ("starting", "running") and set(waiting) & nums]
+        job = running[-1] if running else start_prepare(s, waiting)
+        b = t_get_job({"id": job["id"], "session": s, "wait_s": CUT_WAIT})
+        if b["status"] in ("starting", "running"):
+            return {"status": "running", "job": job["id"],
+                    "note": "Takes is still working. Call get_job with wait_s, then call rough_cut again."}
+        still = [n for n in takes if not is_ready(words_doc(voice_file(s, voice_take(s, n))))]
+        if still:
+            raise ValueError("Takes has no word times for take %d: %s" % (still[0], b.get("error") or "the job %s." % b["status"]))
+    cuts, words_by_take = read_cuts(s), {}
+    for n in takes:
+        doc = ensure_onsets(s, voice_take(s, n))
+        ws, snd = doc.get("words") or [], doc.get("sounds") or []
+        bc = cuts.get(str(n)) or {}
+        if bc.get("state") == "done" and bc.get("start") is not None and bc.get("end") is not None:
+            lo, hi = float(bc["start"]), float(bc["end"])
+            # A word Whisper starts a bit before the range stays (its end is inside), and so does a word
+            # mostly inside. The rest stays in the list, marked: plan_rough drops it and says why.
+            ws = [w if in_range(w, lo, hi) else dict(w, outside=True) for w in ws]
+            snd = [x for x in snd if x[1] > lo - 1.0 and x[0] < hi + 1.0]
+        words_by_take[n] = {"words": ws, "sounds": snd}
+    sp = os.path.join(s, "script.md")
+    plan = plan_rough(words_by_take, script_plain(read_text(sp) if os.path.exists(sp) else ""), gap)
+    if not plan["cut_list"]:
+        raise ValueError("Takes found no words to keep in take %s." % ", ".join(map(str, takes)))
+    if len(plan["cut_list"]) > CUT_MAX:
+        raise ValueError("The rough cut has %d parts, more than %d. Use a larger gap or fewer takes."
+                         % (len(plan["cut_list"]), CUT_MAX))
+    for c in plan["cut_list"]:  # the last word's tail never runs past the take's end
+        dur = (take_clock(voice_file(s, voice_take(s, c["take"]))) or {}).get("duration")
+        if dur:
+            c["out"] = min(c["out"], dur)
+    segs = check_segments(s, plan["cut_list"])
+    job, n = start_cut(s, segs, "rough", extra={"rough": True, "dropped": plan["dropped"],
+                                                "missing": plan["missing"], "gap": gap})
+    return cut_result(s, job["id"], "rough", n)
+
+
 def short_name(text):
     """At most three words, Title Case."""
     words = re.findall(r"[\w'&+-]+", text or "")[:3]
     return " ".join(w if w.isupper() else w[:1].upper() + w[1:] for w in words)
+
+
+# ---------- edit recipes (2026-10-11) ----------
+# An edit is a recipe, not a chat's memory. render_edit builds a recipe into a video as a job and
+# checks it; publish_edit saves the checked render as the next version with its recipe beside it.
+# The next version starts from that recipe (render_edit base + changes): never from a script in /tmp.
+# Only takes, the clean voice, music and sfx files and picture layers go in. A finished edit never
+# does, so music cannot stack and the voice is cleaned once. Same files as Sources/Takes/EditRecipe.swift.
+#
+#   edits/<name>-vN.recipe.json      the recipe of edits/<name>-vN.mp4. Written once, never changed.
+#                                    A recipe with no video yet is a claim: that N is taken.
+#   _edit/<name>/                    the edit's sources (a HyperFrames composition, layer renders), the
+#                                    steps' cwd; words.json = the final edit's word times
+#   _edit/<name>/.versions/vN/       a frozen copy, made by publish_edit
+#   _edit/renders/<job>.mp4          a render that waits for publish_edit, with <job>.recipe.json and
+#                                    <job>.words.json; <job>.tmp/ holds its parts while it runs
+#
+# Paths in a recipe: session files relative to the session, library files as @library/<path under
+# <root>/_library>. No absolute paths, so a recipe survives a moved library.
+#
+# Field             who sets it          default when the recipe leaves it out
+# name              agent                required on a first recipe; from base after
+# cut               agent                required: [{take, in, out, kind?}] (rough_cut's cut), whole frames
+# frame             agent                {"shape": "source"}: the first take's size and fps; crop: none
+# over              agent                []: picture layers {file, at, in?, out?, alpha?}; their sound is never used
+# music, sfx        agent                []: music {file, at 0, in 0, out?, gain_db -18, duck_db 8, fade_out 1.5},
+#                                        sfx {file, at, gain_db -10}
+# style             render_edit          the session's style, params {}
+# steps             agent                []: [{run: [argv], cwd: _edit/<name>, makes: [files]}]
+# cover             agent                from the base; null takes it off: {image, seconds 0.1}
+# loudness          agent (LUFS)         null = the voice's own setting: normal -14, quiet -18
+# takes, voice, inputs, parent, made, by, host, commands, render_id, job, started, src, src_skipped,
+# edit, checks, length_s, rendered, mix (the loudness it reached): Takes. note, fixed, accepted: publish_edit.
+# Times in over, music and sfx are seconds of the cut: a cover adds its seconds before them by itself.
+
+RECIPE_EXT = ".recipe.json"
+EDIT_DIR = "_edit"
+RENDERS = os.path.join(EDIT_DIR, "renders")
+LIB_REF = "@library/"
+NOTE_MAX = 60
+RENDER_WAIT_MAX = 120
+RENDER_KEEP_DAYS = 7
+FREEZE_MAX = 1 << 30
+FREEZE_SKIP = {".versions", "node_modules", ".cache"}
+SHAPES = {"9:16": (1080, 1920), "16:9": (1920, 1080), "1:1": (1080, 1080), "4:5": (1080, 1350)}
+AGENT_FIELDS = ("name", "cut", "frame", "over", "music", "sfx", "style", "steps", "cover", "loudness")
+MUSIC_DEFAULTS = {"at": 0.0, "in": 0.0, "gain_db": -18, "duck_db": 8, "fade_out": 1.5}
+SFX_DEFAULTS = {"gain_db": -10}
+MUSIC_LUFS = -14.0
+TRUE_PEAK = -1.0
+LOUDNESS_TARGET = {"normal": -14.0, "quiet": -18.0}
+RENDER_STAGES = {"cut": "Cutting the takes", "steps": "Making the graphics", "picture": "Making the picture",
+                 "sound": "Mixing the sound", "check": "Checking the edit"}
+RENDER_DONE = "Ready. Takes checks it before it saves it."
+PRORES = ["-c:v", "prores_ks", "-profile:v", "2", "-pix_fmt", "yuv422p10le"]
+RUN_LOG = None  # the render job's list of every argv it ran (run_ff and render_run add to it)
+LOUD_CACHE = {}  # (path, size, mtime) -> (integrated LUFS, true peak dBTP)
+
+
+class RenderStop(Exception):
+    """A render that cannot go on: the reason is one of the plain reasons the Jobs row shows."""
+
+
+def step_timeout():
+    return float(os.environ.get("TAKES_STEP_TIMEOUT") or 30 * 60)
+
+
+def host_id():
+    """A random id of this Mac, saved once: steps of a recipe made on another Mac do not run by themselves."""
+    if os.environ.get("TAKES_HOST_ID"):
+        return os.environ["TAKES_HOST_ID"]
+    p = os.path.expanduser("~/Library/Application Support/Takes/host-id")
+    try:
+        with open(p) as f:
+            v = f.read().strip()
+        if v:
+            return v
+    except OSError:
+        pass
+    v = secrets.token_hex(8)
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(v)
+    except OSError:
+        pass
+    return v
+
+
+def recipe_path(video):
+    """edits/x-v5.mp4 -> edits/x-v5.recipe.json"""
+    return os.path.splitext(video)[0] + RECIPE_EXT
+
+
+def lib_path(p):
+    """@library/music/x.mp3 -> <root>/_library/music/x.mp3; anything else as it is."""
+    return os.path.join(root(), LIB, p[len(LIB_REF):]) if isinstance(p, str) and p.startswith(LIB_REF) else p
+
+
+def unlib_path(p):
+    """An absolute path under <root>/_library -> @library/...; None when it is not there."""
+    base = os.path.realpath(os.path.join(root(), LIB))
+    rp = os.path.realpath(p)
+    return LIB_REF + os.path.relpath(rp, base) if rp.startswith(base + os.sep) else None
+
+
+def ref_of(s, p, what, later=None):
+    """A file as a recipe stores it: relative to the session, or @library/... Else an error. later: a folder
+    (relative to the session) where the file may not exist yet: a step of the recipe makes it."""
+    if not isinstance(p, str) or not p.strip():
+        raise ValueError("%s needs file: a path in the session or @library/..." % what)
+    p = p.strip()
+    if p.startswith(LIB_REF):
+        full = lib_path(p)
+    else:
+        full = os.path.normpath(p if os.path.isabs(p) else os.path.join(s, p))
+    sr = os.path.realpath(s)
+    if os.path.realpath(full).startswith(sr + os.sep):
+        rel = os.path.relpath(os.path.realpath(full), sr)
+    else:
+        rel = unlib_path(full)
+        if not rel:
+            raise ValueError("%s: %s is outside the session and the library. Copy it into the session or the "
+                             "library first." % (what, p))
+    if not os.path.isfile(full) and not (later and rel.startswith(later + os.sep)):
+        raise ValueError("%s is gone. Pick another file for %s." % (os.path.basename(p), what))
+    return rel
+
+
+def ref_abs(s, ref):
+    return lib_path(ref) if ref.startswith(LIB_REF) else os.path.join(s, ref)
+
+
+def edit_name_of(f):
+    """'hook-v4.recipe.json' / 'hook-v4.mp4' / 'hook-v4.words.json' -> ('hook', 4)."""
+    for ext in (RECIPE_EXT, ".words.json"):
+        if f.endswith(ext):
+            f = f[:-len(ext)] + ".x"
+    b, v, _ = split_version(f)
+    return b, v
+
+
+def edit_versions(s, name=None):
+    """{name: {N: {"video": rel or None, "recipe": rel or None}}} of edits/."""
+    d = os.path.join(s, "edits")
+    out = {}
+    for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        if f.startswith("."):
+            continue
+        b, v = edit_name_of(f)
+        if v is None or (name and b != name):
+            continue
+        e = out.setdefault(b, {}).setdefault(v, {"video": None, "recipe": None})
+        if f.endswith(RECIPE_EXT):
+            e["recipe"] = os.path.join("edits", f)
+        elif media_kind(f) == "video":
+            e["video"] = os.path.join("edits", f)
+    return out
+
+
+def load_recipe(s, rel):
+    """The recipe file at rel (relative to the session), None when there is none. A file that does not
+    parse is an error, and is never written over."""
+    p = os.path.join(s, rel)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p) as f:
+            r = json.load(f)
+        if not isinstance(r, dict):
+            raise ValueError
+    except (OSError, ValueError):
+        raise ValueError("Takes cannot read %s. It is left as it is. Fix the file or move it out of the session."
+                         % rel)
+    return r
+
+
+def newest_recipe(s, name=None):
+    """The recipe of the highest version (by number) of name that has a video and a recipe. None if none."""
+    best = None
+    for b, vs in edit_versions(s, name).items():
+        for v, e in vs.items():
+            if e["video"] and e["recipe"] and (best is None or (b == best[0] and v > best[1])):
+                best = (b, v, e["recipe"])
+    return load_recipe(s, best[2]) if best else None
+
+
+def recipe_names(s):
+    """Edit names that have at least one version with a recipe."""
+    return sorted(b for b, vs in edit_versions(s).items() if any(e["video"] and e["recipe"] for e in vs.values()))
+
+
+def edit_ref(s, ref):
+    """'edits/hook-v4.mp4', 'hook-v4' or 'hook' -> (name, version or None)."""
+    ref = str(ref or "").strip()
+    f = os.path.basename(ref)
+    if f.endswith(RECIPE_EXT) or media_kind(f) == "video":
+        b, v = edit_name_of(f)
+        return b, v
+    b, v, _ = split_version(f + ".x")
+    return (b, v) if v is not None else (f, None)
+
+
+def read_recipe(s, ref):
+    """The recipe for a ref: 'edits/hook-v4.mp4', 'hook-v4' or 'hook' (its newest version by number).
+    None when there is none."""
+    name, v = edit_ref(s, ref)
+    if v is None:
+        return newest_recipe(s, name)
+    return load_recipe(s, os.path.join("edits", "%s-v%d%s" % (name, v, RECIPE_EXT)))
+
+
+def recipe_lineage(s, r):
+    """The parent chain: [{edit, note, made}], newest first. (lineage, missing parents)."""
+    out, missing, seen = [], [], set()
+    cur = r
+    while cur and cur.get("parent") and len(out) < 20:
+        p = cur["parent"]
+        if p in seen:
+            break
+        seen.add(p)
+        try:
+            cur = load_recipe(s, recipe_path(p))
+        except ValueError:
+            cur = None
+        if not cur:
+            missing.append(p)
+            break
+        out.append({"edit": p, "note": cur.get("note"), "made": cur.get("made")})
+    return out, missing
+
+
+def merge_patch(base, changes):
+    """RFC 7386 JSON merge patch: dicts merge, null deletes, anything else (lists too) replaces."""
+    if not isinstance(changes, dict):
+        return changes
+    out = dict(base) if isinstance(base, dict) else {}
+    for k, v in changes.items():
+        if v is None:
+            out.pop(k, None)
+        else:
+            out[k] = merge_patch(out.get(k), v)
+    return out
+
+
+def flat(x, at=""):
+    """{"music[0].in": 14.0, ...} of a JSON value."""
+    out = {}
+    if isinstance(x, dict) and x:
+        for k, v in x.items():
+            out.update(flat(v, "%s.%s" % (at, k) if at else k))
+    elif isinstance(x, list) and x:
+        for i, v in enumerate(x):
+            out.update(flat(v, "%s[%d]" % (at, i)))
+    else:
+        out[at] = x
+    return out
+
+
+def recipe_diff(a, b):
+    """Every value that differs: {"music[0].in": [14.0, 0.0]}; a missing value is None."""
+    fa, fb = flat(a), flat(b)
+    return {k: [fa.get(k), fb.get(k)] for k in sorted(set(fa) | set(fb)) if fa.get(k) != fb.get(k)}
+
+
+def unnamed_changes(changed, changes):
+    """Changed values that `changes` did not name: a list it replaced without them. An index the new
+    list does not have any more was dropped on purpose."""
+    named = set(flat(changes))
+    out = []
+    for k, (old, new) in changed.items():
+        if k in named or any(k.startswith(n + ".") or k.startswith(n + "[") for n in named if changes_null(changes, n)):
+            continue
+        m = re.match(r"^(\w+)\[(\d+)\]", k)
+        if not m or m.group(1) not in changes:
+            continue
+        lst = changes.get(m.group(1))
+        if isinstance(lst, list) and int(m.group(2)) >= len(lst):
+            continue
+        out.append("%s went from %s to %s because the %s list was replaced. Repeat the whole entry to keep it."
+                   % (k, json.dumps(old), "nothing" if new is None else json.dumps(new), m.group(1)))
+    return out
+
+
+def changes_null(changes, path):
+    v = flat(changes).get(path, 0)
+    return v is None or v == [] or v == {}
+
+
+def agent_part(r):
+    return {k: r[k] for k in AGENT_FIELDS if k in r}
+
+
+def num(x, what, lo=None, hi=None):
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        raise ValueError("%s is a number of seconds or dB, e.g. 1.5." % what)
+    if (lo is not None and v < lo) or (hi is not None and v > hi) or v != v:
+        raise ValueError("%s is %g; it must be %s." % (what, v, "from %g to %g" % (lo, hi) if hi is not None
+                                                        else "%g or more" % lo))
+    return v
+
+
+def norm_recipe(s, r):
+    """The agent's fields of a recipe in one shape, every file as a recipe path. Errors name the field."""
+    if not isinstance(r, dict):
+        raise ValueError('recipe is an object, e.g. {"name": "hook", "cut": [...]}.')
+    out = {}
+    name = slug(str(r.get("name") or ""))
+    if not name:
+        raise ValueError('Give name: a short slug for the edit, e.g. "hook".')
+    out["name"] = name
+    cut = r.get("cut")
+    if not isinstance(cut, list) or not cut:
+        raise ValueError("Give cut: the parts to keep, in order, [{take, in, out}] in seconds of the take "
+                         "(rough_cut's cut).")
+    for i, g in enumerate(cut):
+        if isinstance(g, dict) and g.get("crop"):
+            raise ValueError("cut[%d].crop: a crop per part is not possible yet. Use frame.crop." % i)
+        if isinstance(g, dict) and "take" in g:
+            try:
+                t = voice_take(s, int(g["take"]), g.get("kind"))
+            except (TypeError, ValueError):
+                t = None
+            if t and not os.path.isfile(os.path.join(s, t["file"])):
+                raise ValueError("%s is gone. Pick another take in cut." % t["file"])
+    segs = check_segments(s, [{k: g[k] for k in ("take", "in", "out", "kind") if k in g} if isinstance(g, dict) else g
+                              for g in cut])
+    out["cut"] = [{"take": g["take"], "kind": g["kind"], "in": round(g["in"], 4), "out": round(g["out"], 4)} for g in segs]
+    frame = r.get("frame") or {}
+    if not isinstance(frame, dict):
+        raise ValueError("frame is an object: {shape: '9:16'|'16:9'|'1:1'|'4:5'|'source', crop}.")
+    shape = frame.get("shape") or "source"
+    if shape not in SHAPES and shape != "source":
+        raise ValueError("frame.shape is 9:16, 16:9, 1:1, 4:5 or source.")
+    f = {"shape": shape}
+    for k in ("w", "h", "fps"):
+        if frame.get(k) is not None:
+            f[k] = int(num(frame[k], "frame." + k, 2, 8192))
+    if frame.get("crop"):
+        c = frame["crop"]
+        if not isinstance(c, dict) or not all(k in c for k in ("x", "y", "w", "h")):
+            raise ValueError("frame.crop is {x, y, w, h} in pixels of the take.")
+        f["crop"] = {k: int(num(c[k], "frame.crop." + k, 0, 16384)) for k in ("x", "y", "w", "h")}
+    out["frame"] = f
+    over = []
+    for i, o in enumerate(r.get("over") or []):
+        what = "over[%d]" % i
+        if not isinstance(o, dict):
+            raise ValueError("%s is {file, at, in?, out?, alpha?}." % what)
+        e = {"file": ref_of(s, o.get("file"), what, later=os.path.join(EDIT_DIR, name)),
+             "at": num(o.get("at", 0), what + ".at", 0)}
+        for k in ("in", "out"):
+            if o.get(k) is not None:
+                e[k] = num(o[k], "%s.%s" % (what, k), 0)
+        if "out" in e and e["out"] <= e.get("in", 0):
+            raise ValueError("%s.out must be after its in." % what)
+        if o.get("alpha"):
+            e["alpha"] = True
+        over.append(e)
+    out["over"] = over
+    music = []
+    for i, m in enumerate(r.get("music") or []):
+        what = "music[%d]" % i
+        if not isinstance(m, dict):
+            raise ValueError("%s is {file, at, in, gain_db, duck_db, fade_out}." % what)
+        e = dict(MUSIC_DEFAULTS)
+        e["file"] = ref_of(s, m.get("file"), what)
+        for k in ("at", "in", "out", "gain_db", "duck_db", "fade_out"):
+            if m.get(k) is not None:
+                e[k] = num(m[k], "%s.%s" % (what, k), *({"gain_db": (-60, 12), "duck_db": (0, 40)}.get(k, (0, None))))
+        music.append(e)
+    out["music"] = music
+    sfx = []
+    for i, x in enumerate(r.get("sfx") or []):
+        what = "sfx[%d]" % i
+        if not isinstance(x, dict) or x.get("at") is None:
+            raise ValueError("%s is {file, at, gain_db}." % what)
+        e = dict(SFX_DEFAULTS, file=ref_of(s, x.get("file"), what), at=num(x["at"], what + ".at", 0))
+        if x.get("gain_db") is not None:
+            e["gain_db"] = num(x["gain_db"], what + ".gain_db", -60, 12)
+        sfx.append(e)
+    out["sfx"] = sfx
+    if r.get("style") is not None:
+        st = r["style"]
+        if not isinstance(st, dict):
+            raise ValueError("style is {name, template?, params?}.")
+        out["style"] = {k: st[k] for k in ("name", "template", "params") if st.get(k) is not None}
+    steps = []
+    for i, x in enumerate(r.get("steps") or []):
+        what = "steps[%d]" % i
+        run = x.get("run") if isinstance(x, dict) else None
+        if not isinstance(run, list) or not run or not all(isinstance(w, str) and w for w in run):
+            raise ValueError("%s.run is a list of words (argv), e.g. [\"npx\", \"hyperframes\", \"render\"], "
+                             "not a shell line." % what)
+        cwd = os.path.normpath(x.get("cwd") or os.path.join(EDIT_DIR, name))
+        mine = os.path.join(EDIT_DIR, name)
+        if os.path.isabs(cwd) or not (cwd == mine or cwd.startswith(mine + os.sep)):
+            raise ValueError("%s.cwd must be inside %s/." % (what, mine))
+        makes = []
+        for m in x.get("makes") or []:
+            p = os.path.normpath(os.path.join(cwd, str(m)))
+            if os.path.isabs(str(m)) or not p.startswith(mine + os.sep):
+                raise ValueError("%s.makes: %s must be inside %s/." % (what, m, mine))
+            makes.append(str(m))
+        steps.append({"run": list(run), "cwd": cwd, "makes": makes})
+    out["steps"] = steps
+    if r.get("cover"):
+        c = r["cover"]
+        if isinstance(c, str):
+            c = {"image": c}
+        if not isinstance(c, dict):
+            raise ValueError("cover is {image, seconds} or null.")
+        img = ref_of(s, c.get("image"), "cover")
+        if media_kind(img) != "image":
+            raise ValueError("cover.image must be an image (a thumbnail from next_path kind=thumbnail).")
+        out["cover"] = {"image": img, "seconds": num(c.get("seconds", 0.1), "cover.seconds", 0.04, 3)}
+    if r.get("loudness") is not None:
+        if isinstance(r["loudness"], bool) or not isinstance(r["loudness"], (int, float)):
+            raise ValueError("loudness is a number in LUFS, e.g. -14.")
+        out["loudness"] = num(r["loudness"], "loudness", -30, -8)
+    return out
+
+
+def check_music(s, music):
+    """At most one song plays at a time: an entry may follow another, not overlap it."""
+    spans = []
+    for i, m in enumerate(music):
+        end = m.get("out")
+        if end is None:
+            end = media_seconds(ref_abs(s, m["file"]))
+        spans.append((m["at"], m["at"] + max(0.0, end - m["in"]), i))
+    spans.sort()
+    for (a0, a1, i), (b0, _, j) in zip(spans, spans[1:]):
+        if b0 < a1 - 0.01:
+            raise ValueError("music[%d] starts at %.2f s while music[%d] still plays (to %.2f s). One song at a time: "
+                             "give music[%d] an out, or start music[%d] later." % (j, b0, i, a1, i, j))
+
+
+def check_recipe(s, r):
+    """The hard rules before a render starts. Each error names the field and the fix."""
+    for what in ("music", "sfx"):
+        for i, m in enumerate(r.get(what) or []):
+            parts = m["file"].split(os.sep)
+            if parts[0] == "edits" or m["file"].startswith(RENDERS + os.sep) or (parts[0] == EDIT_DIR and ".versions" in parts):
+                raise ValueError("%s[%d]: the final mix is never an input: use the song file itself (list_music) "
+                                 "and the clean voice." % (what, i))
+    check_music(s, r.get("music") or [])
+
+
+def take_files(s, r):
+    """{(take, kind): take dict} of the cut, resolved by number and kind now (a renamed take still resolves)."""
+    out = {}
+    for g in r["cut"]:
+        key = (g["take"], g["kind"])
+        if key not in out:
+            out[key] = voice_take(s, g["take"], g["kind"])
+    return out
+
+
+def fill_recipe(s, r, base=None):
+    """Takes' fields: takes, frame size, voice, style, inputs. warnings: what changed under the base."""
+    warns = []
+    first = None
+    takes, keys, chains, srcs = [], {}, {}, []
+    for (n, kind), t in take_files(s, r).items():
+        c = take_clock(os.path.join(s, t["file"])) or {}
+        first = first or c
+        takes.append({"take": n, "kind": kind, "file": t["file"], "audio_offset_s": c.get("audio_offset_s"),
+                      "fps_mode": c.get("fps_mode")})
+        key = voice_key(n, kind)
+        v, f = read_voice(s, key) or {}, voice_files(s, key)["mix"]
+        if v.get("state") == "done" and v.get("on", True) and os.path.exists(f):
+            keys[key] = os.path.relpath(f, s)
+            chains[key] = {"steps": v.get("steps") or [], "strength": v.get("strength", 1.0),
+                           "loudness": v.get("loudness") or "normal"}
+            srcs.append("clean")
+        else:
+            srcs.append("take")
+    r["takes"] = takes
+    r["voice"] = {"source": "clean" if all(x == "clean" for x in srcs) else "take" if all(x == "take" for x in srcs)
+                  else "mixed", "keys": keys, "chain": chains}
+    f = r["frame"]
+    c, tw, th = f.get("crop"), first.get("width"), first.get("height")
+    if c and tw and th and (c["x"] + c["w"] > tw or c["y"] + c["h"] > th or c["w"] < 2 or c["h"] < 2):
+        raise ValueError("frame.crop is larger than the take (%dx%d). Give x+w <= %d, y+h <= %d." % (tw, th, tw, th))
+    fps = f.get("fps") or first.get("fps") or 30
+    if f["shape"] == "source":
+        w, h = first.get("width") or 1920, first.get("height") or 1080
+    else:
+        w, h = SHAPES[f["shape"]]
+    f.update(w=int(f.get("w") or w) // 2 * 2, h=int(f.get("h") or h) // 2 * 2, fps=int(fps))
+    if not r.get("style"):
+        name = style_pick(os.path.dirname(s), s)[0]
+        r["style"] = {"name": name, "params": {}} if name else {}
+    if r["style"].get("name") and "template" not in r["style"]:
+        tpl = os.path.join(styles_dir(), r["style"]["name"], "src", "template")
+        if os.path.isdir(tpl):
+            r["style"]["template"] = unlib_path(tpl)
+    r["style"].setdefault("params", {})
+    inputs = {}
+    for t in takes:
+        inputs[t["file"]] = None
+    for p in list(keys.values()) + [x["file"] for k in ("over", "music", "sfx") for x in r.get(k) or []] + \
+            ([r["cover"]["image"]] if r.get("cover") else []):
+        inputs[p] = None
+    for p in inputs:
+        try:
+            st = os.stat(ref_abs(s, p))
+            inputs[p] = [st.st_size, int(st.st_mtime)]
+        except OSError:
+            inputs[p] = None
+    r["inputs"] = inputs
+    if base:
+        bname = os.path.splitext(os.path.basename(base.get("edit") or ""))[0] or "the base"
+        for p, was in (base.get("inputs") or {}).items():
+            if p in inputs and was and inputs[p] and was != inputs[p] and not p.startswith("voice" + os.sep):
+                if any(t["file"] == p for t in takes):
+                    warns.append("%s changed since %s. Check that the cut times still fit before you publish."
+                                 % (p, bname))
+        old = (base.get("voice") or {}).get("chain") or {}
+        for key, ch in chains.items():
+            o = old.get(key)
+            what = None
+            if not o:
+                what = "now cleaned" if key not in old and (base.get("voice") or {}).get("keys") is not None else None
+            else:
+                diff = [k for k in ("strength", "loudness", "steps") if o.get(k) != ch.get(k)]
+                what = "new " + " and ".join(diff) if diff else None
+            if what:
+                warns.append("The clean voice changed since %s (%s). This version uses the new one." % (bname, what))
+    return warns
+
+
+def recipe_target(r):
+    """The final loudness: the recipe's number, else the voice's own setting."""
+    if r.get("loudness") is not None:
+        return float(r["loudness"])
+    chains = list(((r.get("voice") or {}).get("chain") or {}).values())
+    return LOUDNESS_TARGET.get(chains[0].get("loudness") if chains else "normal", -14.0)
+
+
+def picture_codec():
+    if has_encoder("libx264"):
+        return ["-c:v", "libx264", "-crf", "18", "-preset", "medium"]
+    return ["-c:v", "h264_videotoolbox", "-b:v", "20M"]
+
+
+def fill_frame(w, h):
+    return "scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1" % (w, h, w, h)
+
+
+def render_plan(s, r, tmp, out, meas=None):
+    """The picture, sound and mux commands of a render, as argv lists. Pure: no disk writes, no probes.
+    meas: what the job measured ({"length": cut seconds, "music": {file: LUFS}, "voice": LUFS,
+    "over": {file: seconds}, "gain": dB}); a missing value is 0, so a test can call it alone.
+    tmp holds cut.mov and voice.wav (the cut stage) and gets picture.mp4 and mix.wav."""
+    meas = meas or {}
+    f = r["frame"]
+    W, H, F = f["w"], f["h"], f["fps"]
+    cover = r.get("cover")
+    lead = float(cover["seconds"]) if cover else 0.0
+    L = float(meas.get("length") or 0.0)
+    total = L + lead
+    ff_ = need_ffmpeg() if meas.get("real") else "ffmpeg"
+    base = [ff_, "-nostdin", "-v", "error", "-y", "-progress", "pipe:1", "-nostats"]
+    # Picture: one pass, the only lossy video encode.
+    args = ["-i", os.path.join(tmp, "cut.mov")]
+    chain = "[0:v]" + ("crop=%d:%d:%d:%d," % (f["crop"]["w"], f["crop"]["h"], f["crop"]["x"], f["crop"]["y"])
+                       if f.get("crop") else "") + fill_frame(W, H) + ",fps=%d,format=yuv420p" % F
+    graph, k = [], 1
+    if cover:
+        args += ["-loop", "1", "-framerate", str(F), "-t", "%.3f" % lead, "-i", ref_abs(s, cover["image"])]
+        graph.append("[%d:v]%s,fps=%d,format=yuv420p,trim=duration=%.3f,setpts=PTS-STARTPTS[cv]" % (k, fill_frame(W, H), F, lead))
+        graph.append(chain + ",setpts=PTS-STARTPTS[cb]")
+        graph.append("[cv][cb]concat=n=2:v=1:a=0[b0]")
+        k += 1
+    else:
+        graph.append(chain + "[b0]")
+    cur = "b0"
+    for i, o in enumerate(r.get("over") or []):
+        p = ref_abs(s, o["file"])
+        a = o.get("in", 0.0)
+        if media_kind(p) == "image":
+            dur = (o.get("out") or a + 3.0) - a
+            args += ["-loop", "1", "-framerate", str(F), "-t", "%.3f" % dur, "-i", p]
+            a = 0.0
+        else:
+            dur = (o["out"] - a) if o.get("out") is not None else max(0.0, float((meas.get("over") or {}).get(o["file"]) or 0) - a)
+            args += ["-i", p]
+        at = o["at"] + lead
+        fmt = "yuva420p" if o.get("alpha") else "yuv420p"
+        graph.append("[%d:v]trim=start=%.3f:end=%.3f,setpts=PTS-STARTPTS+%.3f/TB,%s,fps=%d,format=%s[o%d]"
+                     % (k, a, a + dur, at, fill_frame(W, H), F, fmt, i))
+        graph.append("[%s][o%d]overlay=enable='between(t,%.3f,%.3f)':eof_action=pass:format=auto[b%d]"
+                     % (cur, i, at, at + dur, i + 1))
+        cur = "b%d" % (i + 1)
+        k += 1
+    graph.append("[%s]trim=duration=%.3f,format=yuv420p,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709"
+                 "[vout]" % (cur, total))
+    picture = base + args + ["-filter_complex", ";".join(graph), "-map", "[vout]", "-an", "-sn", "-dn",
+                             "-map_chapters", "-1"] + picture_codec() + [
+        "-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+        "-r", str(F), os.path.join(tmp, "picture.mp4")]
+    # Sound: the voice as it is (no compressor, EQ, denoise or loudnorm), music and sfx under it.
+    args = ["-i", os.path.join(tmp, "voice.wav")]
+    st = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+    music, sfx = r.get("music") or [], r.get("sfx") or []
+    graph = ["[0:a]%s%s,apad=whole_dur=%.3f,atrim=0:%.3f[vo]"
+             % (st, ",adelay=%d:all=1" % round(lead * 1000) if lead else "", total, total)]
+    if music:
+        graph[0] = graph[0].replace("[vo]", ",asplit=%d[vo]%s" % (len(music) + 1, "".join("[vk%d]" % i for i in range(len(music)))))
+    mixed, k = ["[vo]"], 1
+    voice_db = float(meas.get("voice") or -20.0)
+    ends = sorted(m["at"] for m in music)
+    for i, m in enumerate(music):
+        nxt = [x for x in ends if x > m["at"] + 1e-6]
+        stop = min([L] + nxt[:1])
+        if m.get("out") is not None:
+            stop = min(stop, m["at"] + m["out"] - m["in"])
+        n = max(0.05, stop - m["at"])
+        g = MUSIC_LUFS - float((meas.get("music") or {}).get(m["file"]) or MUSIC_LUFS) + float(m["gain_db"])
+        fade = min(float(m["fade_out"]), n)
+        args += ["-ss", "%.3f" % m["in"], "-i", ref_abs(s, m["file"])]
+        # Ducked under the voice: the compressor's threshold sits duck_db under the voice's level, ratio 20.
+        thr = 10 ** (max(-60.0, min(0.0, voice_db - float(m["duck_db"]) / 0.95)) / 20.0)
+        graph.append("[%d:a]%s,atrim=0:%.3f,asetpts=PTS-STARTPTS,volume=%.2fdB%s,adelay=%d:all=1[m%d]"
+                     % (k, st, n, g, ",afade=t=out:st=%.3f:d=%.3f" % (n - fade, fade) if fade > 0 else "",
+                        round((m["at"] + lead) * 1000), i))
+        graph.append("[m%d][vk%d]sidechaincompress=threshold=%.6f:ratio=20:attack=20:release=300:detection=rms[md%d]"
+                     % (i, i, max(0.000976563, thr), i) if m["duck_db"] > 0 else "[m%d]anull[md%d]" % (i, i))
+        if m["duck_db"] <= 0:
+            graph.append("[vk%d]anullsink" % i)
+        mixed.append("[md%d]" % i)
+        k += 1
+    for i, x in enumerate(sfx):
+        args += ["-i", ref_abs(s, x["file"])]
+        graph.append("[%d:a]%s,volume=%.2fdB,adelay=%d:all=1[x%d]" % (k, st, float(x["gain_db"]), round((x["at"] + lead) * 1000), i))
+        mixed.append("[x%d]" % i)
+        k += 1
+    if len(mixed) > 1:
+        graph.append("".join(mixed) + "amix=inputs=%d:duration=first:normalize=0:dropout_transition=0,atrim=0:%.3f[aout]"
+                     % (len(mixed), total))
+    else:
+        graph.append("[vo]anull[aout]")
+    sound = base + args + ["-filter_complex", ";".join(graph), "-map", "[aout]", "-c:a", "pcm_f32le", "-ar", "48000",
+                           os.path.join(tmp, "mix.wav")]
+    # Mux: one static gain to the target loudness (lowered when the true peak would pass -1 dBTP). No limiter.
+    mux = [ff_, "-nostdin", "-v", "error", "-y", "-i", os.path.join(tmp, "picture.mp4"), "-i", os.path.join(tmp, "mix.wav"),
+           "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-af", "volume=%.2fdB" % float(meas.get("gain") or 0.0),
+           "-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-map_chapters", "-1", "-dn", "-movflags", "+faststart",
+           "-f", "mp4", out + ".part"]
+    return {"picture": picture, "sound": sound, "mux": mux, "total": total}
+
+
+def loudness_of(path):
+    """(integrated LUFS, true peak dBTP) from one ebur128 read, cached per file and mtime."""
+    st = os.stat(path)
+    key = (path, st.st_size, st.st_mtime)
+    if key not in LOUD_CACHE:
+        cmd = [need_ffmpeg(), "-hide_banner", "-nostats", "-i", path, "-vn", "-af", "ebur128=peak=true", "-f", "null", "-"]
+        if RUN_LOG is not None:
+            RUN_LOG.append(cmd)
+        err = subprocess.run(cmd, capture_output=True, text=True, timeout=3600).stderr
+        tail = err.rsplit("Summary:", 1)[-1]
+        i = re.search(r"I:\s*(-?[\d.]+|-inf)\s*LUFS", tail)
+        p = re.search(r"Peak:\s*(-?[\d.]+|-inf)\s*dBFS", tail)
+        val = lambda m: float("-inf") if not m or m.group(1) == "-inf" else float(m.group(1))  # noqa: E731
+        LOUD_CACHE[key] = (val(i), val(p))
+    return LOUD_CACHE[key]
+
+
+def final_gain(target, lufs, peak):
+    """One static gain to the target; lowered until the true peak is at most -1 dBTP."""
+    if lufs == float("-inf"):
+        return 0.0
+    g = target - lufs
+    if peak != float("-inf") and peak + g > TRUE_PEAK:
+        g = TRUE_PEAK - peak
+    return round(g, 2)
+
+
+def need_disk(s, r, length):
+    """Bytes a render needs: the ProRes parts of the cut, the picture and the mix, then the final."""
+    f = r["frame"]
+    sizes = [take_clock(os.path.join(s, t["file"])) or {} for t in r["takes"]]
+    src = max(1, max((c.get("width") or 1920) * (c.get("height") or 1080) for c in sizes))
+    prores = 18e6 * src * f["fps"] / (1920 * 1080 * 30.0)  # ProRes 422 at 1080p30: about 18 MB a second
+    final = 1.2e6 * f["w"] * f["h"] / (1920 * 1080.0)
+    return int(length * (prores + 3 * final + 48000 * 4 * 2 * 2))
+
+
+def gb(n):
+    return "%d GB" % max(1, round(n / 1e9)) if n >= 1e9 else "%d MB" % max(1, round(n / 1e6))
+
+
+def run_step(x, timeout):
+    """One step of the recipe: argv, no shell, in its cwd. Raises RenderStop with the plain reason."""
+    say("TAKES_STAGE " + RENDER_STAGES["steps"])
+    os.makedirs(x["cwd"], exist_ok=True)
+    if RUN_LOG is not None:
+        RUN_LOG.append(list(x["run"]))
+    try:
+        p = subprocess.Popen(x["run"], cwd=x["cwd"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, start_new_session=True, env=job_env())
+    except OSError as e:
+        say("%s: %s" % (x["run"][0], e))
+        raise RenderStop("the graphics step failed")
+    try:
+        out, _ = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        p.wait()
+        raise RenderStop("the graphics step took more than %s" % span(timeout))
+    for line in (out or b"").decode("utf-8", "replace").splitlines()[-20:]:
+        say(line)
+    if p.returncode != 0 or any(not os.path.exists(os.path.join(x["cwd"], m)) for m in x.get("makes") or []):
+        raise RenderStop("the graphics step failed")
+
+
+def render_words(s, r, cut, lead):
+    """The final edit's words, from the takes' word times, and made_from for check_edit."""
+    at, ws, made = lead, [], []
+    for g in cut:
+        doc = words_doc(os.path.join(s, voice_take(s, g["take"], g["kind"])["file"])) or {}
+        for w in doc.get("words") or [] if is_ready(doc) else []:
+            if w["end"] > g["in"] and w["start"] < g["in"] + g["len"]:
+                e = {"word": w["word"], "start": round(at + max(w["start"], g["in"]) - g["in"], 3),
+                     "end": round(at + min(w["end"], g["in"] + g["len"]) - g["in"], 3)}
+                if w.get("filler"):
+                    e["filler"] = True
+                ws.append(e)
+        made.append({"take": g["take"], "kind": g["kind"], "in": g["in"], "out": round(g["in"] + g["len"], 4),
+                     "at": round(at, 4)})
+        at += g["len"]
+    return {"v": 2, "clock": "video", "source": "render_edit", "fps": r["frame"]["fps"], "duration": round(at, 3),
+            "words": ws, "made_from": {"session_id": session_id(s), "cut": made}}
+
+
+def write_json(path, d):
+    with open(path + ".tmp", "w") as f:
+        json.dump(d, f, indent=1, ensure_ascii=False)
+    os.replace(path + ".tmp", path)
+
+
+def render_run(job_id):
+    """`--render-run . <job>`: the render job, in the session folder. Cut, steps, picture, sound, mux,
+    check. Every intermediate goes as soon as the next stage used it."""
+    global RUN_LOG
+    s = "."
+    rp = os.path.join(RENDERS, job_id + RECIPE_EXT)
+    with open(rp) as f:
+        r = json.load(f)
+    tmp = os.path.join(RENDERS, job_id + ".tmp")
+    out = os.path.join(RENDERS, job_id + ".mp4")
+    RUN_LOG = []
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp)
+    try:
+        # 1. Cut: each part on whole frames, ProRes parts, the voice of the same length.
+        say("TAKES_STAGE " + RENDER_STAGES["cut"])
+        files, clocks, voices, cut = [], [], [], []
+        for g in r["cut"]:
+            try:
+                t = voice_take(s, g["take"], g["kind"])
+            except ValueError:
+                raise RenderStop("a take file is gone")
+            if not os.path.isfile(t["file"]):
+                raise RenderStop("a take file is gone")
+            c = take_clock(t["file"])
+            fps = c["fps"]
+            a, b = round(g["in"] * fps) / float(fps), round(g["out"] * fps) / float(fps)
+            cut.append({"take": g["take"], "kind": g["kind"], "in": a, "out": b,
+                        "len": max(2, int(round((b - a) * fps))) / float(fps)})
+            files.append(t["file"])
+            clocks.append(c)
+            key = voice_key(g["take"], g["kind"])
+            mix = (r.get("voice") or {}).get("keys", {}).get(key)
+            voices.append((mix, voice_offset(s, key)) if mix and os.path.exists(mix) else None)
+        segs = [{"take": g["take"], "kind": g["kind"], "in": g["in"], "out": g["out"]} for g in cut]
+        length = render_cut(segs, files, clocks, voices, os.path.join(tmp, "cut.mov"), os.path.join(tmp, "voice.wav"),
+                            vargs=PRORES)
+        lead = float(r["cover"]["seconds"]) if r.get("cover") else 0.0
+        words = render_words(s, r, cut, lead)
+        name_dir = os.path.join(EDIT_DIR, r["name"])
+        os.makedirs(name_dir, exist_ok=True)
+        write_json(os.path.join(name_dir, "words.json"), words)
+        write_json(os.path.join(RENDERS, job_id + ".words.json"), words)
+        # 2. Steps: the commands that make the picture layers.
+        for x in r.get("steps") or []:
+            run_step(x, step_timeout())
+        for o in r.get("over") or []:
+            if not os.path.isfile(ref_abs(s, o["file"])):
+                raise RenderStop("a picture layer is missing (%s)" % o["file"])
+        # 3. Picture, 4. sound, 5. mux.
+        meas = {"length": length, "real": True,
+                "over": {o["file"]: media_seconds(ref_abs(s, o["file"])) for o in r.get("over") or []
+                         if o.get("out") is None and media_kind(o["file"]) != "image"},
+                "music": {m["file"]: loudness_of(ref_abs(s, m["file"]))[0] for m in r.get("music") or []},
+                "voice": loudness_of(os.path.join(tmp, "voice.wav"))[0]}
+        if meas["voice"] == float("-inf"):
+            meas["voice"] = -20.0
+        for k, v in list(meas["music"].items()):
+            if v == float("-inf"):
+                meas["music"][k] = MUSIC_LUFS
+        plan = render_plan(s, r, tmp, out, meas)
+        say("TAKES_STAGE " + RENDER_STAGES["picture"])
+        run_ff(plan["picture"], plan["total"])
+        os.remove(os.path.join(tmp, "cut.mov"))
+        say("TAKES_STAGE " + RENDER_STAGES["sound"])
+        run_ff(plan["sound"], plan["total"])
+        os.remove(os.path.join(tmp, "voice.wav"))
+        lufs, peak = loudness_of(os.path.join(tmp, "mix.wav"))
+        meas["gain"] = final_gain(recipe_target(r), lufs, peak)
+        if lufs != float("-inf"):
+            r["mix"] = {"target": recipe_target(r), "lufs": round(lufs + meas["gain"], 1),
+                        "true_peak": round(peak + meas["gain"], 1) if peak != float("-inf") else None}
+        plan = render_plan(s, r, tmp, out, meas)
+        RUN_LOG.append(plan["mux"])
+        mx = subprocess.run(plan["mux"], capture_output=True, text=True)
+        if mx.returncode != 0:
+            raise ValueError("ffmpeg: " + ((mx.stderr or "").strip().splitlines() or ["failed"])[-1])
+        os.replace(out + ".part", out)
+        shutil.rmtree(tmp, ignore_errors=True)
+        # 6. Check: check_edit's checks, with this recipe's parent for the line of versions.
+        say("TAKES_STAGE " + RENDER_STAGES["check"])
+        entry = check_file(s, os.path.relpath(out, s), out, as_rel=lineage_rel(r))
+        r.update(checks={"passed": entry["passed"], "known": entry["known"], "source": entry["source"],
+                         "results": entry["results"]},
+                 commands=[[str(x) for x in c] for c in RUN_LOG], length_s=round(plan["total"], 3),
+                 rendered=now_iso())
+        write_json(rp, r)
+        say("TAKES_PROGRESS 1")
+        say("TAKES_STAGE " + RENDER_DONE)
+    finally:
+        RUN_LOG = None
+        shutil.rmtree(tmp, ignore_errors=True)
+        for p in (out + ".part",):
+            if os.path.exists(p):
+                os.remove(p)
+
+
+def render_failed(e):
+    """The line the Jobs row shows for a render that stopped."""
+    if isinstance(e, RenderStop):
+        why = str(e)
+    elif isinstance(e, OSError) and getattr(e, "errno", None) == 28 or "No space left" in str(e):
+        why = "the disk is full"
+    else:
+        why = "Takes could not make it (%s)" % str(e)[:100]
+    return "Stopped: %s. Nothing was saved. Ask Takes in the chat to try again." % why
+
+
+def lineage_rel(r):
+    """The path the version after the recipe's parent would have: check_edit's regression check reads
+    the line of versions from it."""
+    p = r.get("parent")
+    if not p:
+        return None
+    b, v = edit_name_of(os.path.basename(p))
+    return os.path.join("edits", "%s-v%d.mp4" % (b, (v or 0) + 1)) if b == r.get("name") else None
+
+
+def renders_dir(s):
+    return os.path.join(s, RENDERS)
+
+
+def sweep_renders(s):
+    """Renders never published, older than 7 days, go to the Trash. A running one stays, and so does one
+    a claimed recipe in edits/ names."""
+    d = renders_dir(s)
+    if not os.path.isdir(d):
+        return
+    busy = set(claimed_outputs(s).values())
+    for f in os.listdir(d):
+        # A render that stopped (a crash, a restart) leaves its ProRes parts: they go now, not in 7 days.
+        rid = f[:-len(".tmp")] if f.endswith(".tmp") else f[:-len(".mp4.part")] if f.endswith(".mp4.part") else None
+        if rid and rid not in busy:
+            p = os.path.join(d, f)
+            shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else os.remove(p)
+    claimed = set()
+    for vs in edit_versions(s).values():
+        for e in vs.values():
+            if e["recipe"]:
+                try:
+                    claimed.add((load_recipe(s, e["recipe"]) or {}).get("render_id"))
+                except ValueError:
+                    pass
+    old = []
+    for f in os.listdir(d):
+        if not f.endswith(RECIPE_EXT):
+            continue
+        rid = f[:-len(RECIPE_EXT)]
+        p = os.path.join(d, f)
+        if rid in busy or rid in claimed or time.time() - os.path.getmtime(p) < RENDER_KEEP_DAYS * 86400:
+            continue
+        old += [os.path.join(d, x) for x in os.listdir(d) if x == f or x.startswith(rid + ".")]
+    if old:
+        try:
+            trash(sorted(set(old)))
+        except (OSError, subprocess.CalledProcessError):
+            pass
+
+
+def find_render(s, ref):
+    """(job id, render recipe) for a job id or a render path."""
+    ref = str(ref or "").strip()
+    rid = os.path.basename(ref)
+    for ext in (".mp4", RECIPE_EXT):
+        if rid.endswith(ext):
+            rid = rid[:-len(ext)]
+    if not re.fullmatch(r"[\w.\-]+", rid or ""):
+        raise ValueError("render is the job id from render_edit, e.g. job-7f3a1c.")
+    r = load_recipe(s, os.path.join(RENDERS, rid + RECIPE_EXT))
+    if r is None:
+        for vs in edit_versions(s).values():
+            for e in vs.values():
+                try:
+                    if e["recipe"] and e["video"] and (load_recipe(s, e["recipe"]) or {}).get("render_id") == rid:
+                        raise ValueError("This render is saved already as %s." % e["video"])
+                except ValueError as x:
+                    if "saved already" in str(x):
+                        raise
+        raise ValueError("No render %s in this session. render_edit gives the job id." % ref)
+    return rid, r
+
+
+def check_brief(c, accepted=()):
+    """{passed, results: how many, failed: [...], accepted: [...]}: a fail the agent accepted is not a fail."""
+    ok = {str(x.get("rule")) for x in accepted or []}
+    fails = [x for x in (c or {}).get("results") or [] if x.get("pass") is False]
+    kept = [x for x in fails if str(x.get("rule") or "") in ok or str(x.get("check") or "") in ok]
+    fails = [x for x in fails if x not in kept]
+    return {"passed": not fails, "results": len((c or {}).get("results") or []),
+            **({"failed": [check_line(x) for x in fails]} if fails else {}),
+            **({"accepted": [check_line(x) for x in kept]} if kept else {})}
+
+
+def check_line(x):
+    return "%s (%s)" % (x.get("rule") or x.get("check"), x.get("say") or x.get("label") or x.get("text") or "failed")
+
+
+def render_view(s, rid, r):
+    """What render_edit and get_job say about a finished render."""
+    out = {"job": rid, "render": os.path.join(RENDERS, rid + ".mp4"), "name": r.get("name"),
+           "length_s": r.get("length_s"), "checks": check_brief(r.get("checks"))}
+    mix = r.get("mix") or {}
+    if mix.get("lufs") is not None and mix["lufs"] < mix["target"] - 1:
+        # No limiter on purpose: a peak holds the whole mix down. A clean voice has its peaks evened out.
+        out["warnings"] = ["The edit is at %g LUFS, not %g: its loudest peaks hold it down (Takes adds no limiter). "
+                           "%s" % (mix["lufs"], mix["target"],
+                                   "Clean the voice with clean_voice, then render again." if (r.get("voice") or {}).get("source") != "clean"
+                                   else "Lower the loudest sound effect, then render again.")]
+    out["next"] = ("Grab 3 to 5 frames of the render and look at them. Then publish_edit render=%s note=... "
+                   "(one line, what the viewer notices)." % rid)
+    if not out["checks"]["passed"]:
+        out["next"] += (" Checks failed: fix them with render_edit base=%s changes={...}, or pass "
+                        "accept=[{rule, why}] if you meant it." % r.get("name"))
+    return out
+
+
+def pick_base(s, a):
+    """(base recipe or None, warnings) for render_edit's base, or an error that names the fix."""
+    names = recipe_names(s)
+    ref = a.get("base")
+    if not ref:
+        if len(names) > 1:
+            raise ValueError("This session has %d edits: %s. Say which one with base=<name>."
+                             % (len(names), ", ".join(names)))
+        if not names:
+            raise ValueError("No edit here has a recipe yet. Give recipe={name, cut, ...}: cut is rough_cut's "
+                             "cut.")
+        ref = names[0]
+    name, v = edit_ref(s, ref)
+    vs = edit_versions(s, name).get(name) or {}
+    with_video = sorted(n for n, e in vs.items() if e["video"])
+    if v is None:
+        base = newest_recipe(s, name)
+        if base is None:
+            raise ValueError("%s has no recipe. Build it with render_edit recipe={name, cut, ...}." % name)
+        v = edit_name_of(os.path.basename(base["edit"]))[1]
+    else:
+        if not vs.get(v, {}).get("video"):
+            raise ValueError("No edit %s-v%d. get_session lists the edits." % (name, v))
+        base = load_recipe(s, vs[v]["recipe"]) if vs[v]["recipe"] else None
+        if base is None:
+            raise ValueError("%s-v%d has no recipe. Build it with render_edit recipe={name, cut, ...}." % (name, v))
+    warns = []
+    newer = [n for n in with_video if n > v]
+    if newer:
+        top = newer[-1]
+        if vs[top]["recipe"]:
+            if not a.get("go_back"):
+                raise ValueError("%s-v%d is old: %s-v%d is the newest. Use base=%s to build on %s-v%d, or add "
+                                 "go_back=true to build on %s-v%d on purpose." % (name, v, name, top, name, name, top, name, v))
+        else:
+            warns.append("%s-v%d has no recipe: its changes are not in this base." % (name, top))
+    return base, warns
+
+
+def start_render(s, r, label, length):
+    """Writes the render's recipe and starts its job: the job id. Call it under the name's lock in _edit/renders/.
+    A render of the same name that runs is refused: both would use _edit/<name>/ (words.json, the steps'
+    files), and each would get the other's word times and layers."""
+    for o, j in claimed_outputs(s).items():
+        if os.path.dirname(o) != RENDERS:
+            continue
+        try:
+            other = load_recipe(s, os.path.join(RENDERS, j + RECIPE_EXT)) or {}
+        except ValueError:
+            other = {}
+        if other.get("name") == r["name"]:
+            raise ValueError("A render of %s runs now (%s). Wait for it with get_job id=%s wait_s=50, or stop it "
+                             "with stop_job id=%s. Then call render_edit again." % (r["name"], j, j, j))
+    for _ in range(20):
+        rid = new_job_id(s)
+        r.update(render_id=rid, job=rid)
+        rp = os.path.join(renders_dir(s), rid + RECIPE_EXT)
+        try:
+            fd = os.open(rp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "w") as f:
+            json.dump(r, f, indent=1, ensure_ascii=False)
+        cmd = "%s %s --render-run . %s" % (shlex.quote(sys.executable), shlex.quote(os.path.abspath(__file__)), rid)
+        try:
+            start_job(s, cmd, [os.path.join(RENDERS, rid + ".mp4")], label,
+                      estimate_s=int(10 + length * 1.5), job_id=rid)
+        except ValueError:
+            os.remove(rp)
+            raise
+        return rid
+    raise ValueError("Takes could not start the render. Try again.")
+
+
+def t_render_edit(a):
+    s = job_session(a.get("session"))
+    if a.get("recipe") is not None and a.get("base"):
+        raise ValueError("Give recipe (a whole recipe) or base with changes, not both.")
+    try:
+        wait = min(max(float(a.get("wait_s") or 0), 0), RENDER_WAIT_MAX)
+    except (TypeError, ValueError):
+        raise ValueError("wait_s is seconds, 0 to %d." % RENDER_WAIT_MAX)
+    warns, base, changed = [], None, {}
+    if a.get("recipe") is not None:
+        given = norm_recipe(s, a["recipe"])
+        top = newest_recipe(s, given["name"])
+        vids = sorted(n for n, e in (edit_versions(s, given["name"]).get(given["name"]) or {}).items() if e["video"])
+        parent = os.path.join("edits", "%s-v%d.mp4" % (given["name"], vids[-1])) if vids else None
+        base = top if top and parent and top.get("edit") == parent else None
+    else:
+        if a.get("changes") is not None and not isinstance(a["changes"], dict):
+            raise ValueError('changes is a JSON merge patch, e.g. {"music": [{...whole entry...}]}.')
+        base, warns = pick_base(s, a)
+        changes = a.get("changes") or {}
+        merged = merge_patch(agent_part(base), changes)
+        given = norm_recipe(s, merged)
+        parent = base["edit"]
+        steps_given = "steps" in changes
+        try:
+            was = norm_recipe(s, agent_part(base))
+        except ValueError:
+            was = agent_part(base)  # a file of the base is gone: only the merged recipe must be whole
+        changed = recipe_diff(was, given)
+        warns += unnamed_changes(changed, changes)
+        if base.get("steps") and not steps_given and base.get("host") != host_id():
+            raise ValueError("%s came from another Mac. Its steps did not run. Pass steps again to run them."
+                             % os.path.splitext(os.path.basename(base["edit"]))[0])
+    r = dict(given)
+    check_recipe(s, r)
+    warns += fill_recipe(s, r, base)
+    length = sum(max(2, frames(g["out"] - g["in"], r["frame"]["fps"])) / float(r["frame"]["fps"]) for g in r["cut"])
+    sweep_renders(s)
+    need = need_disk(s, r, length)
+    free = shutil.disk_usage(s).free
+    if free < need:
+        raise ValueError("Not enough free disk: this render needs about %s, %s is free." % (gb(need), gb(free)))
+    if not r.get("cover"):
+        covered = [PLATFORMS[p]["name"] for p in ("linkedin", "x", "youtube", "vertical")
+                   if (post_file(s, p) or ({}, ""))[0].get("cover")]
+        if covered:
+            warns.append("The %s post has a cover, and this version has none. Add cover to the recipe to keep it."
+                         % " and ".join(covered))
+    os.makedirs(renders_dir(s), exist_ok=True)
+    os.makedirs(os.path.join(s, EDIT_DIR, r["name"]), exist_ok=True)
+    r.update(recipe=1, parent=parent, by="render_edit", host=host_id(), started=now_iso())
+    label = ("New version of %s" % r["name"])[:60]
+    import fcntl
+    with open(os.path.join(renders_dir(s), ".%s.lock" % r["name"]), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        rid = start_render(s, r, label, length)
+    out = {"job": rid, "render": os.path.join(RENDERS, rid + ".mp4"), "base": parent, "name": r["name"],
+           "length_s": round(length + (r["cover"]["seconds"] if r.get("cover") else 0), 3), "changed": changed,
+           "runs": [x["run"] for x in r.get("steps") or []], "warnings": warns}
+    end = time.time() + wait
+    status = "running"
+    while wait and time.time() < end:
+        b = t_get_job({"id": rid, "session": s, "wait_s": min(JOB_WAIT_MAX, max(0.0, end - time.time()))})
+        status = b["status"]
+        if status not in ("starting", "running"):
+            break
+    if status == "done":
+        r2 = load_recipe(s, os.path.join(RENDERS, rid + RECIPE_EXT))
+        view = render_view(s, rid, r2)
+        warns += view.pop("warnings", [])
+        out.update(view, status="done", warnings=warns)
+    elif status in ("starting", "running"):
+        out.update(status="running", next="get_job id=%s wait_s=50 until it is done. Then grab 3 to 5 frames of the "
+                                          "render and look at them. Then publish_edit render=%s note=..." % (rid, rid))
+    else:
+        b = t_get_job({"id": rid, "session": s})
+        out.update(status=b["status"], error=b.get("error"), log_tail=b.get("log_tail"),
+                   next=b.get("next") or "Fix the recipe and call render_edit again.")
+    return with_rules(out, *EDIT_AREAS)
+
+
+def link_noclobber(src, dst):
+    """Move src to dst, never over a file that is there (FileExistsError). A hard link first; on another
+    volume: create dst exclusively, copy, then remove src."""
+    try:
+        os.link(src, dst)
+    except FileExistsError:
+        raise
+    except OSError:
+        fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        os.close(fd)
+        try:
+            shutil.copyfile(src, dst)
+        except BaseException:
+            os.remove(dst)
+            raise
+    os.unlink(src)
+
+
+def freeze_sources(s, name, n):
+    """A copy of _edit/<name>/ as it was for version n: a clone per file where the disk can, else a copy.
+    Returns (frozen folder, files over 1 GB that were left out)."""
+    src = os.path.join(s, EDIT_DIR, name)
+    dst = os.path.join(src, ".versions", "v%d" % n)
+    skipped = []
+    if not os.path.isdir(src):
+        return None, skipped
+    for dirpath, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if d not in FREEZE_SKIP]
+        rel = os.path.relpath(dirpath, src)
+        for f in files:
+            p = os.path.join(dirpath, f)
+            r = os.path.normpath(os.path.join(rel, f))
+            if os.path.islink(p) or f.startswith("._"):  # ._ files: macOS's own on exFAT and network disks
+                continue
+            if os.path.getsize(p) > FREEZE_MAX:
+                skipped.append(os.path.join(EDIT_DIR, name, r))
+                continue
+            q = os.path.join(dst, r)
+            os.makedirs(os.path.dirname(q), exist_ok=True)
+            if not clone_file(p, q):
+                shutil.copy2(p, q)
+    return os.path.relpath(dst, s), skipped
+
+
+def clone_file(src, dst):
+    """An APFS clone (cp -c): no space until one side changes. False when the disk cannot clone."""
+    try:
+        return subprocess.run(["/bin/cp", "-c", src, dst], capture_output=True, timeout=120).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def move_check(s, old, new, mtime):
+    """checks.json: the render's entry goes to the new version's path."""
+    import fcntl
+    cp = os.path.join(s, "checks.json")
+    with open(os.path.join(s, ".checks.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            try:
+                with open(cp) as fh:
+                    saved = json.load(fh)
+                if not isinstance(saved, dict):
+                    return
+            except (OSError, ValueError):
+                return
+            e = saved.pop(old, None)
+            if not isinstance(e, dict):
+                return
+            saved[new] = dict(e, mtime=mtime)
+            tmp = os.path.join(s, ".checks.json.tmp")
+            with open(tmp, "w") as fh:
+                json.dump(saved, fh, indent=2, ensure_ascii=False)
+            os.replace(tmp, cp)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def video_shape(path):
+    """-1 tall, 1 wide, 0 square (same bands as Cover.shape), None when it cannot tell."""
+    c = take_clock(path) if path and media_kind(path) == "video" else None
+    if not c or not c.get("width") or not c.get("height"):
+        return None
+    r = c["width"] / float(c["height"])
+    return -1 if r < 0.85 else 1 if r > 1.18 else 0
+
+
+def set_post_media(s, p, rel, cover=None):
+    """A post's media, written by Takes (media_by: takes): publish_edit may move it on later. cover: the
+    recipe's cover image, or False to remove it. The text stays."""
+    f = post_file(s, p)
+    if f is None:
+        return
+    fm, body = f
+    fm["media"], fm["media_by"] = rel, "takes"
+    if cover is not None:
+        fm["cover"] = cover or None
+        fm.pop("cover_from", None)
+        fm.pop("cover_video", None)
+    write_post_file(s, fm, body, p)
+
+
+def posts_before(s):
+    """{platform: (front matter, the file it shows now)} for each post with a file. A vertical post with no
+    pick shows the newest tall edit, as the app does (PostFile.newestPortrait)."""
+    out = {}
+    for p in ("linkedin", "x", "youtube", "vertical"):
+        f = post_file(s, p)
+        if f is None:
+            continue
+        fm = f[0]
+        if p == "vertical" and not (fm.get("media") and os.path.exists(os.path.join(s, fm["media"]))):
+            d = os.path.join(s, "edits")
+            tall = sorted((os.path.join(d, x) for x in os.listdir(d) if media_kind(x) == "video" and not x.startswith("."))
+                          if os.path.isdir(d) else [], key=os.path.getmtime, reverse=True)
+            out[p] = (fm, next((x for x in tall if video_shape(x) == -1), None))
+        else:
+            out[p] = (fm, post_media(s, fm, p))
+    return out
+
+
+def move_posts(s, before, name, new_rel, recipe):
+    """Puts the new version on the posts that follow this edit. A post the user starred stays."""
+    out = {}
+    new_abs = os.path.join(s, new_rel)
+    shape = video_shape(new_abs)
+    cover = (recipe.get("cover") or {}).get("image") or False
+    for p, (fm, shows) in before.items():
+        shows_rel = os.path.relpath(shows, s) if shows else None
+        mine = not fm.get("media") or fm.get("media_by") == "takes"
+        li = before.get("linkedin", ({}, None))[0]
+        if p == "x" and not fm.get("media") and li.get("media") and li.get("media_by") != "takes":
+            mine = False  # X shows the LinkedIn post's pick: The user's star there holds X too
+        if not mine:
+            out[p] = "%s (kept: The user picked it)" % (fm.get("media") or shows_rel)
+            continue
+        b, v = edit_name_of(os.path.basename(shows_rel)) if shows_rel else (None, None)
+        same_line = shows_rel and os.path.dirname(shows_rel) == "edits" and b == name
+        fits = {"vertical": shape == -1, "youtube": shape == 1}.get(p, True)
+        if same_line or (not shows_rel and fits):
+            if not fits and p in ("vertical", "youtube"):
+                out[p] = "%s (kept: other shape)" % shows_rel
+                continue
+            set_post_media(s, p, new_rel, cover)
+            out[p] = new_rel
+        elif shows_rel:
+            if not fm.get("media"):  # no pick: it would jump to the newest file, so it keeps what it showed
+                set_post_media(s, p, shows_rel)
+            out[p] = "%s (kept: %s)" % (shows_rel, "other shape" if not fits else "another edit")
+        else:
+            out[p] = "nothing (kept: other shape)"
+    return out
+
+
+def t_publish_edit(a):
+    s = resolve_session(a.get("session"))
+    note = " ".join(str(a.get("note") or "").split())
+    if not note:
+        raise ValueError("Give note: one short line the user reads under the edit, e.g. 'Music softer. Cut the "
+                         "restart at 0:41.'")
+    if len(note) > NOTE_MAX:
+        raise ValueError("note is too long: at most %d characters." % NOTE_MAX)
+    d = renders_dir(s)
+    if not os.path.isdir(d):
+        find_render(s, a.get("render"))  # no render here: its error names the fix
+    import fcntl
+    with open(os.path.join(d, ".publish.lock"), "a") as lock:
+        # One publish at a time: a retry of the same render waits, then finds it saved.
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return publish_render(s, a, note)
+
+
+def publish_render(s, a, note):
+    """publish_edit after its note checks, under the session's publish lock."""
+    rid, r = find_render(s, a.get("render"))
+    render = os.path.join(s, RENDERS, rid + ".mp4")
+    name = r["name"]
+    vs = edit_versions(s, name).get(name) or {}
+    done = next((n for n, e in vs.items() if e["recipe"] and e["video"]
+                 and (load_recipe(s, e["recipe"]) or {}).get("render_id") == rid), None)
+    if done is not None:
+        raise ValueError("This render is saved already as edits/%s-v%d.mp4." % (name, done))
+    if not r.get("checks") or not os.path.isfile(render):
+        try:
+            _, job = find_job(rid, s)
+        except ValueError:
+            job = {"status": "lost"}
+        if job["status"] in ("starting", "running"):
+            raise ValueError("The render is not done. get_job id=%s wait_s=50, then call again." % rid)
+        raise ValueError("The render %s did not finish (%s). Render again with render_edit."
+                         % (rid, job.get("error") or job["status"]))
+    # Checks: the render ran them; a fail must be fixed or accepted.
+    accept = a.get("accept") or []
+    if not isinstance(accept, list) or not all(isinstance(x, dict) and x.get("rule") and str(x.get("why") or "").strip()
+                                               for x in accept):
+        raise ValueError("accept is [{rule, why}]: the check or rule id, and why you keep it.")
+    ok = {str(x["rule"]) for x in accept}
+    fails = [x for x in r["checks"].get("results") or [] if x.get("pass") is False
+             and str(x.get("rule") or "") not in ok and str(x.get("check") or "") not in ok]
+    if fails:
+        raise ValueError("%d check%s fail%s on the render: %s. Fix %s with render_edit base=%s changes={...}, or pass "
+                         "accept=[{rule, why}] if you meant it. Nothing was saved."
+                         % (len(fails), "" if len(fails) == 1 else "s", "s" if len(fails) == 1 else "",
+                            ", ".join(check_line(x) for x in fails), "it" if len(fails) == 1 else "them", name))
+    # A version saved while this render ran: its fixes are not in it.
+    pv = edit_name_of(os.path.basename(r["parent"]))[1] if r.get("parent") and \
+        edit_name_of(os.path.basename(r["parent"]))[0] == name else 0
+    started = parse_iso(r.get("started") or "")
+    if not a.get("go_back") and started:
+        for n in sorted(vs):
+            e = vs[n]
+            if n <= (pv or 0) or not e["video"]:
+                continue
+            made = None
+            if e["recipe"]:
+                try:
+                    made = parse_iso((load_recipe(s, e["recipe"]) or {}).get("made") or "")
+                except ValueError:
+                    made = None
+            if made is None:
+                made = datetime.fromtimestamp(os.path.getmtime(os.path.join(s, e["video"])), timezone.utc)
+            if made >= started:
+                raise ValueError("%s-v%d was saved while this render ran, and its changes are not in it. Render again "
+                                 "with base=%s." % (name, n, name))
+    replies = a.get("replies") or []
+    if not isinstance(replies, list):
+        raise ValueError("replies is a list: [{id, text, lesson, rule?}], as in reply_comment.")
+    if replies:
+        by_id = {c["id"]: c for c in read_comments(s)["comments"]}
+        bad = [str(x.get("id")) for x in replies if not isinstance(x, dict) or x.get("id") not in by_id]
+        if bad:
+            raise ValueError("No comment %s. Use get_comments. Nothing was saved." % ", ".join(bad))
+        bare = [x["id"] for x in replies if not x.get("lesson") and by_id[x["id"]].get("status") != "resolved"]
+        if bare:
+            raise ValueError("Give each reply a lesson (%s): a rule id from get_rules, 'new' with rule={area, text}, "
+                             "or 'one-off'. Nothing was saved." % ", ".join(bare))
+    before = posts_before(s)
+    d = os.path.join(s, "edits")
+    os.makedirs(d, exist_ok=True)
+    rec = dict(r, note=note, fixed=[x["id"] for x in replies], accepted=[{"rule": x["rule"], "why": x["why"]} for x in accept])
+    rec.pop("job", None)
+    # Claim the version (a recipe with no video), then move the render in without overwriting anything.
+    claim = next((n for n, e in vs.items() if e["recipe"] and not e["video"]
+                  and (load_recipe(s, e["recipe"]) or {}).get("render_id") == rid), None)
+    n = claim
+    for _ in range(100):
+        mine = n is None
+        if n is None:
+            used = set(versions_in(d, name)) | {edit_name_of(os.path.basename(o))[1] for o in claimed_outputs(s)
+                                                 if os.path.dirname(o) == "edits" and edit_name_of(os.path.basename(o))[0] == name}
+            n = max([0] + [x for x in used if x]) + 1
+            rec.update(edit=os.path.join("edits", "%s-v%d.mp4" % (name, n)), made=now_iso())
+            try:
+                fd = os.open(os.path.join(d, "%s-v%d%s" % (name, n, RECIPE_EXT)), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            except FileExistsError:
+                n = None
+                continue
+            with os.fdopen(fd, "w") as f:
+                json.dump(rec, f, indent=1, ensure_ascii=False)
+        else:
+            rec.update(edit=os.path.join("edits", "%s-v%d.mp4" % (name, n)), made=now_iso())
+        try:
+            link_noclobber(render, os.path.join(d, "%s-v%d.mp4" % (name, n)))
+            break
+        except FileNotFoundError:
+            if os.path.exists(render):
+                raise
+            if mine:  # the render went (another publish took it): no claim stays behind
+                os.remove(os.path.join(d, "%s-v%d%s" % (name, n, RECIPE_EXT)))
+            raise ValueError("The render %s is gone. get_session shows the edits; render again with render_edit."
+                             % rid)
+        except FileExistsError:
+            # Another writer (the app's Cover, a next_path render) took this N: our claim goes, N+1.
+            try:
+                os.remove(os.path.join(d, "%s-v%d%s" % (name, n, RECIPE_EXT)))
+            except OSError:
+                pass
+            n = None
+    else:
+        raise ValueError("Takes could not find a free version for %s. Try again." % name)
+    new_rel = os.path.join("edits", "%s-v%d.mp4" % (name, n))
+    new_abs = os.path.join(s, new_rel)
+    os.utime(new_abs, None)
+    wsrc = os.path.join(s, RENDERS, rid + ".words.json")
+    if os.path.exists(wsrc):
+        shutil.copyfile(wsrc, os.path.join(d, "%s-v%d.words.json" % (name, n)))
+    frozen, skipped = freeze_sources(s, name, n)
+    rec.update(src=frozen, src_skipped=skipped)
+    write_json(os.path.join(d, "%s-v%d%s" % (name, n, RECIPE_EXT)), rec)
+    move_check(s, os.path.join(RENDERS, rid + ".mp4"), new_rel, os.path.getmtime(new_abs))
+    for p in (os.path.join(s, RENDERS, rid + RECIPE_EXT), wsrc):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    posts = move_posts(s, before, name, new_rel, rec)
+    out = {"edit": new_rel, "version": n, "recipe": recipe_path(new_rel), "checks": check_brief(rec["checks"], accept),
+           "posts": posts}
+    if replies:
+        try:
+            t_reply_comment({"session": s, "replies": [dict(x, fixed_in=new_rel, resolve=True) for x in replies]})
+            out["replied"] = [x["id"] for x in replies]
+        except ValueError as e:
+            out["replies_error"] = "%s The version is saved: answer them with reply_comment." % e
+    out["open_comments"] = sum(1 for c in read_comments(s)["comments"] if c.get("status") != "resolved")
+    open_in_app(new_abs)
+    out["note"] = "The user sees %s-v%d in the app now." % (name, n)
+    return with_rules(out, *EDIT_AREAS)
+
+
+def t_get_edit_recipe(a):
+    s = resolve_session(a["session"])
+    ref = a.get("edit")
+    if not ref:
+        names = recipe_names(s)
+        if not names:
+            raise ValueError("No edit here has a recipe yet. render_edit + publish_edit make one.")
+        newest = max(((newest_recipe(s, n) or {}) for n in names), key=lambda x: x.get("made") or "")
+        ref = newest.get("edit")
+    r = read_recipe(s, ref)
+    if r is None:
+        raise ValueError("%s has no recipe. Edits made before recipes have none: render_edit recipe={...} builds "
+                         "the next version with one." % ref)
+    lineage, missing = recipe_lineage(s, r)
+    name, v = edit_name_of(os.path.basename(r.get("edit") or ""))
+    newer = sorted((e["video"] for n, e in (edit_versions(s, name).get(name) or {}).items()
+                    if e["video"] and n > (v or 0)), key=lambda x: edit_name_of(os.path.basename(x))[1])
+    return {"recipe": r, "lineage": lineage, "missing": missing, "newer": newer}
+
+
+def recipe_short(r):
+    """get_session's form: only the fields the agent sets, the cut as a count."""
+    out = {k: r.get(k) for k in ("name", "edit", "note", "frame", "over", "music", "sfx", "steps", "cover", "loudness")}
+    out["cut"] = "%d parts" % len(r.get("cut") or [])
+    out["full"] = "get_edit_recipe edit=%s" % os.path.splitext(os.path.basename(r.get("edit") or ""))[0]
+    return out
+
+
+def session_recipes(s):
+    """get_session's edit_recipe, edit_log and note. {} without edits."""
+    vers = edit_versions(s)
+    if not any(e["video"] for vs in vers.values() for e in vs.values()):
+        return {}
+    shorts, log = [], []
+    for name in sorted(vers):
+        try:
+            r = newest_recipe(s, name)
+        except ValueError as e:
+            shorts.append({"name": name, "error": str(e)})
+            continue
+        if r:
+            shorts.append(recipe_short(r))
+        for n, e in vers[name].items():
+            if e["video"] and e["recipe"]:
+                try:
+                    x = load_recipe(s, e["recipe"]) or {}
+                except ValueError:
+                    continue
+                log.append({"edit": e["video"], "note": x.get("note"), "made": x.get("made")})
+    if not shorts:
+        return {"edit_recipe": None,
+                "edit_recipe_note": "No recipe yet. Build the next version with render_edit recipe={...}: from then "
+                                    "on each version starts from the one before."}
+    log.sort(key=lambda x: x.get("made") or "", reverse=True)
+    return {"edit_recipe": shorts[0] if len(shorts) == 1 else shorts, "edit_log": log[:5]}
+
+
+def recipe_note(video):
+    """The note of an edit's recipe, or None."""
+    try:
+        with open(recipe_path(video)) as f:
+            n = json.load(f).get("note")
+        return n if isinstance(n, str) else None
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 # ---------- LinkedIn comment copilot (same format as Sources/Takes/Copilot.swift) ----------
@@ -6238,7 +12424,7 @@ def shuffled_targets(targets_file):
 def scout_briefs(skip_urls, skip_authors, targets_file):
     skip = ("Skip these post URLs (already drafted): %s. Skip these authors (commented in the last 2 "
             "days): %s." % (", ".join(skip_urls) or "none", ", ".join(skip_authors) or "none"))
-    no_list = "Skip anyone on his target list at %s: the list scout reads them." % targets_file
+    no_list = "Skip anyone on the target list at %s: the list scout reads them." % targets_file
     feed = ("You are the feed scout for the user's LinkedIn comment copilot. " + SCOUT_BROWSER + " "
             "Open linkedin.com/feed/ (sorted by most recent if the page offers it) and scroll down, "
             "reading as you go, until you have read about 60 posts or the posts are over 24 hours old. "
@@ -6246,7 +12432,7 @@ def scout_briefs(skip_urls, skip_authors, targets_file):
             + SCOUT_RULES + " " + SCOUT_FRESH + " " + skip + " "
             + SCOUT_OUTPUT % (NEW_TARGETS, 12))
     lst = ("You are the target-list scout for the user's LinkedIn comment copilot. " + SCOUT_BROWSER + " "
-           "Read his target list at %s. For each person in it, open "
+           "Read the target list at %s. For each person in it, open "
            "linkedin.com/in/<handle>/recent-activity/all/ and read their newest posts (skip their "
            "reposts and comments). Go through the people in this order, the ones read longest ago first, so "
            "every run reaches different people: %s. Stop early at 20 candidates. "
@@ -6263,7 +12449,7 @@ def scout_briefs(skip_urls, skip_authors, targets_file):
               "engagement bait (\"comment X and I'll send you\", lists of tools, AI-written listicles). "
               + no_list + " " + skip + " " + SCOUT_OUTPUT % (NEW_TARGETS, 10))
     commenters = ("You are the commenter scout for the user's LinkedIn comment copilot. " + SCOUT_BROWSER + " "
-                  "Read his target list at %s. Pick 6 people from its \"Big accounts\" and \"Product "
+                  "Read the target list at %s. Pick 6 people from its \"Big accounts\" and \"Product "
                   "and growth\" sections, open their linkedin.com/in/<handle>/recent-activity/all/ and "
                   "open their newest own post that is under 48 hours old. Read its top comments. Note "
                   "commenters with a founder, CEO, CTO, head of / VP, product, growth or engineering "
@@ -6276,7 +12462,7 @@ def scout_briefs(skip_urls, skip_authors, targets_file):
 
 
 def t_get_comment_context(a):
-    RULES_SEEN.add("comments")
+    mark_seen([], comments_text())
     sugg = all_suggestions()
     decided = [s for s in sugg if s.get("decision")]
     decided.sort(key=lambda s: s["decision"].get("at", ""))
@@ -6336,9 +12522,9 @@ def t_get_comment_context(a):
                  "growth or engineering role. Under ~150 comments. Under 24 hours old with at least 10 reactions. Skip skip_post_urls "
                  "and skip_authors (commented in the last 2 days). No politics, layoffs or competitor fights. "
                  "Each suggestion needs an angle: what the user can add. No angle, no suggestion. Write 3 "
-                 "variants per post, each a different shape (for example a short story from his work, a "
+                 "variants per post, each a different shape (for example a short story from the user's work, a "
                  "pointed question, a counterpoint or a concrete tip) and length. Study edited_by_user "
-                 "most: it shows what he changes. variant_picks shows which shape he picks over which.",
+                 "most: it shows what the user changes. variant_picks shows which shape the user picks over which.",
     }
 
 
@@ -6457,7 +12643,8 @@ def t_set_comment_stats(a):
 
 
 S = {"type": "string"}
-SESSION = {"type": "string", "description": "Session as 'Project/folder' (from list_sessions) or an absolute path."}
+SESSION = {"type": "string", "description": "Session as 'Project/folder', an absolute path, or its id (from get_session). "
+           "An old path still works after a rename or move."}
 PLATFORM = {"type": "string", "enum": list(PLATFORMS),
             "description": "Which post of the session: linkedin (default, posts/linkedin.md), x (posts/x.md), "
                            "youtube (the long wide video: title + description, posts/youtube.md) or vertical (one "
@@ -6471,13 +12658,20 @@ LIBRARY = {"type": "string", "description": "A library: 'style:<Name>' for one o
            "or 'comments' for the comment copilot's files (lessons, target list, style guide)."}
 LESSON = {"type": "string", "description": "With resolve: what this comment taught. A rule id from "
           "get_rules, 'new' (then give rule), or 'one-off'."}
-RULE = {"type": "object", "description": "With lesson 'new': {area, text, check?}. One short sentence that "
-        "holds for the next videos too.", "properties": {"area": {"type": "string", "enum": AREAS + ["post"]},
-        "text": {"type": "string"}, "check": {"type": "object"}}}
+RULE_DETAILS = {"type": "string", "description": "Longer words for the rule, at most %d characters. '' removes "
+                "them." % DETAILS_MAX}
+MERGE_INTO = {"type": "string", "description": "With a new rule in a full area: the id of the closest rule in the "
+              "same area."}
+MERGED = {"type": "string", "description": "With merge_into: one sentence that holds both rules."}
+RULE = {"type": "object", "description": "With lesson 'new': one short sentence that holds for the next videos "
+        "too. A full area needs merge_into and merged.",
+        "properties": {"area": {"type": "string", "enum": AREAS + ["post"]},
+                       "text": {"type": "string"}, "check": {"type": "object"}, "details": RULE_DETAILS,
+                       "merge_into": MERGE_INTO, "merged": MERGED}}
 TOOLS = [
     ("get_comment_context", "LinkedIn comment copilot: everything to read before drafting comments for the user. "
-     "Returns lessons.md (his rules), the target list, his best past comments, recent examples (approved as is, "
-     "edited by him: study these most, declined with reasons, feedback notes, marked best), post URLs and authors "
+     "Returns lessons.md (the user's rules), the target list, the best past comments, recent examples (approved as is, "
+     "edited by the user: study these most, declined with reasons, feedback notes, marked best), post URLs and authors "
      "to skip, drafts waiting for a redraft, and the post rules. Call it first on every drafting run.",
      {}, [], t_get_comment_context),
     ("add_comment_suggestion", "Suggest one LinkedIn comment for the user to review on the Takes Comments board. "
@@ -6498,17 +12692,17 @@ TOOLS = [
       "angle": {"type": "string", "description": "One line: what the user adds (a story, a counterpoint, a real question)."},
       "variants": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 3,
                    "description": "Three different comments, plain text as the user would type them. Each a different "
-                   "shape (story, question, counterpoint, tip) and length. He picks one."}},
+                   "shape (story, question, counterpoint, tip) and length. The user picks one."}},
      ["post_url", "author", "post_text", "angle", "variants"], t_add_comment_suggestion),
     ("redraft_comment", "Save a new draft for a suggestion the user gave feedback on (get_comment_context lists "
-     "them under waiting_for_redraft, each draft with its variants and feedback note, and his own edit if he "
-     "typed one: keep that edit as variant 1, changed only as the note asks). Three new variants that "
+     "them under waiting_for_redraft, each draft with its variants and feedback note, and the user's own edit if "
+     "there is one: keep that edit as variant 1, changed only as the note asks). Three new variants that "
      "follow the note; same slop gate as add_comment_suggestion.",
      {"id": S, "variants": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 3,
                    "description": "Three different comments, plain text as the user would type them. Each a different "
-                   "shape (story, question, counterpoint, tip) and length. He picks one."}}, ["id", "variants"], t_redraft_comment),
+                   "shape (story, question, counterpoint, tip) and length. The user picks one."}}, ["id", "variants"], t_redraft_comment),
     ("list_comment_suggestions", "List suggested LinkedIn comments, oldest first: review (waiting for the user), "
-     "feedback (his note, not sent to you yet), redraft (he gave feedback), approved (to post), posted, declined.",
+     "feedback (the user's note, not sent to you yet), redraft (feedback given), approved (to post), posted, declined.",
      {"status": {"type": "string", "enum": COMMENT_STATUSES}, "limit": {"type": "integer"}}, [], t_list_comment_suggestions),
     ("set_comment_posted", "Mark an approved comment as posted on LinkedIn, with the comment's link. Only after "
      "The user approved it and you saw it live under the post.",
@@ -6521,10 +12715,12 @@ TOOLS = [
     ("create_project", "Create a project (a folder in the Takes library).", {"name": S}, ["name"], t_create_project),
     ("list_sessions", "List sessions in a project, newest first, with take and keeper counts.",
      {"project": S}, ["project"], t_list_sessions),
-    ("get_session", "Get a session: title, full script, and every take with file path, duration, "
+    ("get_session", "Get a session: its id, title, full script, and every take with file path, duration, "
      "keeper flag, name and start time (camera and screen files of one take share a number), plus every "
      "asset file (edits/, thumbnails/, stills/, assets/), the folder rules ('folders') and 'warnings' about "
-     "files in the wrong place: fix those.",
+     "files in the wrong place: fix those. Each take shows edit_ready (word times are ready). Cut takes with "
+     "cut_take and rough_cut by default: they fix the audio offset and frame rate. checks: the "
+     "check_edit state of each newest edit. rules: the rules for the session's next step that this chat has not seen yet; follow them.",
      {"session": SESSION}, ["session"], t_get_session),
     ("create_session", "Create a recording session with a title and the script to read on the teleprompter, "
      "optionally with variants. Offers it in the Takes app unless open=false (see open_in_app).",
@@ -6533,7 +12729,8 @@ TOOLS = [
       "variants": {"type": "array", "items": {"type": "object"}, "description": "Optional [{name, script, note}]."},
       "open": {"type": "boolean"}}, ["title"], t_create_session),
     ("update_session", "Change a session's title (renames its folder) and/or replace its main script. "
-     "Script changes are saved to history on both sides, so they can be undone. Give a short note.",
+     "Script changes are saved to history on both sides, so they can be undone. Give a short note. After a "
+     "rename, use the returned path or the session id; the old path still works.",
      {"session": SESSION, "title": S, "script": S, "note": {"type": "string", "description": "What changed, e.g. 'Tighter hook'."}},
      ["session"], t_update_session),
     ("set_hooks", "Offer several hooks (opening lines) for a session. Replaces earlier hook options. The app "
@@ -6555,7 +12752,7 @@ TOOLS = [
      "'video' puts a real clip on the shot instead of a sketch (a file from list_broll, or a file in the "
      "session such as edits/x.mp4 or a still such as generated/x.png); the app shows its frame and plays it on hover. "
      "'variants' puts several clips or stills on one shot (A, B, C... in that order) for the user to choose "
-     "from: the shot shows as a stack, he flips through them and picks one; 'video' is the one in the video "
+     "from: the shot shows as a stack; the user flips through them and picks one; 'video' is the one in the video "
      "(default the first). Left out, the shot keeps its variants. A new Higgsfield or Replicate clip for a "
      "shot keeps the old one as a variant. "
      "The user records takes per shot and comments on shots: get_session's 'storyboard' lists each shot's id, "
@@ -6600,7 +12797,7 @@ TOOLS = [
      + (", 'article'. "
         "Article (platform=article, also 'blog'): a post for the user's blog; the app shows the blog's page. "
         "Pass title, description (one line under the title), category (Tech, Life or Business) and the body as text. "
-        + ARTICLE_COMPONENTS + " Read 2-3 of his posts first for his voice (content/blog/*.mdx in "
+        + ARTICLE_COMPONENTS + " Read 2-3 of the blog's posts first for the voice (content/blog/*.mdx in "
         + ARTICLE_SITE_REPO + ", e.g. gh api repos/" + ARTICLE_SITE_REPO + "/contents/content/blog). "
         "The other platforms are plain text only: they show no markdown." if BLOG else ". Posts are plain text only: they show no markdown.")
      + " No video? The post works without one "
@@ -6623,7 +12820,7 @@ TOOLS = [
           "slug": {"type": "string", "description": "article only: the URL name (example.com/blog/<slug>). Default: from the title."}}
          if BLOG else {}),
       "first_comment": {"type": "string", "description": "LinkedIn only. Optional: the first comment the user posts under it "
-                        "(links, resources, a question). The app shows it under the post as his comment. "
+                        "(links, resources, a question). The app shows it under the post as the user's comment. "
                         "One per session, shared by the variants. Empty string removes it."}},
      ["session"], t_set_post),
     ("create_post_variants", "Add other versions of the session's LinkedIn or X post (e.g. 'Story first', 'Shorter', "
@@ -6635,7 +12832,7 @@ TOOLS = [
          "note": {"type": "string", "description": "Short why, e.g. 'leads with the number'"}},
          "required": ["name"]}}}, ["session", "variants"], t_create_post_variants),
     ("use_post_variant", "Make a post variant the main post (the one that is scheduled). The old main goes to "
-     "post history and the variant tab closes. Only when the user asks; he usually does it in the app.",
+     "post history and the variant tab closes. Only when the user asks; the user usually does it in the app.",
      {"session": SESSION, "platform": PLATFORM, "variant": S}, ["session", "variant"], t_use_post_variant),
     ("delete_post_variants", "Move post variants to the macOS Trash (their text stays in post history).",
      {"session": SESSION, "platform": PLATFORM, "variants": {"type": "array", "items": S}}, ["session", "variants"],
@@ -6658,7 +12855,7 @@ TOOLS = [
      {"session": SESSION, "platform": PLATFORM, "version": S}, ["session", "version"], t_restore_post_version),
     ("get_post_queue", "The posting plan: every LinkedIn and X post the user marked ready or that is scheduled, "
      "across all projects, sorted by time. Each has platform, session, title, text (X: also 'tweets'), "
-     "media_path (the video to upload), status, at (iso, utc, local in his chosen tz, this_mac = the Mac's "
+     "media_path (the video to upload), status, at (iso, utc, local in the chosen tz, this_mac = the Mac's "
      "zone, which LinkedIn's scheduler uses) and 'action': what to do on that platform now (schedule, move, "
      "replace text, delete, or nothing). The user sets the times with [schedule] on the post tab, or asks you to pick them.",
      {"platform": {"type": "string", "enum": list(PLATFORMS), "description": "Optional: only this platform."},
@@ -6666,10 +12863,10 @@ TOOLS = [
       "drafts": {"type": "boolean", "description": "Also list drafts (not marked ready yet), e.g. for a "
                  "pipeline overview. Default false."}},
      [], t_get_post_queue),
-    ("get_plan", "The user's posting plan: the weekdays he wants to post, the slots in the next 14 days, which are "
+    ("get_plan", "The user's posting plan: the weekdays to post, the slots in the next 14 days, which are "
      "empty (next_gap), the buffer (covered slots before the first empty one) and ready posts with no time yet. "
-     "Use it to tie a new take or edit to the slot it can fill, and to suggest a time when he marks a post "
-     "ready. No plan yet: ask him which days, then set_plan.",
+     "Use it to tie a new take or edit to the slot it can fill, and to suggest a time when the user marks a post "
+     "ready. No plan yet: ask the user which days, then set_plan.",
      {}, [], t_get_plan),
     ("set_plan", "Save the posting days the user picked. Overwrites the plan. Returns get_plan.",
      {"days": {"type": "array", "items": {"type": "string"}, "description": "Weekdays: mon, tue, wed, thu, fri, sat, sun."},
@@ -6679,7 +12876,7 @@ TOOLS = [
       "weeks": {"type": "integer", "description": "How many weeks the Plan board shows, 2 to 12. Default: unchanged."}},
      ["days"], t_set_plan),
     ("plan_video", "Put a session's video card on a day of the user's Plan board (the calendar in Takes), move "
-     "it to another day, or take it off (day empty). Use it when he asks you to plan his videos; one call per "
+     "it to another day, or take it off (day empty). Use it when the user asks you to plan videos; one call per "
      "video. A card shows the session's title and thumbnail; the user drags cards to reorder them. A card covers "
      "that day's posting slot as planned; a post with a time fills it. The board grows to show the card's week. "
      "Returns get_plan.",
@@ -6691,7 +12888,7 @@ TOOLS = [
     ("set_post_status", "Record what you did on LinkedIn or X (platform=x) for a session's post. status=scheduled after you scheduled "
      "it (records the time and text you scheduled, so later changes show up as an action); status=posted "
      "with url once it is live (also marks the session published); ready to undo. The user marks posts ready "
-     "himself; only set ready or draft when he asks. A post he asked you to schedule that has no time: "
+     "in the app; only set ready or draft when asked. A post you were asked to schedule that has no time: "
      "pass at, the time you picked on the platform.",
      {"session": SESSION, "platform": PLATFORM, "status": {"type": "string", "enum": ["draft", "ready", "scheduled", "posted"]},
       "url": {"type": "string", "description": "Link to the live post (status=posted)."},
@@ -6704,22 +12901,20 @@ TOOLS = [
       "first_comment_posted": {"type": "boolean", "description": "true after you posted first_comment "
                                "under the live post."}},
      ["session", "status"], t_set_post_status),
-    ("get_comments", "The user's review comments, in a session (edits, thumbnails, stills, scripts) or in a "
-     "library (pass library instead of session). Video: a time ('when', start/end seconds), an optional area "
-     "(rect = x,y,w,h fractions from top left) and a 'frame' PNG of that moment with the area outlined in "
-     "orange: read it to see what he means; 'said' quotes the words spoken around that time when the video "
-     "has a transcript next to it (<stem>.words.json, .srt or .vtt). Image: rect + frame. Text (script.md, variants/<slug>.md, a "
-     "library README.md or tokens.json): 'quote' is the text he selected. Default: open comments.",
+    ("get_comments", "The user's review comments in a session or a library (pass library, not session). Video: "
+     "'when' (start/end s), an optional rect (x,y,w,h fractions from top left) and a 'frame' PNG with the area "
+     "outlined in orange: read it to see what the comment means; 'said' quotes the words spoken then (from the "
+     "video's transcript). Image: rect + frame. Text (script, variant, README.md, tokens.json): 'quote' is the "
+     "selected text. Default: open comments.",
      {"session": SESSION, "library": LIBRARY,
       "file": {"type": "string", "description": "Optional: only this file, e.g. 'edits/hook-v2.mp4'."},
       "status": {"type": "string", "enum": ["open", "resolved", "all"]}}, [], t_get_comments),
-    ("reply_comment", "Reply to review comments and/or resolve them. After a round of fixes, send ONE call with "
-     "replies=[{id, text, resolve, fixed_in, fixed_at}] for every comment. fixed_in is the new version's file "
-     "(e.g. 'edits/hook-v4.mp4') and fixed_at the second in it where the fix shows: The user clicks the reply to "
-     "jump there. Keep text to one line ('Caption 20% smaller'). Ask a question with resolve omitted when a "
-     "comment is unclear. In a session, each resolved comment needs a lesson: a rule id from get_rules when "
-     "that rule covers it (the same mistake again), 'new' with rule={area, text} when it applies to the next "
-     "videos too, else 'one-off'.",
+    ("reply_comment", "Reply to review comments and resolve them. After a round of fixes, send ONE call with "
+     "replies=[{id, text, resolve, fixed_in, fixed_at, lesson}] for every comment. fixed_in: the new version's "
+     "file; fixed_at: the second in it where the fix shows (a click on the reply jumps there). text: one line "
+     "('Caption 20% smaller'). Unclear comment: ask a question, resolve omitted. In a session each resolved "
+     "comment needs a lesson: a rule id from get_rules (the same mistake again), 'new' with rule={area, text} "
+     "(it applies to the next videos too), else 'one-off'.",
      {"session": SESSION, "library": LIBRARY,
       "replies": {"type": "array", "items": {"type": "object", "properties": {
           "id": {"type": "string", "description": "Comment id, e.g. 'c3'."}, "text": S, "resolve": {"type": "boolean"},
@@ -6727,38 +12922,44 @@ TOOLS = [
           "fixed_at": {"type": "number", "description": "Seconds into fixed_in where the fix shows."},
           "lesson": LESSON, "rule": RULE},
           "required": ["id"]}},
+      # One reply without replies=[...]: the same fields, short here (they load with every Takes chat).
       "id": {"type": "string", "description": "Single reply: comment id. Prefer replies=[...]."},
-      "text": S, "resolve": {"type": "boolean"}, "fixed_in": S, "fixed_at": {"type": "number"},
-      "lesson": LESSON, "rule": RULE},
+      **{k: {"type": ty, "description": "As in replies."} for k, ty in (
+          ("text", "string"), ("resolve", "boolean"), ("fixed_in", "string"), ("fixed_at", "number"),
+          ("lesson", "string"), ("rule", "object"))}},
      [], t_reply_comment),
-    ("get_rules", "The rules learned from the user's comments, one file per step of the content journey: plan "
-     "(storyboard, script), make (sound, cut, picture, captions, graphics), package (thumbnail), publish "
-     "(post-all, post-linkedin, post-x, post-youtube, post-vertical), engage (comments: the comment copilot's "
-     "lessons) and other. Read the steps you work on before you write, edit or design, and follow them: the "
-     "tools that write for a step refuse once until you have. The user edits them on the Feedback board.",
-     {"area": {"type": "string", "description": "The steps, comma separated, e.g. 'post-all,post-x' or 'cut,sound'. "
-               "'post' is every post file, 'edit' the five make steps, 'all' every rule. Without it: only the "
-               "list of steps and how many rules each has."}},
+    ("get_rules", "The rules learned from the user's comments, one file per step: plan (storyboard, script), make "
+     "(sound, cut, picture, captions, graphics), package (thumbnail), publish (post-all, post-linkedin, post-x, "
+     "post-youtube, post-vertical), engage (comments) and other. Read and follow the steps you work on before "
+     "you write, edit or design. get_session and next_path show new ones once per chat; a write tool shows "
+     "unseen ones once. Without area: the steps with rule counts (full=true at %d)." % AREA_MAX,
+     {"area": {"type": "string", "description": "Steps, comma separated ('cut,sound'). 'post' = every post step, "
+               "'edit' = the five make steps, 'all' = every rule."}},
      [], t_get_rules),
-    ("set_rule", "Add, change, turn off or remove one learned rule. Keep each rule one short sentence and the "
-     "set small (at most %d per area): sharpen or merge a rule before you add one. Never change a rule "
-     "The user wrote (by_user) without asking him. A check makes check_edit measure the rule: %s" % (
-         AREA_MAX, " ".join("%s: %s" % kv for kv in sorted(CHECKS.items()))),
+    ("set_rule", "Add, change, turn off or remove one learned rule. text is one sentence (at most %d "
+     "characters); put the rest in details. Keep each area small (%d rules): sharpen a rule before you add one. "
+     "When an area is full, add the new rule with merge_into (the closest rule) and merged (one sentence for "
+     "both): The user approves the merge on the Feedback board. Both rules are on until the user decides. Never change "
+     "a rule the user wrote (by_user) without asking first. A check makes check_edit measure the rule: %s" % (
+         RULE_MAX, AREA_MAX, " ".join("%s: %s" % kv for kv in sorted(CHECKS.items()))),
      {"id": {"type": "string", "description": "The rule to change. Omit to add a new rule."},
-      "area": {"type": "string", "enum": AREAS}, "text": S,
+      "area": {"type": "string", "enum": AREAS}, "text": S, "details": RULE_DETAILS,
+      "merge_into": MERGE_INTO, "merged": MERGED,
       "check": {"type": "object", "description": "{kind, target, tolerance, max, floor}. null removes it."},
       "on": {"type": "boolean"}, "remove": {"type": "boolean"}}, [], t_set_rule),
-    ("check_edit", "Measure an edit against every learned rule that has a check (loudness, true peak, pauses, "
-     "length). Run it before you show the user a new version, fix what fails, and run it again.",
-     {"session": SESSION, "file": {"type": "string", "description": "The video, e.g. 'edits/hook-v4.mp4'."}},
+    ("check_edit", "Check each new edit before you show it. It compares the edit with its take: sound, picture, "
+     "sync, cut words, undone fixes, rules with a check. Fix each failure in a new version and check that. "
+     "pass null: did not run (skip says why). A failure looks wrong: tell the user its say.",
+     {"session": SESSION, "file": {"type": "string", "description": "E.g. 'edits/hook-v4.mp4'."},
+      "source": {"type": "string", "description": "Optional take file, when not the keeper."}},
      ["session", "file"], t_check_edit),
     ("make_image", "Make or change an image straight from Google or OpenAI (much cheaper than a Higgsfield "
      "image: never use higgsfield for images). Drafts first, final last: while the user finds the direction, "
      "draw with GPT Image (fast, 1536 px at most): flare (GPT Image 2.5 Flare, the default for a new image) "
-     "or sunburst (GPT Image 2.5 Sunburst, the default for a change or with references). When he likes a "
+     "or sunburst (GPT Image 2.5 Sunburst, the default for a change or with references). When the user likes a "
      "draft, make its final: from=<that draft> redraws it with Nano Banana 2.1 at 4K, the newest and sharpest, "
      "with the draft and its references as the guide and the same prompt (add one only for a change). Never "
-     "make a final before he picks. When one model fails the next one draws. Waits about 10-60 s and returns "
+     "make a final before the user picks. When one model fails the next one draws. Waits about 10-60 s and returns "
      "the file, <session>/generated/<name>-vN.png, and the model that drew it; the Assets tab shows both. "
      "Change an image: images=[session files] (a thumbnail, a still, 'sketch' with shot=<id>) and say what to "
      "change. One image per ask.",
@@ -6777,7 +12978,7 @@ TOOLS = [
     ("voices", "ElevenLabs voices: the account's own voices (the user's clone, designed and saved voices), the "
      "default voice, the plan and characters left. search=<words> searches the ElevenLabs voice library "
      "(with gender, accent, language, age, use_case); add=<add id from search> with name saves one to the "
-     "account; set_default=<voice> makes a voice the default. Not set up: tell him to open Plugins › Voices.",
+     "account; set_default=<voice> makes a voice the default. Not set up: tell the user to open Plugins › Voices.",
      {"search": S, "gender": S, "accent": S, "language": S, "age": S, "use_case": S,
       "add": {"type": "string", "description": "'<public_owner_id>/<voice_id>' from a search result."},
       "name": {"type": "string", "description": "With add: the name the voice gets in the account."},
@@ -6785,7 +12986,7 @@ TOOLS = [
      [], t_voices),
     ("design_voice", "Design a new ElevenLabs voice from a description ('warm German woman, 40s, calm, slow'): "
      "writes three samples (generated/voice-<name>-1..3.mp3 with session, else _library/voices/) for the user "
-     "to hear on the Assets tab. Then save his pick: save=<the sample's save id> with name.",
+     "to hear on the Assets tab. Then save the pick: save=<the sample's save id> with name.",
      {"session": SESSION, "description": {"type": "string", "description": "Age, gender, accent, tone, pace, use."},
       "text": {"type": "string", "description": "Optional sample text, 100-1000 characters."},
       "save": {"type": "string", "description": "A sample's save id: keep that voice."},
@@ -6793,7 +12994,7 @@ TOOLS = [
       "set_default": {"type": "boolean", "description": "With save: make it the default voice."}},
      [], t_design_voice),
     ("voiceover", "Make a voice-over with ElevenLabs: reads text (default: the session's script.md) in a voice "
-     "(default: The user's default voice, usually his clone) and writes generated/<name>-vN.wav (48 kHz mono, "
+     "(default: The user's default voice, usually a clone) and writes generated/<name>-vN.wav (48 kHz mono, "
      "-14 LUFS), shown on the Assets tab with the voice's name. Write the text as spoken words only. Costs "
      "ElevenLabs characters (about one per letter): one voice-over per ask.",
      {"session": SESSION, "text": {"type": "string", "description": "The words to say. Leave out for script.md."},
@@ -6805,7 +13006,7 @@ TOOLS = [
       "speed": {"type": "number", "description": "0.7-1.2. Default 1."}},
      ["session"], t_voiceover),
     ("fix_words", "Correct what was said in a take or clip: ElevenLabs says the new words in the voice "
-     "(default: The user's default voice, his clone) with the sentences around them for the same tone, and "
+     "(default: The user's default voice, often a clone) with the sentences around them for the same tone, and "
      "Takes cuts them in at the word edges with the take's cleaned voice when there is one. old = the words "
      "as said (from the transcript; Takes transcribes the file first when it has no <stem>.words.json), or "
      "start/end in seconds. Writes generated/<file>-fix-vN.wav, plus an .mp4 with the video when the new "
@@ -6838,8 +13039,8 @@ TOOLS = [
      "reference with params {mode: omni_reference}, and say in the prompt that the result is real footage, not a "
      "drawing. Change a video: video=<session file> with params {mode: video_edit} (Seedance), or "
      "workflow=reframe with aspect_ratio for a new shape. Default model: the one the user picked on Plugins › Higgsfield (higgsfield_status default_model); other models by id (`higgsfield model list` in Bash; `higgsfield model get <id>` for params). "
-     "Each job costs the user's Higgsfield credits: one job per ask, never a batch he did not ask for. "
-     "Not installed or not signed in: tell him to open Plugins › Higgsfield.",
+     "Each job costs the user's Higgsfield credits: one job per ask, never a batch nobody asked for. "
+     "Not installed or not signed in: tell the user to open Plugins › Higgsfield.",
      {"session": SESSION,
       "prompt": {"type": "string", "description": "What the result shows. Not needed for workflow=reframe."},
       "shot": {"type": "string", "description": "A storyboard shot id: the clip becomes that shot's video."},
@@ -6860,7 +13061,7 @@ TOOLS = [
     ("replicate", "Make or change a video on Replicate: the same models as Higgsfield (Seedance 2.5, Kling, "
      "Veo, ...) at a price per second of video, no plan. Returns at once; the job runs in the background and the "
      "file lands in <session>/generated/<name>-vN.mp4, where the Assets tab shows it. model: owner/name; leave it "
-     "out for the user's default (replicate_status lists his default models, the first is the default; pick another "
+     "out for the user's default (replicate_status lists the default models, the first is the default; pick another "
      "of them when it fits better). Takes maps prompt, image (the FIRST FRAME), end_image, video, duration, "
      "aspect_ratio, resolution and audio to the model's own input names; anything else goes in params by the "
      "model's names (call replicate_model first to see its inputs, defaults and allowed values). File inputs, "
@@ -6868,8 +13069,8 @@ TOOLS = [
      "them. With shot=<id> the storyboard shot shows 'Generating' and then plays the clip (aspect ratio = the "
      "storyboard format, length = the shot's length, 4-15 s). For a shot, write a real-footage prompt from the "
      "shot's do and say; never use the sketch as the first frame (the video would look drawn): pass it only to a "
-     "reference-image input if the model has one. Each job costs the user money: one job per ask, never a batch he "
-     "did not ask for. No token: tell him to open Plugins › Replicate.",
+     "reference-image input if the model has one. Each job costs the user money: one job per ask, never a batch "
+     "nobody asked for. No token: tell the user to open Plugins › Replicate.",
      {"session": SESSION,
       "prompt": {"type": "string", "description": "What the clip shows and how the camera moves."},
       "model": {"type": "string", "description": "owner/name (or owner/name:version). Leave out for the default."},
@@ -6885,22 +13086,23 @@ TOOLS = [
       "name": {"type": "string", "description": "Short file name. Default: shot-<id> or the prompt's first words."}},
      ["session"], t_replicate),
     ("replicate_model", "A Replicate model's inputs (type, default, allowed values, what each does), so a job "
-     "can set what the user asks for. Leave model out for his default.",
+     "can set what the user asks for. Leave model out for the default.",
      {"model": {"type": "string", "description": "owner/name, e.g. bytedance/seedance-2.5."}}, [], t_replicate_model),
     ("replicate_status", "Is a Replicate token set, which account, the user's default video models; with session, "
      "its Replicate jobs (running, done, error).",
      {"session": SESSION}, [], t_replicate_status),
-    ("next_path", "Get the path for a new file you make: the right folder and the next version number. "
-     "kind=edit: <session>/edits/<name>-vN.mp4. kind=thumbnail: <session>/thumbnails/<name>-vN.png (use the "
-     "edit's name, plus an option word if you offer several). kind=library: <library>/assets/<group>/<name>-vN.<ext>. "
-     "Always call this before you write an edit, a thumbnail or a library asset.",
+    ("next_path", "The path for a new file: the right folder and the next version. kind=edit: "
+     "<session>/edits/<name>-vN.mp4. kind=thumbnail: <session>/thumbnails/<name>-vN.png (the edit's name, plus "
+     "an option word for several). kind=library: <library>/assets/<group>/<name>-vN.<ext>. Call it before you "
+     "write any of these. For edit and thumbnail it also gives the user's rules for that step once per chat: follow "
+     "them.",
      {"kind": {"type": "string", "enum": ["edit", "thumbnail", "library"]},
       "name": {"type": "string", "description": "Short name, e.g. 'webmcp-short' or 'logo-mark'. A -vN suffix is ignored."},
       "session": SESSION, "library": LIBRARY,
       "group": {"type": "string", "description": "kind=library: Logos, Icons, Images, Motion, or another one-word group."},
       "ext": {"type": "string", "description": "File extension. Default .mp4 for edit, .png for thumbnail; required for library."}},
      ["kind", "name"], t_next_path),
-    ("get_library", "Read the style a video uses: The user picks one of his named styles per video or per project "
+    ("get_library", "Read the style a video uses: The user picks one of the named styles per video or per project "
      "(e.g. Magazine), and the project library adds to it. Returns the style's name and 'template', the style "
      "library and the project library (README.md style guide, tokens.json colours/type/spacing/radius, assets "
      "by group with every version, fonts, open comment counts) and the merged tokens. Without project: the "
@@ -6908,7 +13110,7 @@ TOOLS = [
      {"session": SESSION, "project": {"type": "string", "description": "Project name, when there is no session."}},
      [], t_get_library),
     ("set_style", "Set the style of one video (session) or of a whole project. The user usually picks it on the "
-     "app's Assets tab. Only when he asks.",
+     "app's Assets tab. Only when asked.",
      {"session": SESSION, "project": {"type": "string"},
       "style": {"type": "string", "description": "A style name from get_library. With session, empty = use the project's."}},
      ["style"], t_set_style),
@@ -6926,7 +13128,7 @@ TOOLS = [
      ["file", "group", "name", "note"], t_save_to_library),
     ("create_style", "Start a new style from an example the user gives: a link, a video, an image, or words. Makes "
      "the style folder (status new) and returns the steps: study the source, write the guide and tokens, build "
-     "the parts, render the preview. He compares it with his other styles on the Styles board and keeps or "
+     "the parts, render the preview. The user compares it with the other styles on the Styles board and keeps or "
      "trashes it.",
      {"name": {"type": "string", "description": "Style name, 1-3 words, e.g. 'Bold Notes'."},
       "description": {"type": "string", "description": "One line: the look."},
@@ -6983,7 +13185,7 @@ TOOLS = [
           "required": ["path"]}},
       "move": {"type": "boolean", "description": "Move files instead of copying them. Default false."}},
      ["session"], t_import_take),
-    ("phone_videos", "The videos the user AirDropped from his iPhone that wait in ~/Downloads (AirDrop or iPhone "
+    ("phone_videos", "The videos the user AirDropped from an iPhone that wait in ~/Downloads (AirDrop or iPhone "
      "recordings only; all=true for every video), oldest first, with length, recording time and, with "
      "listen=true, the first words said (Whisper, about 10 s per video). Also lists the newest sessions with "
      "the start of each script, so you can match each video to its session and import_take it with move=true.",
@@ -7019,10 +13221,10 @@ TOOLS = [
      "without a link. dashboard: the last day the Signal board's LinkedIn, follower and X data covers; "
      "when dashboard.stale is not empty, do dashboard.refresh. Use for 'update my post stats' and weekly reviews.",
      {"platform": {"type": "string"}, "stale_hours": {"type": "number"}}, [], t_get_performance),
-    ("list_broll", "List the user's own b-roll (_library/broll/<folder>/): self-filmed clips of him at his desk, "
+    ("list_broll", "List the user's own b-roll (_library/broll/<folder>/): self-filmed clips at the desk, "
      "hands typing, reactions, lifestyle, outdoor. Each has title, folder, filmed (YYYY-MM), orientation, "
      "duration, description, keywords and path. Use it for B-ROLL shots in a storyboard or an edit before "
-     "asking him to film new b-roll. He browses the same clips on the app's B-roll tab.",
+     "asking the user to film new b-roll. The user browses the same clips on the app's B-roll tab.",
      {"query": {"type": "string", "description": "Words that must all be in the title, description or keywords."},
       "folder": {"type": "string", "description": "e.g. Desk work, Hands close-up, Reactions, Lifestyle, Outdoor."},
       "orientation": {"type": "string", "enum": ["vertical", "horizontal"]}}, [], t_list_broll),
@@ -7031,7 +13233,7 @@ TOOLS = [
      "the words said in transcripts and scripts ('where I talk about pricing'). Each hit has path, kind "
      "(video, image, speech, script) and, for video and speech, 'at' (seconds into the file). A b-roll "
      "clip found by its description has 'about' (that description). Best hit first. Use it to find b-roll for a storyboard shot or an edit before asking the user to film it, and "
-     "to find an old take or clip he describes. Same search as ⌘K in the app.",
+     "to find an old take or clip the user describes. Same search as ⌘K in the app.",
      {"query": {"type": "string", "description": "What to find, in plain words."},
       "kinds": {"type": "array", "items": {"type": "string", "enum": ["video", "image", "speech", "script"]},
                 "description": "Only these kinds. Omit for all."},
@@ -7042,7 +13244,7 @@ TOOLS = [
                                      "description": "From list_broll, e.g. '1 Desk work/2023-11 High-Angle Typing at Desk (V).mov'."}},
      ["session", "files"], t_add_broll),
     ("list_music", "List the user's music and sound effects (_library/audio/Music, SFX, ...): file, title, "
-     "artist, genre, bpm, duration, path. New downloads in his source folder (Epidemic Sound) are copied in "
+     "artist, genre, bpm, duration, path. New downloads in the source folder (Epidemic Sound) are copied in "
      "first. Use for picking a song or an SFX for an edit. SFX are short effects (whoosh, pop, typing, "
      "notification). Mix songs and effects into a new version of the edit with ffmpeg, under the voice: the "
      "app plays only the file, never a song or an effect beside it. The app's Use button asks you for this.",
@@ -7070,14 +13272,87 @@ TOOLS = [
      ["session", "take"], t_clean_voice),
     ("set_best_cut", "Set the best cut of a storyboard take after you checked it. Gemini's best_cut is only a "
      "first suggestion: compare it with the transcript and the frames, then write the range you use here "
-     "(by=agent; Gemini's range stays under gemini). The user sees it on the take in the Storyboard tab.",
+     "(by=agent; Gemini's range stays under gemini). The user sees it on the take in the Storyboard tab. This only "
+     "marks a range. To make the clip, call cut_take with that range.",
      {"session": SESSION, "take": {"type": "integer"},
       "start": {"type": "number", "description": "Seconds from the start of the take."},
       "end": {"type": "number"},
       "why": {"type": "string", "description": "One short sentence: what you checked, and what you changed."},
       "clean": {"type": "boolean", "description": "Every word of the shot's lines is there. Default true."},
-      "said": {"type": "string", "description": "What he says in the range, word for word."}},
+      "said": {"type": "string", "description": "What the user says in the range, word for word."}},
      ["session", "take", "start", "end", "why"], t_set_best_cut),
+    ("cut_take", "Cut takes into one clip: video at a constant frame rate, the voice in sync, and word times "
+     "for the clip. It is the default for a cut of a take: it fixes the take's audio offset and frame rate, "
+     "moves a cut point that falls inside a word to the word's edge (listed in 'moved'), and uses the take's "
+     "clean voice when clean_voice is done. For what it cannot do (a J/L cut, a speed change, a cut inside a "
+     "word, an effect), use your own ffmpeg on its clip and .wav, or on the take with get_session's "
+     "audio_offset_s, and tell the user what you did. set_best_cut only marks a range; cut_take makes the "
+     "video. Writes _work/<name>-vN.mp4, .wav (voice only) and .words.json in the session. "
+     "A short cut comes back done; a long one returns a job.",
+     {"session": SESSION,
+      "segments": {"type": "array", "items": {"type": "object", "properties": {
+          "take": {"type": "integer", "description": "Take number."},
+          "in": {"type": "number", "description": "Start, in seconds of the take."},
+          "out": {"type": "number", "description": "End, in seconds of the take."},
+          "kind": {"type": "string", "enum": ["camera", "screen"], "description": "The take's file to cut. Default camera."}},
+          "required": ["take", "in", "out"]},
+          "description": "The parts to keep, in order: [{take, in, out}], seconds of the take. Add kind: 'screen' "
+                         "to cut a take's screen file. rough_cut's cut has this shape."}},
+     ["session", "segments"], t_cut_take),
+    ("rough_cut", "Make a first cut of the takes against script.md: each script line once (the last full try), "
+     "without false starts, stutters, ums and pauses longer than gap. A take with a best cut uses only that "
+     "range. Returns the clip (like cut_take) plus dropped (each with why) and missing (script lines no take "
+     "has). Show the user the clip and tell them what you dropped and what is missing. It is only a first draft: "
+     "improve it freely (edit cut and call cut_take; see cut_take for your own ffmpeg).",
+     {"session": SESSION,
+      "takes": {"type": "array", "items": {"type": "integer"},
+                "description": "Take numbers in the order to use. Default: the keeper takes in session order, else all."},
+      "gap": {"type": "number", "description": "The longest pause kept, in seconds. Default 0.25."}},
+     ["session"], t_rough_cut),
+    ("render_edit", "Build an edit from a recipe, as a job, and check it. First version: recipe={name, cut} (cut = "
+     "rough_cut's cut) plus what you need: frame {shape '9:16'|'16:9'|'1:1'|'4:5'|'source', crop}, over "
+     "(picture layers: alpha graphics or b-roll, with at/in/out), music and sfx (file, at, gain_db), steps (commands "
+     "that make the layers, run in _edit/<name>/), cover (a thumbnail). Next version: base=<name> and changes (a JSON "
+     "merge patch on the newest recipe; a list replaces the whole list; {\"name\": \"hook-vertical\"} starts a new "
+     "line). Takes uses the clean voice once and never uses a finished edit as an input. One render of a name runs "
+     "at a time: to compare two options, give the second a new name. Returns a job; then publish_edit.",
+     {"session": SESSION,
+      "recipe": {"type": "object", "description": "A whole recipe. For a first version, or to rebuild an edit that "
+                 "has no recipe. Times in over, music and sfx are seconds of the cut (a cover adds its own)."},
+      "base": {"type": "string", "description": "The edit to start from: 'hook' (its newest version), 'hook-v4' or "
+               "'edits/hook-v4.mp4'. Required when the session has more than one edit name with a recipe."},
+      "changes": {"type": "object", "description": "A JSON merge patch on the base recipe. A list replaces the whole "
+                  "list, so repeat the whole entry: {\"music\": [{\"file\": \"@library/audio/Music/Calm.mp3\", "
+                  "\"at\": 0, \"in\": 14, \"gain_db\": -21, \"duck_db\": 8, \"fade_out\": 1.5}]}. "
+                  "{\"name\": \"hook-vertical\"} starts a new edit line. null removes a field (\"cover\": null)."},
+      "go_back": {"type": "boolean", "description": "true to build on an older version on purpose. Without it, an "
+                  "old base is refused."},
+      "wait_s": {"type": "integer", "description": "Wait up to this many seconds (max 120) and return the finished "
+                 "result inline. Default 0."}},
+     ["session"], t_render_edit),
+    ("publish_edit", "Save a checked render as the next version, edits/<name>-vN.mp4, with its recipe. In one call: "
+     "reads the checks the render ran (it refuses on a failed check; accept=[{rule, why}] for a fail you meant), "
+     "puts the version on the posts that follow this edit (a version the user picked stays), answers the review "
+     "comments it fixes (replies: like reply_comment; fixed_in and resolve are set for you) and saves note as the "
+     "changelog line. Call it once per version. To show another file on a post, call set_post media=... after.",
+     {"session": SESSION,
+      "render": {"type": "string", "description": "The job id from render_edit, or its render path."},
+      "note": {"type": "string", "description": "One short line the user reads under the edit, at most 60 "
+               "characters. Say what the viewer will notice, in plain words. No field names or numbers in dB. "
+               "Example: 'Music softer. Cut the restart at 0:41.'"},
+      "replies": {"type": "array", "description": "Comments this version fixes: [{id, text, lesson, rule?}], as in "
+                  "reply_comment.", "items": {"type": "object"}},
+      "accept": {"type": "array", "description": "[{rule, why}]: failed checks you keep on purpose. rule is a rule "
+                 "id or a check id. Saved in the recipe.", "items": {"type": "object"}},
+      "go_back": {"type": "boolean", "description": "true to save even when a newer version was saved while this "
+                  "render ran."}},
+     ["session", "render", "note"], t_publish_edit),
+    ("get_edit_recipe", "The recipe of an edit: how it was made (cut list, voice, layers, music, sfx, cover, checks, "
+     "the exact commands) and the versions before it. get_session shows a short form of the newest one.",
+     {"session": SESSION,
+      "edit": {"type": "string", "description": "'hook-v4', 'edits/hook-v4.mp4' or 'hook' for its newest. Default: "
+               "the newest edit."}},
+     ["session"], t_get_edit_recipe),
     ("save_broll", "Save a video of a session into the user's b-roll library (_library/broll/<folder>/, an APFS "
      "clone), so every session can use it (list_broll, add_broll). Gemini describes it in the background and "
      "writes the description and keywords into the clip. Only on the user's ask.",
@@ -7087,12 +13362,70 @@ TOOLS = [
       "folder": {"type": "string", "description": "A folder from list_broll ('1 Desk work'), or a new one."},
       "name": {"type": "string", "description": "A short name; without it the description names the clip."}},
      ["session", "file", "folder"], t_save_broll),
-    ("open_in_app", "Offer the user a project, session or file (e.g. a new edit) in the Takes app. It never "
-     "takes focus and never changes his screen or plays anything: the session gets a dot and the stage a "
-     "notice, and it opens only when he clicks it. He often works in another session while you run, so "
-     "call it once per finished result, not for drafts or in-between steps.",
+    ("add_idea", "File one of the user's ideas (a video, a feature, a business idea, anything) as its own "
+     "markdown file in the Ideas list, which the user sees on the Mac and the phone. Use it whenever the user says there is "
+     "an idea, in any chat, often as a voice message on a walk: one call per idea, so split a message with "
+     "several. title: short, in the user's words. text: the idea as said, cleaned of filler but not "
+     "rewritten, plus anything the user asked you to add. Call list_ideas with query first when it may already "
+     "exist, and add to that one with update_idea append instead. Reply with the title(s) you filed.",
+     {"title": {"type": "string", "description": "Short title, 3-8 words."},
+      "text": {"type": "string", "description": "The idea in markdown, in the user's words."},
+      "tags": {"type": "array", "items": {"type": "string"}, "description": "A few lower-case tags (video, takes, nimo...)."},
+      "status": {"type": "string", "enum": ["new", "exploring", "doing", "done", "dropped"], "description": "Default new."},
+      "source": {"type": "string", "description": "Where it came from: phone, mac or agent. Default agent."},
+      "thumbnail_prompt": {"type": "string", "description": "The prompt for its 16:9 thumbnail, which GPT Image 2.5 "
+                           "Sunburst draws in the background with photos of the user as references: one scene "
+                           "that shows the idea at a glance, his pose, expression (calm closed-mouth smile), "
+                           "clothes, place, one proof element, light, his face on one third and a two-word "
+                           "title line. Never describe his face. 60-120 words."}},
+     ["title"], t_add_idea),
+    ("list_ideas", "The user's ideas, newest change first: id, title, status, tags, dates and the first line. "
+     "Without status it leaves out dropped ones. INDEX.md in the same folder lists them all (the app and "
+     "this server write it; never edit it).",
+     {"status": {"type": "string", "description": "new, exploring, doing, done, dropped or all."},
+      "tag": {"type": "string", "description": "Only ideas with this tag."},
+      "query": {"type": "string", "description": "Words to find in the title, text or tags."}},
+     [], t_list_ideas),
+    ("get_idea", "One idea in full: its fields and its markdown text.",
+     {"id": {"type": "string", "description": "Idea id from list_ideas."}}, ["id"], t_get_idea),
+    ("update_idea", "Change an idea: append a note (dated, under the text: use this to add to an idea), "
+     "change status (new, exploring, doing, done, dropped), title or tags, link the session made from it, "
+     "or replace the whole text with body (only when the user asks to rewrite it).",
+     {"id": {"type": "string", "description": "Idea id from list_ideas."},
+      "append": {"type": "string", "description": "A note to add at the end, dated."},
+      "status": {"type": "string", "enum": ["new", "exploring", "doing", "done", "dropped"]},
+      "title": {"type": "string", "description": "New title."},
+      "tags": {"type": "array", "items": {"type": "string"}, "description": "The new tags (replaces them)."},
+      "session": {"type": "string", "description": "The session made from it, as 'Project/folder'."},
+      "body": {"type": "string", "description": "The whole new text. Replaces it."},
+      "thumbnail_prompt": {"type": "string", "description": "A new thumbnail prompt: draws a new version with it."},
+      "redraw": {"type": "boolean", "description": "Draw a new version of the thumbnail from its last prompt."}},
+     ["id"], t_update_idea),
+    ("open_in_app", "Offer the user a project, session or file (e.g. a new edit) in the Takes app. It never takes "
+     "focus or plays anything: the session gets a dot and opens only on a click. Once per finished result, not "
+     "for drafts or in-between steps.",
      {"path": {"type": "string", "description": "Project name, 'Project/folder', 'Project/folder/edits/x-v2.mp4', or absolute path."}},
      ["path"], t_open_in_app),
+    ("run_job", "Run slow work (a render, Demucs, Whisper, matting, any command over about 30 s) in Takes, "
+     "never as a background Bash job or with sleep. Returns a job id at once. The job outlives the chat and "
+     "Takes, and shows its progress in the session's Jobs row. cmd runs in zsh in the session folder. The "
+     "result's note says how to wait.",
+     {"session": SESSION,
+      "cmd": {"type": "string", "description": "The shell command. Print 'TAKES_PROGRESS 0.4' lines for a progress bar (ffmpeg and N% lines work too)."},
+      "outputs": {"type": "array", "items": S, "description": "New files the job writes, relative to the session (paths from next_path). [] if none."},
+      "label": {"type": "string", "description": "A few words the user sees, e.g. Render edit v3."}},
+     ["session", "cmd", "outputs", "label"], t_run_job),
+    ("get_job", "A job's status (starting, running, done, failed, stopped, lost), progress, time left, last "
+     "log lines, exit code and files. wait_s waits for the end in this call (other takes tools wait too); call "
+     "again to keep waiting. With session and no id: the running jobs and those that ended in the last day.",
+     {"id": {"type": "string", "description": "Job id from run_job, higgsfield or replicate."},
+      "session": SESSION,
+      "wait_s": {"type": "number", "description": "Seconds to wait for the job to end, 0 to 50. Default 0."}},
+     [], t_get_job),
+    ("stop_job", "Stop a running job and every process it started. Files it wrote so far leave the "
+     "session (they go to its .jobs folder). Higgsfield and Replicate clips cannot be stopped.",
+     {"id": {"type": "string", "description": "Job id from run_job."}, "session": SESSION},
+     ["id"], t_stop_job),
 ]
 if not SOCIAL:
     TOOLS = [t for t in TOOLS if t[0] not in SOCIAL_TOOLS]
@@ -7158,9 +13491,13 @@ PARAM_DOC = {
 READ_ONLY = {"get_comment_context", "list_comment_suggestions", "list_projects", "list_sessions", "get_session",
              "post_history", "get_post_queue", "get_plan", "get_comments", "get_rules", "script_history",
              "get_script_version", "get_performance", "list_broll", "search_media", "list_music", "get_library",
-             "phone_videos", "higgsfield_status", "replicate_status", "replicate_model"}
+             "phone_videos", "higgsfield_status", "replicate_status", "replicate_model",
+             "list_ideas", "get_idea", "get_job", "get_edit_recipe"}
 DESTRUCTIVE = {"trash_takes", "trash_sessions", "delete_variants", "delete_post_variants", "copy_library",
-               "set_rule", "set_hooks", "set_post_hooks", "set_storyboard"}
+               "set_rule", "set_hooks", "set_post_hooks", "set_storyboard",
+               # run_job runs any shell command: clients that gate on destructiveHint must ask first.
+               # The Takes chat runs with bypassPermissions, so it sees no prompt.
+               "run_job", "stop_job"}
 OPEN_WORLD = {"make_image", "voices", "design_voice", "voiceover", "fix_words", "change_voice", "higgsfield",
               "higgsfield_status", "replicate", "replicate_model", "replicate_status", "set_storyboard"}
 
@@ -7179,16 +13516,45 @@ def documented(tool, schema):
     return out
 
 
+# The tools a Takes chat uses in most turns load with the chat, not behind ToolSearch: long chats
+# called ToolSearch about 20 times for them (2026-10-10). Only in the Takes chat (TAKES_CHAT=1, set by
+# Chat.swift): a terminal Claude that has takes too keeps them deferred, so its context stays small.
+# test_tool_docs keeps the set small.
+# set_storyboard, set_post and add_broll stay deferred (2026-10-11): each is the first call of one step
+# only, and together they were over a third of the preload.
+ALWAYS_LOAD = {"get_session", "get_rules", "next_path", "check_edit", "get_comments", "reply_comment",
+               "open_in_app", "run_job", "get_job", "render_edit", "publish_edit"}
+
+
+def in_takes_chat():
+    return os.environ.get("TAKES_CHAT") == "1"
+
+
 def listed(name, desc, props, req):
-    """One tool as tools/list sends it."""
-    return {"name": name, "description": desc,
-            "inputSchema": documented(name, {"type": "object", "properties": props, "required": req}),
-            "annotations": {"readOnlyHint": name in READ_ONLY,
-                            "destructiveHint": name in DESTRUCTIVE,
-                            "openWorldHint": name in OPEN_WORLD}}
+    """One tool as tools/list sends it. Other MCP clients ignore _meta."""
+    out = {"name": name, "description": desc,
+           "inputSchema": documented(name, {"type": "object", "properties": props, "required": req}),
+           "annotations": {"readOnlyHint": name in READ_ONLY,
+                           "destructiveHint": name in DESTRUCTIVE,
+                           "openWorldHint": name in OPEN_WORLD}}
+    if in_takes_chat() and name in ALWAYS_LOAD:
+        out["_meta"] = {"anthropic/alwaysLoad": True}
+    return out
 
 
 # ---------- JSON-RPC over stdio ----------
+
+# Which tool for which step, at the end of the instructions: an agent finds the tool without a search.
+TOOL_INDEX = ("Tools by step. Start: get_session (takes, script, open comments, rules), list_sessions. Plan: "
+              "update_session (script), create_variants, set_hooks, set_storyboard. Make: next_path, clean_voice, "
+              "rough_cut, cut_take, render_edit, publish_edit, get_edit_recipe, list_broll, add_broll, run_job, get_job, "
+              "check_edit, open_in_app. Package: next_path kind=thumbnail, make_image. "
+              "Publish: set_post, set_post_hooks, create_post_variants, get_post_queue. Review: get_comments, "
+              "reply_comment. Rules: get_rules, set_rule.")
+# Ideas are private for now: the public server has no ideas tools, so its instructions skip them.
+IDEAS_NOTE = (" Ideas: when the user has an idea, in any chat, file it with add_idea (one per idea, with a "
+              "thumbnail_prompt) and say what you filed; list_ideas and update_idea for the rest.") if SOCIAL else ""
+
 
 def reply(id_, result=None, error=None):
     msg = {"jsonrpc": "2.0", "id": id_}
@@ -7209,6 +13575,12 @@ def handle(msg):
         reply(id_, {"protocolVersion": v, "capabilities": {"tools": {}},
                     "serverInfo": {"name": "takes", "version": "0.5"},
                     "instructions": "Takes is the user's video recorder. Library = projects > sessions > takes. "
+                                    "Every tool takes a session's path or its id (get_session); an old path still "
+                                    "works after a rename. Cut takes with rough_cut (a first draft: improve it freely) "
+                                    "or cut_take by default: they fix the audio offset and frame rate. For what "
+                                    "they cannot do (a J/L cut, a speed change, a cut inside a word, an effect), use "
+                                    "your own ffmpeg on cut_take's clip and .wav, or on the take with get_session's "
+                                    "audio_offset_s, and say what you did. "
                                     "Each session folder has script.md, session.json, SESSION.md and "
                                     "take-NN-[name-]camera.mov / -screen.mov. Scripts: script.md is main; "
                                     "variants/ are alternatives shown as tabs; history/ keeps every version. "
@@ -7221,11 +13593,21 @@ def handle(msg):
                                     "For youtube and vertical, set media to the edit of the right shape (16:9 or 9:16): "
                                     "the newest edit may be the other one. Every post tool takes platform: other versions "
                                     "with create_post_variants, opening options with set_post_hooks, old versions with post_history. "
-                                    "Files you make: edited videos go to <session>/edits/, thumbnails to "
-                                    "<session>/thumbnails/, both as <name>-vN; always get the path from "
-                                    "next_path, never overwrite a version or a take file. stills/ (frames the user "
-                                    "saved) and assets/ (files he dropped) are his: read only. "
-                                    "Videos the user AirDrops from his phone land in ~/Downloads: phone_videos finds them, "
+                                    "Files you make: thumbnails go to <session>/thumbnails/ as <name>-vN (path from "
+                                    "next_path). Edits: build each version with render_edit (a recipe: cut list, voice, "
+                                    "picture layers, music, sfx, cover), then publish_edit saves it as "
+                                    "edits/<name>-vN.mp4 with its recipe beside it. The next version starts from that "
+                                    "recipe (render_edit base + changes), never from a script in /tmp or from memory. An edit "
+                                    "you make by hand is fine too: its path comes from next_path kind=edit. "
+                                    "A finished edit is never an input. Never overwrite a version or a take file. "
+                                    "stills/ (frames the user "
+                                    "saved) and assets/ (files the user dropped) are read only. "
+                                    "Slow work (renders, Demucs, Whisper, matting, anything over about 30 s): start it "
+                                    "with run_job, never as a background Bash job or with sleep. If it should end within "
+                                    "about 2 min, wait with get_job wait_s=50 and go on. Otherwise tell the user in one line "
+                                    "what runs. In the Takes chat, end your turn: Takes sends you a note when "
+                                    "it ends. Elsewhere no note comes: check later with get_job. "
+                                    "Videos the user AirDrops from a phone land in ~/Downloads: phone_videos finds them, "
                                     "then import_take with move=true puts each into its session. "
                                     "Style library: get_library with the project before designing anything; "
                                     "it gives the style the user picked for that project and its template. Reusable "
@@ -7235,31 +13617,38 @@ def handle(msg):
                                     "(area) and text (quoted selection), in sessions and libraries: when "
                                     "get_session or get_library shows open_comments, call get_comments, read each "
                                     "frame PNG, fix, and reply_comment with resolve=true. "
-                                    "The user's rules from past comments: get_rules for the step you work on (script, "
-                                    "storyboard, the edit steps, thumbnail, post-all plus post-<platform>, comments) "
-                                    "before you write; the tools that write for a step refuse once until you have. "
+                                    "You cannot hear or watch a video: check_edit is your ears and eyes. Run it on "
+                                    "every new edit and fix what it finds before you show it; get_session shows which "
+                                    "edits are unchecked. "
+                                    "The user's rules from past comments: get_session and next_path give the rules for "
+                                    "the next step the first time in a chat; get_rules gives any step. A tool that "
+                                    "writes for a step with rules this chat has not seen refuses once and shows them: "
+                                    "follow them and send the same call again. "
                                     "A take's voice: clean_voice cleans it (the user's voice-cleanup); when get_session shows voice.file "
                                     "under a take, use that WAV as the take's audio in edits. "
                                     "A take recorded for a storyboard shot has best_cut in get_session. by=gemini is only Gemini's "
                                     "first suggestion of the clean delivery (start, end in seconds), not the final cut: "
-                                    "check it yourself before you cut (Whisper word times against the shot's lines, a "
-                                    "look at the frames at both ends, the other tries), then set_best_cut with the "
-                                    "range you use, even when it stays the same. "
+                                    "check it against the take's words (get_session edit_ready) and a look at the "
+                                    "frames at both ends, then set_best_cut with the range you use, even when it "
+                                    "stays the same. "
                                     "B-roll: list_broll gives the user's own clips with descriptions; add_broll puts one in "
                                     "a session; save_broll saves a session's video into the library. "
-                                    "AI media: the replicate tool (pay per clip, the user's default models) or the higgsfield tool (his "
+                                    "AI media: the replicate tool (pay per clip, the user's default models) or the higgsfield tool (the user's "
                                     "Higgsfield plan) makes a clip for a storyboard shot or changes a session video; use the one "
-                                    "he names, else replicate when replicate_status shows a token; make_image makes or changes an image (GPT Image 2.5 drafts; when the user likes one, "
+                                    "The user names, else replicate when replicate_status shows a token; make_image makes or changes an image (GPT Image 2.5 drafts; when the user likes one, "
                                     "from=<draft> makes the 4K Nano Banana 2.1 final; never Higgsfield for images); results land in generated/. "
                                     "Posting plan: get_plan has the days the user wants to post, the empty slots and the "
-                                    "video cards on his Plan board (plan_video puts a session on a day). "
-                                    "When he records a take or an edit is done, say in one positive line which slot it "
+                                    "video cards on the Plan board (plan_video puts a session on a day). "
+                                    "When the user records a take or an edit is done, say in one positive line which slot it "
                                     "can fill; never nag about gaps. "
-                                    "Trashing is recoverable."})
+                                    "Trashing is recoverable. "
+                                    + (TOOL_INDEX.replace("list_broll, add_broll, ", "") if core_only() else TOOL_INDEX)
+                                    + IDEAS_NOTE
+                                    + (CORE_NOTE if core_only() else "")})
     elif method == "ping":
         reply(id_, {})
     elif method == "tools/list":
-        reply(id_, {"tools": [listed(n, d, props, req) for n, d, props, req, _ in TOOLS]})
+        reply(id_, {"tools": [listed(n, d, props, req) for n, d, props, req, _ in TOOLS if shown_tool(n)]})
     elif method == "tools/call":
         p = msg.get("params") or {}
         tool = BY_NAME.get(p.get("name"))
@@ -7267,12 +13656,225 @@ def handle(msg):
             reply(id_, error={"code": -32602, "message": "Unknown tool %s" % p.get("name")})
             return
         try:
+            RESOLVED.clear()
             out = tool[4](p.get("arguments") or {})
+            if RESOLVED and isinstance(out, dict):
+                ref, path = next(iter(RESOLVED.items()))
+                if "moved_from" in out:  # the tool moved it again: its own note names the new path
+                    out = dict(out, resolved_from=ref)
+                else:
+                    moved = "The session moved to %s. Use this path or the id from now on." % path
+                    out = dict(out, resolved_from=ref,
+                               note=moved + (" " + out["note"] if isinstance(out.get("note"), str) else ""))
             reply(id_, {"content": [{"type": "text", "text": json.dumps(out, indent=2, ensure_ascii=False)}]})
         except Exception as e:
             reply(id_, {"content": [{"type": "text", "text": "Error: %s" % e}], "isError": True})
     else:
         reply(id_, error={"code": -32601, "message": "Method not found: %s" % method})
+
+
+# ---------- short tool list ----------
+# Cursor uses about 40 tools across all its MCP servers and drops the rest without a word
+# (2026-10-10). With TAKES_TOOLS=core (Cursor's entry from --setup) the server lists only these:
+# the script, takes, storyboard, edit, long jobs, comments, posts and plan. Others still work when called.
+CORE_TOOLS = {
+    "list_projects", "list_sessions", "get_session", "create_session", "update_session", "create_variants",
+    "set_hooks", "set_storyboard", "set_keeper", "import_take", "next_path", "get_library",
+    "get_rules", "get_comments", "reply_comment", "clean_voice", "search_media", "make_image",
+    "set_post", "create_post_variants", "set_post_hooks", "get_post_queue", "set_post_status", "get_plan",
+    # render_edit runs its render as a job and checks it, so run_job and check_edit made room (2026-10-11).
+    "open_in_app", "get_job", "cut_take", "rough_cut", "render_edit", "publish_edit",
+}
+CORE_NOTE = (" This agent has Takes' short tool list (for its tool limit): b-roll, voices, AI video, phone videos, script "
+             "and post history, changes to the posting plan, styles and performance are not listed. Ask in the "
+             "Takes chat for those.")
+
+
+def core_only():
+    return os.environ.get("TAKES_TOOLS") == "core"
+
+
+def shown_tool(name):
+    return not core_only() or name in CORE_TOOLS
+
+
+# ---------- agent setup ----------
+# Takes works with any MCP agent (2026-10-10), not only Claude Code. `takes_mcp.py --setup` adds
+# this server as "takes" to each agent found on this Mac, or points it again at this copy when the
+# app moved. The app runs `--setup --once` at launch: then an agent gets the server one time only,
+# so a user who removes it keeps it removed (Claude Code always: the Takes chat runs on it).
+# It touches only the "takes" entry. An entry that names no takes_mcp.py, or one that still
+# exists, stays as it is: a setup made by hand wins. A config file that is not plain JSON stays too.
+
+# (name, CLI, `mcp add` scope args) for agents with their own `mcp` command.
+AGENT_CLIS = [("Claude Code", "claude", ["--scope", "user"]), ("Codex", "codex", [])]
+# (name, folder or file that says the agent is here, config files to try, key for its servers).
+AGENT_FILES = [
+    ("Cursor", ".cursor", [".cursor/mcp.json"], "mcpServers"),  # with TAKES_TOOLS=core
+    ("Antigravity", ".gemini/antigravity", [".gemini/config/mcp_config.json"], "mcpServers"),
+    ("Gemini CLI", ".gemini/settings.json", [".gemini/settings.json"], "mcpServers"),
+    ("opencode", ".config/opencode", [".config/opencode/opencode.json", ".config/opencode/opencode.jsonc"], "mcp"),
+    ("pi", ".pi/agent", [".pi/agent/mcp.json"], "mcpServers"),  # read by pi-mcp-adapter
+    ("Claude Desktop", "Library/Application Support/Claude",
+     ["Library/Application Support/Claude/claude_desktop_config.json"], "mcpServers"),
+]
+PYTHON = "/usr/bin/python3"
+
+
+def agent_entry(name, key, server):
+    if key == "mcp":  # opencode
+        return {"type": "local", "command": [PYTHON, server], "enabled": True}
+    if name == "Cursor":
+        return {"command": PYTHON, "args": [server], "env": {"TAKES_TOOLS": "core"}}
+    return {"command": PYTHON, "args": [server]}
+
+
+def server_scripts(value):
+    """The takes_mcp.py paths an entry (or `mcp get` output) names."""
+    if isinstance(value, dict):
+        return [p for v in value.values() for p in server_scripts(v)]
+    if isinstance(value, list):
+        return [p for v in value for p in server_scripts(v)]
+    if isinstance(value, str):
+        return [w for w in value.split() if w.endswith("takes_mcp.py")]
+    return []
+
+
+def entry_ok(value, name=""):
+    """True when an entry needs nothing: made by hand, or its script is there. A Cursor entry
+    without env gets the short tool list; one with env (TAKES_TOOLS=all: every tool) stays."""
+    paths = server_scripts(value)
+    if not paths:
+        return True
+    if name == "Cursor" and isinstance(value, dict) and "env" not in value:
+        return False
+    return any(os.path.exists(p) for p in paths)
+
+
+def find_cli(name, home):
+    """In ~/.local/bin, Claude's own folder, or on PATH (the app passes the login shell's)."""
+    for d in (home + "/.local/bin", home + "/.claude/local"):
+        if os.access(os.path.join(d, name), os.X_OK):
+            return os.path.join(d, name)
+    return shutil.which(name)
+
+
+def setup_cli(name, cli, scope, server, add):
+    def run(*args):
+        try:
+            r = subprocess.run([cli, "mcp"] + list(args), capture_output=True, text=True, timeout=30,
+                               stdin=subprocess.DEVNULL)
+            return r.returncode == 0, r.stdout + r.stderr
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return False, str(e)
+    there, out = run("get", "takes")
+    if there and entry_ok(out):
+        return "ok"
+    if not there and not add:
+        return "left out"
+    if there:
+        run("remove", "takes", *scope)
+    ok, out = run("add", "takes", *scope, "--", PYTHON, server)
+    if not ok:
+        return "failed: " + (out.strip().splitlines() or ["mcp add did not work"])[-1]
+    return "updated" if there else "added"
+
+
+def setup_file(name, paths, key, server, add):
+    path = next((p for p in paths if os.path.exists(p)), paths[0])
+    data = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                text = f.read()
+            data = json.loads(text) if text.strip() else {}
+        except (OSError, ValueError):
+            return "skipped: %s is not plain JSON" % os.path.basename(path)
+        if not isinstance(data, dict):
+            return "skipped: %s is not plain JSON" % os.path.basename(path)
+    servers = data.get(key)
+    if servers is not None and not isinstance(servers, dict):
+        return "skipped: %s in %s is not a list of servers" % (key, os.path.basename(path))
+    servers = servers or {}
+    there = "takes" in servers
+    if there and entry_ok(servers["takes"], name):
+        return "ok"
+    if not there and not add:
+        return "left out"
+    if key == "mcp" and not data:
+        data["$schema"] = "https://opencode.ai/config.json"
+    servers["takes"] = agent_entry(name, key, server)
+    data[key] = servers
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".takes-tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
+    return "updated" if there else "added"
+
+
+def agents_status(home=None):
+    """Settings › Agents (2026-10-11): each agent Takes knows, whether it is on this Mac, and whether
+    it has the takes server. Reads only; changes nothing."""
+    home = home or os.path.expanduser("~")
+    out = []
+    for name, cmd, _ in AGENT_CLIS:
+        cli = find_cli(cmd, home)
+        connected = False
+        if cli:
+            try:
+                r = subprocess.run([cli, "mcp", "get", "takes"], capture_output=True, text=True, timeout=30,
+                                   stdin=subprocess.DEVNULL)
+                connected = r.returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        out.append({"name": name, "found": bool(cli), "connected": connected})
+    for name, folder, files, key in AGENT_FILES:
+        found = os.path.exists(os.path.join(home, folder))
+        connected = False
+        for f in files:
+            try:
+                with open(os.path.join(home, f)) as fh:
+                    servers = (json.load(fh) or {}).get(key)
+                connected = isinstance(servers, dict) and "takes" in servers
+                break
+            except (OSError, ValueError, AttributeError):
+                continue
+        out.append({"name": name, "found": found, "connected": connected})
+    return out
+
+
+def setup_agents(server, home=None, once=False, only=None):
+    """[(agent, status)] for each agent on this Mac. Statuses: added, updated, ok, left out (once:
+    added before, then removed by the user), skipped: why, failed: why. `only`: just that agent
+    (the Connect button in Settings › Agents)."""
+    home = home or os.path.expanduser("~")
+    server = os.path.abspath(server)
+    state = os.path.join(home, "Library/Application Support/Takes/agents.json")
+    try:
+        with open(state) as f:
+            done = set(json.load(f))
+    except (OSError, ValueError):
+        done = set()
+    out = []
+    for name, cmd, scope in AGENT_CLIS:
+        cli = find_cli(cmd, home)
+        if cli and only in (None, name):
+            add = not once or name == "Claude Code" or name not in done
+            out.append((name, setup_cli(name, cli, scope, server, add)))
+    for name, folder, files, key in AGENT_FILES:
+        if os.path.exists(os.path.join(home, folder)) and only in (None, name):
+            add = not once or name not in done
+            out.append((name, setup_file(name, [os.path.join(home, f) for f in files], key, server, add)))
+    done |= {n for n, s in out if s in ("added", "updated", "ok")}
+    try:
+        os.makedirs(os.path.dirname(state), exist_ok=True)
+        with open(state, "w") as f:
+            json.dump(sorted(done), f)
+    except OSError:
+        pass
+    return out
 
 
 def main():
@@ -7287,7 +13889,14 @@ def main():
 
 
 if __name__ == "__main__":
-    if sys.argv[1:2] == ["--voice-run"]:
+    if sys.argv[1:2] == ["--setup"]:
+        rest = sys.argv[2:]
+        only = rest[rest.index("--only") + 1] if "--only" in rest[:-1] else None
+        for agent, status in setup_agents(__file__, once="--once" in rest, only=only):
+            print("%s: %s" % (agent, status))
+    elif sys.argv[1:2] == ["--agents"]:
+        print(json.dumps(agents_status()))
+    elif sys.argv[1:2] == ["--voice-run"]:
         voice_run(*sys.argv[2:5])
     elif sys.argv[1:2] == ["--take-cut"]:
         take_cut(sys.argv[2], sys.argv[3])
@@ -7295,8 +13904,20 @@ if __name__ == "__main__":
         save_broll(sys.argv[2], sys.argv[3])
     elif sys.argv[1:2] == ["--broll-describe"]:
         broll_describe(sys.argv[2], rename="--rename" in sys.argv[3:])
+    elif sys.argv[1:2] == ["--idea-thumb"]:
+        idea_thumb_run(sys.argv[2])
+    elif sys.argv[1:2] == ["--ideas"]:  # the app's Ideas board and the phone: one call, JSON in and out
+        try:
+            res = ideas_call(sys.argv[2], json.loads(sys.argv[3] if len(sys.argv) > 3 else "{}"))
+        except (ValueError, KeyError) as e:
+            res = {"error": str(e)}
+        print(json.dumps(res))
     elif sys.argv[1:2] == ["--sketch-run"]:
         sketch_run(sys.argv[2], retry="--retry" in sys.argv[3:])
+    elif sys.argv[1:2] == ["--detach"]:
+        detach_exec(sys.argv[2:])
+    elif sys.argv[1:2] == ["--job-run"]:
+        job_run(sys.argv[2], sys.argv[3])
     elif sys.argv[1:2] == ["--higgsfield-run"]:
         higgsfield_run(sys.argv[2], sys.argv[3])
     elif sys.argv[1:2] == ["--replicate-run"]:
@@ -7337,5 +13958,35 @@ if __name__ == "__main__":
         print(json.dumps(res))
     elif sys.argv[1:2] == ["--voice-mix"]:
         voice_mix(*sys.argv[2:4])
+    elif sys.argv[1:2] == ["--prepare"]:  # the app saved a take: start its prepare job, return at once
+        app_prepare(sys.argv[2], int(sys.argv[3]))
+    elif sys.argv[1:2] == ["--prepare-run"]:  # the prepare job's command, in the session folder
+        os.chdir(sys.argv[2])
+        signal.signal(signal.SIGTERM, stop_now)
+        prepare_run(sys.argv[3:])
+    elif sys.argv[1:2] == ["--cut-run"]:  # the cut job's command, in the session folder
+        os.chdir(sys.argv[2])
+        signal.signal(signal.SIGTERM, stop_now)
+        try:
+            cut_run(sys.argv[3])
+        except (Exception, SystemExit) as e:  # the last line is the reason the Jobs row shows
+            if os.path.exists(sys.argv[3]):
+                os.remove(sys.argv[3])
+            if isinstance(e, SystemExit):
+                raise
+            say("Takes could not cut it: %s" % e)
+            sys.exit(1)
+    elif sys.argv[1:2] == ["--render-run"]:  # the render job's command, in the session folder
+        os.chdir(sys.argv[2])
+        signal.signal(signal.SIGTERM, stop_now)
+        try:
+            render_run(sys.argv[3])
+        except SystemExit:
+            raise
+        except BaseException as e:  # the last line is the reason the Jobs row shows
+            say(render_failed(e))
+            sys.exit(1)
+    elif sys.argv[1:2] == ["--session-id"]:
+        print(session_id(os.path.normpath(os.path.abspath(sys.argv[2]))))
     else:
         main()

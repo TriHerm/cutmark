@@ -26,7 +26,7 @@ Paste this in Terminal:
 curl -fsSL https://gettakes.app/install | bash
 ```
 
-It installs Takes, ffmpeg and Claude Code, signs you in to Claude and opens Takes. Run it again to update. You can [read the script](https://gettakes.app/install) first: it is 85 lines.
+It installs Takes, ffmpeg, Apple's developer tools and Claude Code, signs you in to Claude and opens Takes. Run it again to update. You can [read the script](https://gettakes.app/install) first: it is 94 lines.
 
 <details>
 <summary>Other ways to install</summary>
@@ -54,13 +54,20 @@ To install it you need Xcode and an Apple ID: `TAKES_TEAM=<team id> ios/install.
 
 ## How it works
 
-Your library is plain folders in `~/Movies/Takes`. The app records into them, Claude Code reads and writes them through the `takes` MCP server, and the app updates when a file changes. On its first launch Takes adds the server and two skills (`takes-storyboard`, `takes-video-edit`) to Claude Code, so you can also ask from any terminal.
+Your library is plain folders in `~/Movies/Takes`. The app records into them, your agent reads and writes them through the `takes` MCP server, and the app updates when a file changes. The chat panel in the app runs on Claude Code or Codex, on your own plan: the line under "Takes" in the chat picks the agent and the model, and Settings › Agents shows which agents can open your library.
+
+The server works with any MCP agent. On its first launch Takes adds it to each one on your Mac: Claude Code, Codex, Cursor, Gemini CLI, opencode, pi (with pi-mcp-adapter) and Claude Desktop. It also adds two skills (`takes-storyboard`, `takes-video-edit`) to `~/.claude/skills` and `~/.agents/skills`. So you can ask from any of them too. Another agent, or one you installed later: Settings › Agents › Connect, or `python3 /Applications/Takes.app/Contents/Resources/takes_mcp.py --setup`.
+
+- Start a new agent session after the first launch: a session that was already open does not see the server.
+- **Cursor** gets a short list of 30 tools (script, takes, storyboard, edit, jobs, comments, posts, plan), because Cursor uses only about 40 tools across all its servers. For every tool, set `"env": {"TAKES_TOOLS": "all"}` in the `takes` entry of `~/.cursor/mcp.json`.
+- **Gemini CLI** turns MCP servers off in folders you have not trusted. Trust the folder once when Gemini asks.
+- The server runs on the Python in Apple's developer tools. Without them, Takes' Finish setup has an Install button.
 
 ```mermaid
 flowchart LR
     app["<b>Takes.app</b><br/>record · review"]
     lib[("<b>~/Movies/Takes</b><br/>scripts · takes · posts")]
-    claude["<b>Claude Code</b><br/>chat panel or terminal"]
+    claude["<b>Your agent</b><br/>chat panel, Claude Code,<br/>Codex, Cursor, …"]
     phone["<b>iPhone</b>"]
     app <--> lib
     claude -- "takes MCP" --> lib

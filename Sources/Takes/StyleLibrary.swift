@@ -559,6 +559,7 @@ struct StylesBoard: View {
     private func card(_ c: StyleCard) -> some View {
         let dir = StyleLib.style(c.name, root: root)
         let isOpen = dir.standardizedFileURL == openDir?.standardizedFileURL
+        let app = app  // the menu rows run outside body
         return VStack(alignment: .leading, spacing: 10) {
             Group {
                 if c.preview != nil {
@@ -593,15 +594,15 @@ struct StylesBoard: View {
                         Text("Not used yet").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
                             .lineLimit(1).fixedSize()
                     } else {
-                        Menu {
-                            ForEach(c.usedBy, id: \.self) { s in
-                                Button(s.lastPathComponent) { app.board = nil; app.go(s) }
-                            }
-                        } label: {
+                        TakesMenuButton(help: "The videos with edits in this style. Pick one to open it.") {
                             Text("In \(c.usedBy.count) video\(c.usedBy.count == 1 ? "" : "s")").font(Theme.sans(11.5))
+                                .foregroundStyle(Theme.ink).contentShape(Rectangle())
+                        } content: {
+                            for s in c.usedBy {
+                                MenuButton(s.lastPathComponent, icon: "film") { app.board = nil; app.go(s) }
+                            }
                         }
-                        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                        .help("The videos with edits in this style. Pick one to open it.")
+                        .fixedSize()
                     }
                     Spacer(minLength: 0)
                     if c.isNew {
@@ -618,12 +619,12 @@ struct StylesBoard: View {
         .contentShape(Rectangle())
         .onTapGesture { opened = dir }
         .help([c.description, c.source.map { "From \($0)" }].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n"))
-        .contextMenu {
-            Button("Show in Finder") { NSWorkspace.shared.revealSoon([dir]) }
-            if let p = c.preview { Button("Open to comment on it") { opened = dir; app.styleFile = p } }
-            if c.preview != nil { Button("Render the preview again") { ask(Self.previewAsk(c.name)) } }
-            Divider()
-            Button("Move to Trash") { trash(c) }
+        .takesContextMenu {
+            MenuButton("Show in Finder", icon: "folder") { NSWorkspace.shared.revealSoon([dir]) }
+            if let p = c.preview { MenuButton("Open to comment on it", icon: "text.bubble") { opened = dir; app.styleFile = p } }
+            if c.preview != nil { MenuButton("Render the preview again", icon: "arrow.clockwise") { ask(Self.previewAsk(c.name)) } }
+            MenuDivider()
+            MenuButton("Move to Trash", icon: "trash", danger: true) { trash(c) }
         }
     }
 
@@ -739,26 +740,8 @@ struct StyleChip: View {
             if names.isEmpty {
                 Text("none yet").font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
             } else {
-                Menu {
-                    Button { set(nil) } label: {
-                        let t = "Same as the project (\(projectStyle ?? "none"))"
-                        if own == nil { Label(t, systemImage: "checkmark") } else { Text(t) }
-                    }
-                    Divider()
-                    ForEach(names, id: \.self) { n in
-                        Button { set(n) } label: {
-                            if n == own { Label(n, systemImage: "checkmark") } else { Text(n) }
-                        }
-                    }
-                    if let own, own != projectStyle {
-                        Divider()
-                        Button("Use \(own) for All of \(projectURL.lastPathComponent)") {
-                            StyleLib.choose(own, project: projectURL)
-                            readProjectStyle()
-                            set(nil)
-                        }
-                    }
-                } label: {
+                let own = own, projectStyle = projectStyle, names = names
+                TakesMenuButton(help: "The style Takes edits this video in") {
                     // Our own label: the system button drew dark text on the dark theme (2026-10-06).
                     HStack(spacing: 4) {
                         Text(own ?? projectStyle ?? "none").font(Theme.sans(12.5, .semibold))
@@ -769,9 +752,22 @@ struct StyleChip: View {
                     .padding(.horizontal, 9).frame(height: 24)
                     .background(Theme.hover, in: RoundedRectangle(cornerRadius: 6))
                     .contentShape(Rectangle())
+                } content: {
+                    MenuButton("Same as the project (\(projectStyle ?? "none"))", icon: "folder", checked: own == nil) { set(nil) }
+                    MenuDivider()
+                    for n in names {
+                        MenuButton(n, icon: "paintpalette", checked: n == own) { set(n) }
+                    }
+                    if let own, own != projectStyle {
+                        MenuDivider()
+                        MenuButton("Use \(own) for All of \(projectURL.lastPathComponent)", icon: "square.stack") {
+                            StyleLib.choose(own, project: projectURL)
+                            readProjectStyle()
+                            set(nil)
+                        }
+                    }
                 }
-                .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
-                .help("The style Takes edits this video in")
+                .fixedSize()
                 Text(own == nil ? "from the project" : "this video only")
                     .font(Theme.sans(11)).foregroundStyle(Theme.faint).lineLimit(1)
             }
@@ -818,8 +814,8 @@ struct LibrarySection: View {
                 Text(subtitle).font(Theme.sans(12)).foregroundStyle(Theme.muted).lineLimit(1)
                 Spacer()
             }
-            .contextMenu {
-                if store.exists { Button("Show in Finder") { NSWorkspace.shared.revealSoon([dir]) } }
+            .takesContextMenu {
+                if store.exists { MenuButton("Show in Finder", icon: "folder") { NSWorkspace.shared.revealSoon([dir]) } }
             }
             if !store.hasContent {
                 empty
@@ -851,6 +847,7 @@ struct LibrarySection: View {
     @ViewBuilder private var guide: some View {
         if let readme = store.readme {
             let url = dir.appending(path: "README.md")
+            let app = app  // the right-click rows run outside body
             Button { show(url) } label: {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 6) {
@@ -872,7 +869,7 @@ struct LibrarySection: View {
             }
             .buttonStyle(.plain)
             .help("Read and comment on README.md")
-            .contextMenu { fileMenu(url, "README.md") }
+            .takesContextMenu { fileMenu(url, "README.md", app) }
         }
     }
 
@@ -889,6 +886,7 @@ struct LibrarySection: View {
 
     private var tokens: some View {
         let url = dir.appending(path: "tokens.json")
+        let app = app
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
                 Label("Colours and type", systemImage: "swatchpalette").font(Theme.sans(12, .semibold)).foregroundStyle(Theme.accentInk)
@@ -935,7 +933,7 @@ struct LibrarySection: View {
         .padding(16)
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.border))
-        .contextMenu { fileMenu(url, "tokens.json") }
+        .takesContextMenu { fileMenu(url, "tokens.json", app) }
     }
 
     static func font(_ t: TypeSample) -> NSFont {
@@ -968,6 +966,7 @@ struct LibrarySection: View {
         let a = shown(item)
         let path = "assets/\(item.group)/"
         let openCount = item.versions.reduce(0) { $0 + open(path + $1.name) }
+        let app = app
         return VStack(alignment: .leading, spacing: 5) {
             AssetTile(asset: Asset(url: a.url, group: item.group, name: item.name, size: a.size, modified: a.modified),
                       selected: app.preview == a.url, openComments: openCount)
@@ -975,7 +974,7 @@ struct LibrarySection: View {
                 .gesture(TapGesture(count: 2).onEnded { NSWorkspace.shared.openSoon(a.url) })
                 .simultaneousGesture(TapGesture().onEnded { if NSApp.firstClick { show(a.url) } })
                 .onDrag { NSItemProvider(contentsOf: a.url) ?? NSItemProvider() }
-                .contextMenu { fileMenu(a.url, path + a.name) }
+                .takesContextMenu { fileMenu(a.url, path + a.name, app) }
             if let n = store.notes[path + a.name], !n.note.isEmpty {
                 Text(n.note).font(Theme.sans(11)).foregroundStyle(Theme.muted).lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1023,21 +1022,22 @@ struct LibrarySection: View {
 
     // MARK: Menu
 
-    @ViewBuilder private func fileMenu(_ url: URL, _ rel: String) -> some View {
-        Button("Open") { NSWorkspace.shared.openSoon(url) }
-        Button("Reveal in Finder") { NSWorkspace.shared.revealSoon([url]) }
-        Button("Copy Path") {
+    /// A library file's right-click rows (Takes menu kit, 2026-10-11).
+    @MenuBuilder private func fileMenu(_ url: URL, _ rel: String, _ app: AppModel) -> [MenuItem] {
+        MenuButton("Open", icon: "arrow.up.forward.app") { NSWorkspace.shared.openSoon(url) }
+        MenuButton("Reveal in Finder", icon: "folder") { NSWorkspace.shared.revealSoon([url]) }
+        MenuButton("Copy Path", icon: "doc.on.doc") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(url.path, forType: .string)
         }
-        Divider()
-        Menu("Copy to Library") {
-            ForEach(copyTargets, id: \.dir) { t in
-                Button(t.name) { copy(url, rel, to: t.dir, name: t.name) }
+        MenuDivider()
+        MenuGroup("Copy to Library", icon: "square.on.square") {
+            for t in copyTargets {
+                MenuButton(t.name, icon: "books.vertical") { copy(url, rel, to: t.dir, name: t.name) }
             }
         }
-        Divider()
-        Button("Move to Trash", role: .destructive) {
+        MenuDivider()
+        MenuButton("Move to Trash", icon: "trash", danger: true) {
             if app.preview == url { app.preview = nil }
             try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
             store.scan(dir)

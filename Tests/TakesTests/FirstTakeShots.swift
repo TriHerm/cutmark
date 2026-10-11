@@ -84,9 +84,9 @@ let firstTakeMedia = ProcessInfo.processInfo.environment["TAKES_FIRSTTAKE_MEDIA"
 
     @Test func editingWaitsForSetup() {
         let s = Setup.shared
-        let was = (s.claude, s.signedIn, s.ffmpeg)
-        defer { (s.claude, s.signedIn, s.ffmpeg) = was }
-        (s.claude, s.signedIn, s.ffmpeg) = (.ok, .missing, .ok)
+        let was = (s.claude, s.signedIn, s.ffmpeg, s.devTools)
+        defer { (s.claude, s.signedIn, s.ffmpeg, s.devTools) = was }
+        (s.claude, s.signedIn, s.ffmpeg, s.devTools) = (.ok, .missing, .ok, .ok)
         #expect(!FirstTake.shared.canEdit)
         s.signedIn = .ok
         #expect(FirstTake.shared.canEdit)

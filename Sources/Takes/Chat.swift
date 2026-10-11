@@ -24,6 +24,10 @@ struct ChatMessage: Codable, Identifiable, Hashable {
     /// When it was sent or came in. Optional: messages from before 2026-10-03 have none.
     var at: Date? = Date()
 
+    /// The toolID of a line that says a job ended (Jobs.swift): its own tick line, never folded.
+    static let jobNote = "takes-job"
+    var isJobNote: Bool { role == .tool && toolID == Self.jobNote }
+
     init(role: Role, text: String, toolID: String? = nil, done: Bool = true) {
         self.role = role; self.text = text; self.toolID = toolID; self.done = done
     }
@@ -55,6 +59,11 @@ struct ChatLog: Codable {
     /// What the user typed and has not sent yet. Kept on disk, so it stays through tab and session
     /// switches, a closed panel and a quit (2026-10-04).
     var draft: String?
+    /// The agent this conversation runs on (ChatAgents.swift): "claude" or "codex". Nil: Claude Code
+    /// (logs from before 2026-10-11).
+    var agent: String?
+    /// Codex's own thread id, which `codex exec resume` takes. Claude Code uses `conversation`.
+    var thread: String?
 }
 
 /// Tokens in Claude's context window, from the usage the CLI reports with each reply.
@@ -126,7 +135,11 @@ struct ChatParser {
     var messages: [ChatMessage]
     var started = false
     var finished = false
+    /// The conversation compacted: its rules may be gone from it (the owner resets them).
+    var compacted = false
     var context: ChatContext?
+    /// Codex: the thread id from thread.started.
+    var thread: String?
 
     init(_ messages: [ChatMessage], context: ChatContext? = nil) {
         self.messages = messages
@@ -139,6 +152,7 @@ struct ChatParser {
               let type = o["type"] as? String else { return }
         // A subagent's own steps: the panel shows only the call that started it.
         if let parent = o["parent_tool_use_id"] as? String, !parent.isEmpty { return }
+        if type.contains(".") { consumeCodex(type, o); return }
         switch type {
         case "system":
             switch o["subtype"] as? String {
@@ -151,6 +165,7 @@ struct ChatParser {
                 if let before, let after { line += " · \(ChatContext.short(before)) → \(ChatContext.short(after)) tokens" }
                 messages.append(ChatMessage(role: .tool, text: line))
                 if let after { setUsed(after) }
+                compacted = true
             default: break
             }
         case "stream_event":
@@ -212,6 +227,76 @@ struct ChatParser {
         }
     }
 
+    /// `codex exec --json` (2026-10-11): thread.started, item.started / item.completed (agent_message,
+    /// mcp_tool_call, command_execution, file_change, web_search), turn.completed, turn.failed.
+    /// Its "error" items are warnings (a model without metadata, hook trust): the panel skips them.
+    private mutating func consumeCodex(_ type: String, _ o: [String: Any]) {
+        switch type {
+        case "thread.started":
+            started = true
+            thread = o["thread_id"] as? String
+        case "item.started", "item.completed":
+            guard let item = o["item"] as? [String: Any], let kind = item["type"] as? String else { return }
+            let id = item["id"] as? String
+            let done = type == "item.completed"
+            if kind == "agent_message" {
+                let t = (item["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if done && !t.isEmpty { messages.append(ChatMessage(role: .claude, text: t)) }
+                return
+            }
+            guard let line = Self.describeCodex(kind, item) else { return }
+            if let i = messages.lastIndex(where: { $0.toolID == id && id != nil && $0.role == .tool }) {
+                if done { messages[i].done = true }
+            } else {
+                messages.append(ChatMessage(role: .tool, text: line, toolID: id, done: done))
+            }
+        case "turn.completed":
+            finished = true
+            closeOpen()
+            if let u = o["usage"] as? [String: Any] {
+                let used = (u["input_tokens"] as? Int ?? 0) + (u["output_tokens"] as? Int ?? 0)
+                context = ChatContext(used: used, window: 272_000)
+            }
+        case "turn.failed":
+            finished = true
+            closeOpen()
+            let raw = (o["error"] as? [String: Any])?["message"] as? String ?? ""
+            messages.append(ChatMessage(role: .error, text: Self.codexError(raw)))
+        default: break
+        }
+    }
+
+    /// Codex wraps the server's error as JSON in the message: show its inner message.
+    static func codexError(_ raw: String) -> String {
+        if let o = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+           let m = ((o["error"] as? [String: Any])?["message"] as? String) ?? (o["message"] as? String), !m.isEmpty {
+            return m
+        }
+        return raw.isEmpty ? "The chat stopped with an error." : raw
+    }
+
+    /// The line a Codex step shows, in the same words as Claude's ("Bash · …", "get_session").
+    static func describeCodex(_ kind: String, _ item: [String: Any]) -> String? {
+        switch kind {
+        case "mcp_tool_call":
+            return describe(item["tool"] as? String ?? "Tool", item["arguments"] as? [String: Any] ?? [:])
+        case "command_execution":
+            var c = item["command"] as? String ?? ""
+            // "/bin/zsh -lc 'ffmpeg …'": only the command.
+            if let r = c.range(of: "sh -lc '"), c.hasSuffix("'"), r.upperBound < c.endIndex {
+                c = String(c[r.upperBound..<c.index(before: c.endIndex)])
+            }
+            return describe("Bash", ["command": c])
+        case "file_change":
+            let files = (item["changes"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String }
+            return describe("Edit", files.first.map { ["file_path": $0] } ?? [:])
+        case "web_search":
+            return describe("WebSearch", ["query": item["query"] as? String ?? ""])
+        default:
+            return nil
+        }
+    }
+
     private mutating func setUsed(_ n: Int) {
         context = ChatContext(used: n, window: context?.window ?? 200_000)
     }
@@ -263,7 +348,7 @@ enum ChatItem: Identifiable, Hashable {
             run = []
         }
         for m in messages {
-            if m.role == .tool { run.append(m) } else { flush(); items.append(.message(m)) }
+            if m.role == .tool && !m.isJobNote { run.append(m) } else { flush(); items.append(.message(m)) }
         }
         flush()
         return items
@@ -303,6 +388,8 @@ final class ClaudeChat {
     private(set) var context: ChatContext?
     /// A reply came while the panel was shut.
     var unread = false
+    /// Changes when the conversation is swapped (new, past, other agent), so the agent line redraws.
+    private(set) var agentTick = 0
     @ObservationIgnored private var log: ChatLog
     @ObservationIgnored private var process: Process?
     @ObservationIgnored private var parser: ChatParser?
@@ -337,11 +424,42 @@ final class ClaudeChat {
         if !queued.isEmpty { Task { @MainActor [weak self] in self?.sendPending() } }
     }
 
+    /// The agent this conversation runs on: the one it started on. Before its first reply: the one
+    /// picked for it in the chat's card, else the pick in Settings › Agents (ChatAgents.swift).
+    var agent: ChatAgent {
+        _ = agentTick
+        if log.started { return ChatAgent(rawValue: log.agent ?? "") ?? .claude }
+        return log.agent.flatMap(ChatAgent.init(rawValue:)) ?? ChatAgent.current
+    }
+
+    /// The CLI of this conversation's agent.
+    var exePath: String? { agent == .claude ? Self.claudePath : ChatAgent.codex.path }
+
+    /// Picks the agent for this chat and the next ones. A conversation that started on the other
+    /// agent cannot go on there: a new one starts, and the old one goes to the history. True then.
+    /// `remember`: new conversations start on it too (false in tests, which run side by side).
+    @discardableResult
+    func switchAgent(to a: ChatAgent, remember: Bool = true) -> Bool {
+        if remember { ChatAgent.current = a }
+        defer { agentTick += 1 }
+        guard !running else { return false }
+        let fresh = log.started && agent != a
+        if fresh { reset() }
+        log.agent = a.rawValue
+        save()
+        return fresh
+    }
+
+    /// Tests point this at a fake codex.
+    nonisolated(unsafe) static var codexOverride: String?
+
     /// Sends what is queued, if nothing runs.
     func sendPending() {
         // Only the app (or a test with a fake claude): a test run must never start the real one.
-        guard Bundle.main.bundleURL.pathExtension == "app" || Self.claudeOverride != nil else { return }
-        guard !running, !queued.isEmpty, let claude = Self.claudePath else { return }
+        guard Bundle.main.bundleURL.pathExtension == "app" || Self.claudeOverride != nil || Self.codexOverride != nil else { return }
+        guard !running, !queued.isEmpty, let claude = exePath else { return }
+        // A rename since the last run: the title comes from the folder as it is now (2026-10-11).
+        follow()
         let title = session.flatMap { Store.readMeta($0)?.title } ?? session?.lastPathComponent ?? boardName
         runQueued(claude: claude, title: title, onStage: nil, cutOff: true)
     }
@@ -375,13 +493,21 @@ final class ClaudeChat {
     /// chat file along. Find that folder by the conversation id and use it from now on.
     @discardableResult
     func follow() -> Bool {
-        guard let old = session, !FileManager.default.fileExists(atPath: old.path) else { return false }
-        guard let found = Self.find(log.conversation, under: old.deletingLastPathComponent().deletingLastPathComponent()) else { return false }
+        guard let old = session, old != lost, !FileManager.default.fileExists(atPath: old.path) else { return false }
+        // Not found: the session went to the Trash. Search once, not on every session you open
+        // (each search reads every chat log in the library; 2026-10-11).
+        guard let found = Self.find(log.conversation, under: old.deletingLastPathComponent().deletingLastPathComponent()) else {
+            lost = old
+            return false
+        }
         session = found
         file = Self.file(found)
         archive = found.appending(path: ".claude-chats")
         return true
     }
+
+    /// The folder follow() searched for and did not find.
+    @ObservationIgnored private var lost: URL?
 
     static func find(_ conversation: String, under root: URL) -> URL? {
         let fm = FileManager.default
@@ -432,6 +558,54 @@ final class ClaudeChat {
     /// "bypassPermissions" (full access, like his terminal) or "acceptEdits".
     static var access: String { UserDefaults.standard.string(forKey: "claudeAccess") ?? "bypassPermissions" }
 
+    /// `codex exec --json` for a new thread, or `codex exec resume <thread>` (2026-10-11). The ask
+    /// comes on stdin ("-"). Full access maps to Codex's danger-full-access sandbox, edit-only to
+    /// workspace-write; it never asks (there is no one to answer). Codex hands its MCP servers only
+    /// a few variables, so the takes server gets the chat's own through -c, when Codex has it.
+    static func codexArguments(context: String, model: String, thread: String?, chat: String, board: String?,
+                                           access: String? = nil, takesInCodex: Bool = codexHasTakes) -> [String] {
+        let access = access ?? Self.access
+        var a = ["exec"]
+        if thread != nil { a.append("resume") }
+        a += ["--json", "--skip-git-repo-check", "-m", model,
+              "-c", "sandbox_mode=\"\(access == "acceptEdits" ? "workspace-write" : "danger-full-access")\"",
+              "-c", "approval_policy=\"never\"",
+              "-c", "developer_instructions=" + toml(context)]
+        if takesInCodex {
+            a += ["-c", "mcp_servers.takes.env.TAKES_CHAT=\"1\"", "-c", "mcp_servers.takes.env.TAKES_CHAT_ID=" + toml(chat)]
+            if let board { a += ["-c", "mcp_servers.takes.env.TAKES_BOARD=" + toml(board)] }
+        }
+        if let thread { a.append(thread) }
+        a.append("-")
+        return a
+    }
+
+    /// A TOML basic string, as `codex -c key=value` reads it.
+    nonisolated static func toml(_ s: String) -> String {
+        var out = "\""
+        for u in s.unicodeScalars {
+            switch u {
+            case "\\": out += "\\\\"
+            case "\"": out += "\\\""
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            default:
+                if u.value < 0x20 || u.value == 0x7F { out += String(format: "\\u%04X", u.value) } else { out.unicodeScalars.append(u) }
+            }
+        }
+        return out + "\""
+    }
+
+    /// Codex has the takes server in its config (AgentSetup adds it). Without it, -c on its env
+    /// would make a server with no command, and Codex would not start.
+    nonisolated static var codexHasTakes: Bool {
+        let home = ProcessInfo.processInfo.environment["CODEX_HOME"].map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: ".codex")
+        let text = (try? String(contentsOf: home.appending(path: "config.toml"), encoding: .utf8)) ?? ""
+        return text.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces).hasPrefix("[mcp_servers.takes") }
+    }
+
     /// Takes chats compact their conversation at this share of the context window, not near the end
     /// (2026-10-09: long chats grew slow and costly). Only Takes' own Claude processes get it: his
     /// terminal and other apps keep their own setting.
@@ -439,13 +613,36 @@ final class ClaudeChat {
 
     /// The environment of a chat's Claude process: no variables from a Claude that started Takes,
     /// the login shell's PATH, and the early compaction.
-    nonisolated static func environment() -> [String: String] {
+    /// `board`: a chat without a session. Its jobs tell no session chat when they end (TAKES_BOARD).
+    nonisolated static func environment(board: String? = nil) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         for k in env.keys where k.hasPrefix("CLAUDECODE") || k.hasPrefix("CLAUDE_CODE_") { env[k] = nil }
         env["PATH"] = shellPath
         env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] = String(compactAt)
+        // The takes MCP loads its main tools at the start only for Takes' own chats (2026-10-10).
+        env["TAKES_CHAT"] = "1"
+        if let board { env["TAKES_BOARD"] = board } else { env["TAKES_BOARD"] = nil }
         return env
     }
+
+    /// The library folder, as Library.init finds it.
+    nonisolated static var libraryRoot: URL {
+        UserDefaults.standard.string(forKey: "root").map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes")
+    }
+
+    /// The takes MCP keeps the rules this chat has seen in this file (2026-10-10). Deleted when the
+    /// rules may have left the conversation (a compaction, a run that ended early), so the next
+    /// get_session shows them again.
+    nonisolated static func rulesSeenFile(root: URL, conversation: String) -> URL {
+        root.appending(path: "_library/.rules-seen/\(conversation).json")
+    }
+
+    nonisolated static func forgetRules(root: URL, conversation: String) {
+        try? FileManager.default.removeItem(at: rulesSeenFile(root: root, conversation: conversation))
+    }
+
+    private func forgetRules() { Self.forgetRules(root: Self.libraryRoot, conversation: log.conversation) }
 
     /// The login shell's PATH, so Claude finds ffmpeg, python and the rest. Read once.
     nonisolated static let shellPath: String = {
@@ -546,7 +743,8 @@ final class ClaudeChat {
 
     /// Tests point this at a fake claude.
     nonisolated(unsafe) static var claudeOverride: String?
-    static var claudePath: String? { claudeOverride ?? Namer.claudePath }
+    /// Under test there is no fallback to the real claude, even while another suite clears the override.
+    static var claudePath: String? { claudeOverride ?? (AppModel.testing ? nil : Namer.claudePath) }
 
     /// Counts runs. A run's late callbacks (output, its end) are dropped once a newer run or a
     /// reset took over (2026-10-03).
@@ -585,12 +783,22 @@ final class ClaudeChat {
         return t == "/compact" || t.hasPrefix("/compact ") || t.hasPrefix("/compact\n")
     }
 
+    /// Notes about jobs that ended while the chat could not hear them (JobBoard.takeHeld): they go
+    /// in front of the user's next message. Set by AppModel.
+    static var heldNotes: (@MainActor (URL) -> (text: String, lines: [ChatMessage])?)?
+
+    /// The user pressed Stop, and nothing ran since: a job's end waits for his next message.
+    var stoppedByYou: Bool { stopped }
+
     /// `now`: stop the run and go on with this message (steer). Otherwise it waits its turn.
     /// `origin`: where on his phone the user sent it from (Phone.origin); nil from the Mac.
     /// `shown`: what the panel shows for a button's ask; Claude gets `text`, the instructions.
-    func send(_ text: String, title: String, onStage: URL?, now: Bool = false, origin: String? = nil, shown: String? = nil) {
-        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// `notes`: a job ended (JobBoard): the panel shows these tick lines instead of a message from the user.
+    func send(_ text: String, title: String, onStage: URL?, now: Bool = false, origin: String? = nil, shown: String? = nil,
+              notes: [ChatMessage] = []) {
+        var text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
+        let shown = shown ?? text
         sent += 1
         // The newest message decides: a steer or queued message from the Mac clears the phone's note.
         self.origin = origin
@@ -604,21 +812,33 @@ final class ClaudeChat {
             queued.append(text)
             return
         }
+        // Jobs that ended while the chat was stopped or could not hear: their notes go first, as
+        // their own lines. /compact must stay alone.
+        if notes.isEmpty, let session, !Self.isCompact(text), let held = Self.heldNotes?(session) {
+            held.lines.forEach(append)
+            text = held.text + "\n\n" + text
+        }
         if running {
-            append(ChatMessage(role: .user, text: text))
+            append(ChatMessage(role: .user, text: shown))
             steer = (steer ?? "I interrupted you.") + "\n" + text
             end(process)
             return
         }
-        guard let claude = Self.claudePath else {
-            append(ChatMessage(role: .error, text: "The chat is not set up yet. Click Finish setup in the sidebar, then try again."))
+        guard let claude = exePath else {
+            append(ChatMessage(role: .error, text: agent == .codex
+                ? "Codex is not on this Mac. Pick Claude Code in the line under Takes, or install Codex and try again."
+                : "The chat is not set up yet. Click Finish setup in the sidebar, then try again."))
+            return
+        }
+        if Self.isCompact(text) && agent == .codex {
+            append(ChatMessage(role: .error, text: "Codex compacts the conversation by itself."))
             return
         }
         if Self.isCompact(text) && !log.started {
             append(ChatMessage(role: .error, text: "Nothing to compact yet."))
             return
         }
-        append(ChatMessage(role: .user, text: shown ?? text))
+        if notes.isEmpty { append(ChatMessage(role: .user, text: shown)) } else { notes.forEach(append) }
         run(text, claude: claude, title: title, onStage: onStage, recap: nil)
     }
 
@@ -646,64 +866,71 @@ final class ClaudeChat {
 
         var context: String
         if let session {
+            let id = Store.sessionID(session).map { ", session id \($0)" } ?? ""
             context = """
-            The user is talking to you from the chat panel inside his Takes app. This conversation \
-            belongs to one Takes session: "\(title)", folder \(session.path). "This video" and \
-            "this session" mean that folder. Use the takes MCP tools and the video skills as you \
-            would from the terminal. He reads your replies in a narrow panel: keep them short, \
-            no tables, no headings. He often works in another session while you run: show a \
-            finished result only with open_in_app, and never open files or apps on his screen \
+            The user is talking to you from the chat panel inside the Takes app. This conversation \
+            belongs to one Takes session: "\(title)", folder \(session.path)\(id). "This video" and \
+            "this session" mean that folder. If the folder gets a new name, the id still finds it. \
+            Use the takes MCP tools and the video skills as you \
+            would from the terminal. The user reads your replies in a narrow panel: keep them short, \
+            no tables, no headings. The user often works in another session while you run: show a \
+            finished result only with open_in_app, and never open files or apps on the user's screen \
             (hyperframes preview needs --no-open). When you show thumbnails, \
             put each image path on its own line: its card has a "Use as cover" button. If \
-            posts/linkedin.md has a cover: field, start every new edit with that image for \
-            0.1 s (see the takes-video-edit skill) and set cover_video to the new file. When he \
+            posts/linkedin.md has a cover: field, put that image in the recipe's cover \
+            (render_edit) so every new version starts with it. Build each edit version with \
+            render_edit and save it with publish_edit. When the user \
             brainstorms a video idea or asks for a storyboard, use the takes-storyboard skill: script \
-            first, then set_storyboard (it shows on the Storyboard tab). Before you edit, write or \
-            design, read get_rules for that step (what you learned from his comments) and follow them; run \
-            check_edit on a new edit before you show it; resolve each comment with a lesson.
+            first, then set_storyboard (it shows on the Storyboard tab). get_session and next_path \
+            give the rules for the step (from past comments) the first time; follow each one; \
+            render_edit checks each version it makes, and check_edit checks any other new edit \
+            before you show it; resolve each comment with a lesson.
             """
             if Features.blog {
                 context += " A blog post or article is posts/article.md (set_post platform=article: markdown with " +
-                    "his blog's components, shown as your blog shows it); the LinkedIn and X articles and the video come from it."
+                    "the blog's components, shown as your blog shows it); the LinkedIn and X articles and the video come from it."
             }
             if let onStage {
-                context += " Right now he has \(CommentStore.path(of: onStage, in: session)) open in the player."
+                context += " Right now the user has \(CommentStore.path(of: onStage, in: session)) open in the player."
             } else if UserDefaults.standard.string(forKey: "rightTab") == "post",
                       let side = Plugins.postSide(UserDefaults.standard.string(forKey: "postPlatform") ?? "") {
                 context += " " + side.context(session)
             } else if UserDefaults.standard.string(forKey: "rightTab") == "post",
                       case let p = PostPlatform.stored(UserDefaults.standard.string(forKey: "postPlatform") ?? "") {
                 // Which post he looks at, so "make it shorter" lands on the right one (2026-10-04).
-                context += " Right now he has the Post tab open on the \(p.name) side (\(p.rel))."
+                context += " Right now the user has the Post tab open on the \(p.name) side (\(p.rel))."
             }
         } else if boardName.hasPrefix("comments") {
             context = CopilotAsk.context
         } else if let plugin = Self.boardContexts[boardName] {
             context = plugin()
+        } else if let plugin = Plugins.chatPlugin(boardName)?.chatContext {
+            context = plugin()
         } else if boardName == "styles" {
             context = """
-            The user is talking to you from the Styles board inside his Takes app. It shows his named \
+            The user is talking to you from the Styles board inside the Takes app. It shows the named \
             styles (~/Movies/Takes/_library/styles/) side by side: each style's preview.mp4, its \
             guide, tokens and parts, with your notes. Use the takes MCP tools: get_library, \
             create_style, save_to_library, get_comments and reply_comment with library \
-            'style:<Name>'. A change to a part is a new version, never an overwrite. He often works \
-            elsewhere while you run: never open files or apps on his screen \
-            (hyperframes preview needs --no-open). He reads your replies in a narrow panel: keep them short, no tables, no headings.
+            'style:<Name>'. A change to a part is a new version, never an overwrite. The user often works \
+            elsewhere while you run: never open files or apps on the user's screen \
+            (hyperframes preview needs --no-open). The user reads your replies in a narrow panel: keep them short, no tables, no headings.
             """
         } else {
             context = """
-            The user is talking to you from the Performance board inside his Takes app. The board \
-            shows his LinkedIn and X numbers from ~/Movies/Takes/_library/social.json and \
+            The user is talking to you from the Performance board inside the Takes app. The board \
+            shows the LinkedIn and X numbers from ~/Movies/Takes/_library/social.json and \
             redraws by itself when that file changes. To update it, follow the "Social data" \
             runbook in your notes repo tracking/README.md: run python3 tracking/scripts/refresh_social.py \
-            from your notes repo, and when a source is OLD get the export from his \
+            from your notes repo, and when a source is OLD get the export from the user's \
             signed-in Chrome. Each NEED line is a post still missing numbers: read it on its page \
             as the runbook says, one post after the other in your one tab. Done means no OLD and \
-            no NEED line. He reads your replies in \
+            no NEED line. The user reads your replies in \
             a narrow panel: keep them short, no tables, no headings.
             """
         }
-        if !boardName.hasPrefix("comments") || session != nil { context += "\n\n" + Self.browserRules }
+        let agent = self.agent
+        if agent == .claude, !boardName.hasPrefix("comments") || session != nil { context += "\n\n" + Self.browserRules }
         context += "\n\n" + ChatRefs.howTo
         if let note = Releaser.agentNote { context += "\n\n" + note }
         if let origin { context += "\n\n" + origin }
@@ -713,12 +940,18 @@ final class ClaudeChat {
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: claude)
-        // Print mode loads Claude in Chrome only with --chrome (the terminal enables it by itself).
-        p.arguments = ["-p", "--chrome", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-                       "--permission-mode", Self.access, "--append-system-prompt", context]
-            + (log.started ? ["--resume", log.conversation] : ["--session-id", log.conversation])
+        if !log.started { log.agent = agent.rawValue }
+        if agent == .codex {
+            p.arguments = Self.codexArguments(context: context, model: agent.model.id, thread: log.started ? log.thread : nil,
+                                              chat: log.conversation, board: session == nil ? boardName : nil)
+        } else {
+            // Print mode loads Claude in Chrome only with --chrome (the terminal enables it by itself).
+            p.arguments = ["-p", "--chrome", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+                           "--permission-mode", Self.access, "--model", agent.model.id, "--append-system-prompt", context]
+                + (log.started ? ["--resume", log.conversation] : ["--session-id", log.conversation])
+        }
         p.currentDirectoryURL = Self.folder
-        p.environment = Self.environment()
+        p.environment = Self.environment(board: session == nil ? boardName : nil)
         let input = Pipe(), output = Pipe(), errors = Pipe()
         p.standardInput = input
         p.standardOutput = output
@@ -877,7 +1110,7 @@ final class ClaudeChat {
         resumeTask = Task { [weak self] in
             await Online.wait()
             try? await Task.sleep(for: .seconds(wait))
-            guard !Task.isCancelled, let self, !self.running, let claude = Self.claudePath else { return }
+            guard !Task.isCancelled, let self, !self.running, let claude = self.exePath else { return }
             self.reconnecting = false
             self.resumeTask = nil
             self.append(ChatMessage(role: .user, text: Self.goOnDropped))
@@ -897,6 +1130,7 @@ final class ClaudeChat {
         if var parser {
             parser.closeOpen()
             if parser.started { log.started = true }
+            if let t = parser.thread { log.thread = t }
             messages = parser.messages
         }
         parser = nil
@@ -936,6 +1170,7 @@ final class ClaudeChat {
         log = ChatLog(conversation: UUID().uuidString.lowercased())
         messages = []
         context = nil
+        agentTick += 1
         save()
     }
 
@@ -960,6 +1195,7 @@ final class ClaudeChat {
         messages = saved.messages
         context = saved.context
         unread = false
+        agentTick += 1
         save()
     }
 
@@ -976,7 +1212,12 @@ final class ClaudeChat {
 
     private func take(_ lines: [String]) {
         for line in lines { parser?.consume(line) }
+        if parser?.compacted == true {
+            forgetRules()
+            parser?.compacted = false
+        }
         if parser?.started == true && !log.started { log.started = true }
+        if let t = parser?.thread, log.thread != t { log.thread = t }
         publish()
     }
 
@@ -1014,9 +1255,9 @@ final class ClaudeChat {
         pipes = []
         var parser = self.parser ?? ChatParser(messages, context: context)
         let why = String(decoding: stderr, as: UTF8.self)
-        if !killed, why.contains("No conversation found"), log.started, let ask = lastAsk, let claude = Self.claudePath {
-            // Drop the failed reply; keep the question.
-            if let q = messages.lastIndex(where: { $0.role == .user }) { messages = Array(messages[...q]) }
+        if !killed, why.contains("No conversation found"), log.started, let ask = lastAsk, let claude = self.exePath {
+            // Drop the failed reply; keep the question (or the note of a job that ended).
+            if let q = messages.lastIndex(where: { $0.role == .user || $0.isJobNote }) { messages = Array(messages[...q]) }
             log = ChatLog(conversation: UUID().uuidString.lowercased(), messages: messages)
             let recap = Self.recap(messages.dropLast())
             self.parser = nil
@@ -1043,8 +1284,11 @@ final class ClaudeChat {
         let last = parser.messages.last
         let dropped = !killed && steer == nil && last?.role == .error && (log.started || parser.started)
             && Self.isConnectionError((last?.text ?? "") + " " + why)
+        // The MCP may have marked rules seen whose tool result never reached the conversation.
+        if steer != nil || stopped || signal != nil || !parser.finished || dropped { forgetRules() }
         // A resume that fails before the conversation exists would fail again: start over next time.
         if parser.started { log.started = true }
+        if let t = parser.thread { log.thread = t }
         messages = parser.messages
         context = parser.context
         self.parser = nil
@@ -1055,13 +1299,17 @@ final class ClaudeChat {
         save()
         if dropped, resumes < 3, let ask = lastAsk {
             resumeWhenOnline(title: ask.title, onStage: ask.onStage)
-        } else if let steer, let ask = lastAsk, let claude = Self.claudePath {
+        } else if let steer, let ask = lastAsk, let claude = self.exePath {
             self.steer = nil
             run(steer, claude: claude, title: ask.title, onStage: ask.onStage, recap: nil)
-        } else if !stopped, !queued.isEmpty, let ask = lastAsk, let claude = Self.claudePath {
+        } else if !stopped, !queued.isEmpty, let ask = lastAsk, let claude = self.exePath {
             // Also after a kill from outside: what the user sent while it ran goes on in the same
             // conversation, with no tap from him (2026-10-03).
             runQueued(claude: claude, title: ask.title, onStage: ask.onStage, cutOff: !parser.finished)
+        }
+        // Idle with nothing waiting: a job that ended meanwhile may tell it now (JobBoard).
+        if !running, !stopped, !reconnecting, queued.isEmpty, let session {
+            NotificationCenter.default.post(name: .takesChatIdle, object: session)
         }
     }
 
@@ -1362,7 +1610,9 @@ private struct ChatCornerBody: View {
                     .transition(.scale(scale: 0.92, anchor: .bottomTrailing).combined(with: .opacity))
             }
             HStack(spacing: 10) {
-                if openComments > 0 && !chat.running && !open { handOff }
+                if !open, let session = target.session, let job = app.jobs.pill(session) {
+                    JobPill(job: job) { if away { hub.onRecord = true }; hub.open = true }
+                } else if openComments > 0 && !chat.running && !open { handOff }
                 button
             }
         }
@@ -1494,7 +1744,9 @@ private struct ChatPanel: View {
                 if chat.boardName.hasPrefix("comments") {
                     LaneSwitch(hub: hub, find: hub.comments, post: hub.commentsPost)
                 } else {
-                    Text(target.title).font(Theme.sans(11.5)).foregroundStyle(Theme.muted).lineLimit(1)
+                    // Which agent and model work here (2026-10-11): a click picks another. The
+                    // session's title moved to the line's tooltip; the panel sits on that session.
+                    AgentLine(chat: chat).help(target.title)
                 }
             }
             Spacer()
@@ -1514,25 +1766,27 @@ private struct ChatPanel: View {
                     .help("Clear: start a new conversation")
                     .transition(.opacity)
                 }
-                Menu {
-                    Button("New conversation") { chat.reset() }.disabled(!chat.hasMessages)
-                    Button("Past conversations…") { showHistory = true }
-                    Button("Compact the conversation") { send("/compact") }.disabled(!chat.hasMessages || chat.compacting)
-                    Divider()
-                    Picker("Access", selection: $access) {
-                        Text("Full access, like the terminal").tag("bypassPermissions")
-                        Text("Edit files only").tag("acceptEdits")
-                    }
-                    Divider()
-                    Button("Runs in \(ClaudeChat.folder.lastPathComponent)") {
+                TakesMenuButton(help: "Conversations and access") {
+                    Image(systemName: "slider.horizontal.3").font(.system(size: 12.5, weight: .medium)).frame(width: 26, height: 26)
+                        .modifier(IconHover())
+                } content: {
+                    MenuButton("New conversation", icon: "square.and.pencil", enabled: chat.hasMessages) { chat.reset() }
+                    MenuButton("Past conversations…", icon: "clock.arrow.circlepath") { showHistory = true }
+                    MenuButton("Compact the conversation", icon: "arrow.down.right.and.arrow.up.left",
+                               enabled: chat.hasMessages && !chat.compacting) { send("/compact") }
+                    MenuDivider()
+                    // Two choices: check rows, not a switch (a switch in this menu looked messy, 2026-10-11).
+                    MenuLabel("Access")
+                    MenuButton("Full access", icon: "lock.open", detail: "like the terminal",
+                               checked: access == "bypassPermissions") { access = "bypassPermissions" }
+                    MenuButton("Edit files only", icon: "pencil", checked: access == "acceptEdits") { access = "acceptEdits" }
+                    MenuDivider()
+                    MenuButton("Runs in \(ClaudeChat.folder.lastPathComponent)", icon: "folder") {
                         NSWorkspace.shared.openSoon(ClaudeChat.folder)
                     }
-                } label: {
-                    Image(systemName: "slider.horizontal.3").font(.system(size: 12.5, weight: .medium)).frame(width: 26, height: 26)
                 }
-                .menuStyle(.button).buttonStyle(IconButtonStyle()).menuIndicator(.hidden).fixedSize()
-                .help("Conversations and access")
-                .popover(isPresented: $showHistory, arrowEdge: .bottom) {
+                .fixedSize()
+                .takesPopover(isPresented: $showHistory) {
                     ChatHistory(chat: chat) { showHistory = false }
                 }
                 Button { hub.docked.toggle() } label: {
@@ -1581,7 +1835,7 @@ private struct ChatPanel: View {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2.5))
                 if Task.isCancelled { return }
-                if !showHistory && RunLoop.main.currentMode != .eventTracking { break }
+                if !showHistory && !MenuPanel.shared.isOpen { break }
             }
             withAnimation(Theme.spring) { tools = false }
         }
@@ -1615,7 +1869,7 @@ private struct ChatPanel: View {
         .buttonStyle(IconButtonStyle())
         .help(chat.compacting ? "Compacting the conversation" : "How much of this conversation Takes keeps in mind")
         .disabled(chat.compacting)
-        .popover(isPresented: $showMeter, arrowEdge: .bottom) {
+        .takesPopover(isPresented: $showMeter) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Conversation memory").font(Theme.sans(13, .semibold))
                 GeometryReader { g in
@@ -1807,6 +2061,7 @@ private struct ChatComposer: View {
             if chat.boardName == "comments" {
                 PendingFeedbackChip(store: app.copilot)
             }
+            if let session = target.session { JobsRow(session: session) }
             ForEach(Array(chat.queued.enumerated()), id: \.offset) { i, q in
                 QueuedChip(text: CopilotAsk.shown(q), help: "Queued: sent when Takes is done") {
                     if i < chat.queued.count { chat.queued.remove(at: i) }
@@ -2302,6 +2557,8 @@ private struct ChatBubble: View, Equatable {
             .frame(maxWidth: .infinity, alignment: .trailing)
         case .claude:
             ChatReply(text: message.text)
+        case .tool where message.isJobNote:
+            JobNoteLine(text: message.text)
         case .tool:
             ToolLine(text: message.text, done: message.done)
         case .error:
@@ -2332,6 +2589,21 @@ private struct ToolLine: View {
                 .lineLimit(1).truncationMode(.tail)
         }
         .animation(Theme.motion, value: done)
+    }
+}
+
+/// A job ended (Jobs.swift): a line of its own in the conversation, in the panel's quiet ink.
+private struct JobNoteLine: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: text.hasSuffix(" is done") ? "checkmark.circle" : "exclamationmark.circle")
+                .font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.muted)
+                .frame(width: 12, height: 12)
+            Text(text).font(Theme.sans(12, .medium)).foregroundStyle(Theme.muted)
+                .lineLimit(2)
+        }
     }
 }
 
@@ -2415,5 +2687,18 @@ enum Online {
             if Task.isCancelled { return }
             try? await Task.sleep(for: .seconds(3))
         }
+    }
+}
+
+/// The look of `IconButtonStyle` for a Takes menu's label: the menu button itself is plain (2026-10-11).
+private struct IconHover: ViewModifier {
+    @State private var hover = false
+    func body(content: Content) -> some View {
+        content
+            .foregroundStyle(hover ? Theme.ink : Theme.muted)
+            .background(RoundedRectangle(cornerRadius: 8).fill(hover ? Theme.hover : .clear))
+            .contentShape(Rectangle())
+            .onHover { hover = $0 }
+            .animation(Theme.motion, value: hover)
     }
 }

@@ -76,6 +76,14 @@ struct IdleTests {
         #expect(!AppModel.holdsCamera(idle: true, preview: false, seen: true))
     }
 
+    // 2026-10-11: Assets and Sound hid the camera, but it and the mic meter kept running.
+    @Test func assetsAndSoundCoverTheCameraUntilAFileOpens() {
+        #expect(DetailView.covers("assets", previewing: false))
+        #expect(DetailView.covers("sounds", previewing: false))
+        #expect(!DetailView.covers("assets", previewing: true))
+        #expect(!DetailView.covers("script", previewing: false))
+    }
+
     @Test func recordingAndCountdownKeepTheCamera() {
         #expect(!AppModel.holdsCamera(idle: false, preview: true, seen: false))
     }

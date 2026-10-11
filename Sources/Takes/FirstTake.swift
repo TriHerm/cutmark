@@ -86,10 +86,10 @@ final class FirstTake {
 
     func close() { withAnimation(Theme.motion) { shown = false } }
 
-    /// The chat edits only when Claude Code is in, signed in, and ffmpeg is there (Setup).
+    /// The chat edits only when Claude Code is in, signed in, and ffmpeg and Python are there (Setup).
     var canEdit: Bool {
         let s = Setup.shared
-        return s.claude == .ok && s.signedIn == .ok && s.ffmpeg == .ok
+        return s.claude == .ok && s.signedIn == .ok && s.ffmpeg == .ok && s.devTools == .ok
     }
 
     /// The ask goes to the session's chat with the take (its screen recording too). Assets opens
@@ -138,6 +138,7 @@ private struct FirstTakeCard: View {
     let moment: FirstTake.Moment
     @FocusState private var focused: Bool
     @State private var setup = false
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(spacing: 0) {
@@ -206,7 +207,7 @@ private struct FirstTakeCard: View {
                     }
                     .buttonStyle(AccentButtonStyle(kind: .accent))
                     .keyboardShortcut(.defaultAction)
-                    .popover(isPresented: $setup, arrowEdge: .top) { SetupPanel(setup: Setup.shared) }
+                    .takesPopover(isPresented: $setup) { [openSettings] in SetupPanel(setup: Setup.shared, settings: openSettings) }
                 }
             }
         }

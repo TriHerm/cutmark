@@ -192,7 +192,7 @@ final class ScreensTests: XCTestCase {
         app.buttons["Connect"].tap()
         if app.buttons["Videos"].waitForExistence(timeout: 15) { app.buttons["Videos"].tap() }
         // The video may sit far down the grid: search for it.
-        let search = app.textFields["Find a session"]
+        let search = app.textFields["Find a session or a clip"]
         XCTAssertTrue(search.waitForExistence(timeout: 15))
         search.tap()
         search.typeText("make videos with")
@@ -226,9 +226,14 @@ final class ScreensTests: XCTestCase {
         app.buttons["Takes menu"].tap()
         sleep(1)
         shot(app, "59-takes-menu")
-        app.buttons["Appearance"].tap()
+        app.buttons["Settings"].tap()
         sleep(1)
         shot(app, "60-appearance")
+        // Settings holds forgetting the Mac too, out of the Takes menu (2026-10-11).
+        app.swipeUp()
+        XCTAssertTrue(app.buttons["Forget this Mac"].waitForExistence(timeout: 5))
+        shot(app, "60b-settings-mac")
+        app.swipeDown()
         app.buttons["Sand"].tap()
         app.buttons["Dark"].tap()
         sleep(1)
@@ -238,7 +243,7 @@ final class ScreensTests: XCTestCase {
         shot(app, "62-videos-sand-dark")
         app.buttons["Takes menu"].tap()
         sleep(1)
-        app.buttons["Appearance"].tap()
+        app.buttons["Settings"].tap()
         sleep(1)
         app.buttons["Reset"].tap()
         app.buttons["Done"].tap()
@@ -444,7 +449,7 @@ final class ScreensTests: XCTestCase {
 }
 
 extension XCUIApplication {
-    /// Opens a page from the Takes menu (Performance, Comments, Search, plugins, Styles), where
+    /// Opens a page from the Takes menu (Performance, Comments, plugins, Styles), where
     /// the home screen keeps them since 2026-10-09.
     func page(_ name: String) {
         let row = buttons[name]

@@ -49,21 +49,42 @@ final class FileWatch {
     // collected and sent at most once a second, with every folder that changed (2026-10-01).
     static let every: TimeInterval = 1
     private static var pending: Set<String> = []
+    private static var pendingJobs: Set<String> = []
     private static var due = false
 
     /// Runs on the main queue (the stream's dispatch queue).
     private static func collect(_ paths: [String]) {
-        let changed = folders(paths)
-        guard !changed.isEmpty else { return }
+        let changed = folders(paths), jobs = jobSessions(paths)
+        guard !changed.isEmpty || !jobs.isEmpty else { return }
         pending.formUnion(changed)
+        pendingJobs.formUnion(jobs)
         guard !due else { return }
         due = true
         DispatchQueue.main.asyncAfter(deadline: .now() + every) {
-            let list = Array(pending)
+            let list = Array(pending), sessions = pendingJobs
             pending = []
+            pendingJobs = []
             due = false
-            NotificationCenter.default.post(name: .takesFilesChanged, object: list)
+            if !list.isEmpty { NotificationCenter.default.post(name: .takesFilesChanged, object: list) }
+            for s in sessions { NotificationCenter.default.post(name: .takesJobsChanged, object: URL(fileURLWithPath: s)) }
         }
+    }
+
+    /// The folder of a job file: <session>/.jobs or <session>/generated/.jobs, deeper for a partial.
+    private static func jobsIndex(_ parts: [String]) -> Int? { parts.lastIndex(of: ".jobs") }
+
+    /// Sessions whose job state changed: a job's .json, .told or .stop. Its log, lock and partial
+    /// folder change all the time and say nothing new (Jobs.swift).
+    static func jobSessions(_ paths: [String]) -> Set<String> {
+        Set(paths.compactMap { p in
+            let url = URL(fileURLWithPath: p)
+            let parts = url.pathComponents
+            guard let i = jobsIndex(parts), i == parts.count - 2 else { return nil }
+            guard ["json", "told", "stop"].contains(url.pathExtension) else { return nil }
+            var session = url.deletingLastPathComponent().deletingLastPathComponent()
+            if session.lastPathComponent == "generated" { session = session.deletingLastPathComponent() }
+            return session.path
+        })
     }
 
     /// The folders the changed files are in, as the listeners expect. The chat's own state file
@@ -73,6 +94,8 @@ final class FileWatch {
         Set(paths.compactMap { p in
             let url = URL(fileURLWithPath: p)
             if url.lastPathComponent.hasPrefix(".claude-chat.json") { return nil }
+            // A job writes its state every 2 s: that goes to .takesJobsChanged only (jobSessions).
+            if jobsIndex(url.pathComponents) != nil || url.lastPathComponent.hasPrefix(".jobs") { return nil }
             return url.deletingLastPathComponent().path
         })
     }
@@ -88,6 +111,27 @@ final class FileWatch {
         return paths.contains { p in
             let q = URL(fileURLWithPath: p).standardizedFileURL.path
             return q == f || q.hasPrefix(f.hasSuffix("/") ? f : f + "/")
+        }
+    }
+
+    /// A board that scans every session counts only the files its scan reads: `library` names
+    /// under _library (a file or a folder), `files` in a session folder, `folders` in a session.
+    /// A session or project made, renamed or removed counts too. Chat logs, renders' temp files
+    /// and the like rescanned the whole library each second (2026-10-11).
+    nonisolated static func matters(_ paths: [String], root: URL, library: Set<String>,
+                                    files: Set<String>, folders: Set<String>) -> Bool {
+        let r = root.standardizedFileURL.path
+        let base = r.hasSuffix("/") ? r : r + "/"
+        return paths.isEmpty || paths.contains { p in
+            let q = URL(fileURLWithPath: p).standardizedFileURL.path
+            guard q.hasPrefix(base) else { return false }
+            let parts = q.dropFirst(base.count).split(separator: "/").map(String.init)
+            guard let first = parts.first else { return true }
+            if first == "_library" { return parts.count > 1 && library.contains(parts[1]) }
+            if first.hasPrefix("_") || first.hasPrefix(".") { return false }
+            if parts.count <= 2 { return true }
+            if parts.last?.hasPrefix(".") == true { return false }
+            return parts.count == 3 && files.contains(parts[2]) || folders.contains(parts[2])
         }
     }
 }
@@ -118,38 +162,16 @@ private struct FilesChanged: ViewModifier {
     }
 }
 
-/// Notices when the main thread stops answering (the app froze) and saves a `sample` of every
-/// thread to ~/Library/Logs/Takes/hang-<time>.txt, once per freeze. The next freeze names its own
-/// cause, even when nobody was watching.
+/// Saves a `sample` of every thread to ~/Library/Logs/Takes/hang-<time>.txt, once per freeze, so
+/// the next freeze names its own cause, even when nobody was watching. Stall's thread notices the
+/// freeze: a second thread that woke every second to ask the same question was merged into it
+/// (2026-10-11).
 enum HangWatch {
-    /// Seconds in a row without an answer. Counted in ticks, so a Mac waking from sleep (a jump
-    /// in the clock) is not a freeze.
+    /// Seconds without an answer before a freeze counts as a hang.
     static let limit = 6
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var beat = 0
 
     static var folder: URL {
         FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Logs/Takes")
-    }
-
-    static func start() {
-        let t = Thread {
-            var last = -1, missed = 0, reported = false
-            while true {
-                Thread.sleep(forTimeInterval: 1)
-                let now = lock.withLock { beat }
-                missed = now == last ? missed + 1 : 0
-                last = now
-                DispatchQueue.main.async { lock.withLock { beat &+= 1 } }
-                if missed < limit { reported = false; continue }
-                if reported { continue }
-                reported = true
-                sample()
-            }
-        }
-        t.qualityOfService = .utility
-        t.name = "takes.hangwatch"
-        t.start()
     }
 
     private static let sampling = NSLock()

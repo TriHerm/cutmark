@@ -249,6 +249,27 @@ struct ChatTests {
         p.consume(#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":31190,"post_tokens":6207}}"#)
         #expect(p.context?.used == 6207)
         #expect(p.messages.last?.text == "Compacted the conversation · 31k → 6k tokens")
+        #expect(p.compacted)
+    }
+
+    /// A compaction may drop the rules from the conversation: the app deletes the MCP's seen file,
+    /// so the next get_session shows them again (2026-10-10).
+    @Test func compactionResetsSeenRules() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "seen-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = ClaudeChat.rulesSeenFile(root: root, conversation: "abc-123")
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: file)
+        let other = ClaudeChat.rulesSeenFile(root: root, conversation: "other-1")
+        try Data("{}".utf8).write(to: other)
+        var p = ChatParser([])
+        #expect(!p.compacted)
+        p.consume(#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto"}}"#)
+        #expect(p.compacted)
+        ClaudeChat.forgetRules(root: root, conversation: "abc-123")
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(FileManager.default.fileExists(atPath: other.path))
+        #expect(file.path.hasSuffix("_library/.rules-seen/abc-123.json"))
     }
 
     @Test func describesMcpAndBash() {
@@ -408,6 +429,23 @@ struct ChatFollowTests {
         #expect(chat.past().map(\.title) == ["Make a video"])
         #expect(hub.chat(new) === chat)
     }
+
+    // 2026-10-11: a trashed session's chat searched every chat log again on each session opened.
+    @Test func aTrashedSessionIsSearchedForOnce() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appending(path: "follow-\(UUID().uuidString)")
+        let old = root.appending(path: "P/2026-10-01-a"), later = root.appending(path: "P/2026-10-01-b")
+        try fm.createDirectory(at: old, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let log = try JSONEncoder().encode(ChatLog(conversation: "c7", started: true, messages: []))
+        try log.write(to: ClaudeChat.file(old))
+        let chat = ChatHub().chat(old)
+        try fm.removeItem(at: old)           // trashed
+        #expect(!chat.follow())
+        try fm.createDirectory(at: later, withIntermediateDirectories: true)
+        try log.write(to: ClaudeChat.file(later))
+        #expect(!chat.follow())              // no second walk of the library
+    }
 }
 
 @MainActor
@@ -566,10 +604,31 @@ struct ChatRunTests {
         try? FileManager.default.removeItem(at: dir)
     }
 
+    /// 2026-10-11: after a rename the waiting message went out with the old title, and the agent kept
+    /// the old path. The chat follows the folder first; its context names the new title and the id.
+    @Test func chatFollowsRenameBeforeTitle() async throws {
+        defer { cleanup() }
+        try fake(#"printf '%s\n' "$@" > "$(dirname "$0")/args-$n.txt""#)
+        try Store.encoder.encode(SessionMeta(title: "Old", createdAt: Date())).write(to: session.appending(path: "session.json"))
+        try JSONEncoder().encode(ChatLog(conversation: "c-rename", pending: ["Cut it"])).write(to: ClaudeChat.file(session))
+        let chat = ClaudeChat(session: session)  // sends what waited, on the next turn
+        let renamed = session.deletingLastPathComponent().appending(path: "2026-10-03-new-title")
+        try FileManager.default.moveItem(at: session, to: renamed)
+        try Store.encoder.encode(SessionMeta(title: "New title", createdAt: Date())).write(to: renamed.appending(path: "session.json"))
+        await until(30) { runs == 1 && !chat.running }
+        let args = (try? String(contentsOf: dir.appending(path: "args-1.txt"), encoding: .utf8)) ?? ""
+        #expect(args.contains("\"New title\", folder \(renamed.standardizedFileURL.path)"))
+        #expect(args.contains("session id \(Store.derivedID(renamed) ?? "?")"))
+        #expect(FileManager.default.fileExists(atPath: renamed.appending(path: ".claude-chat.json").path))
+        #expect(!FileManager.default.fileExists(atPath: session.path), "the old folder never comes back")
+    }
+
     /// Takes chats compact at 30% of the window; the variable lives only in their process.
     @Test func chatsCompactEarly() {
         let env = ClaudeChat.environment()
         #expect(env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"] == "30")
+        // The takes MCP loads its main tools at the start only in Takes' own chats.
+        #expect(env["TAKES_CHAT"] == "1")
         #expect(!env.keys.contains { $0.hasPrefix("CLAUDE_CODE_") || $0.hasPrefix("CLAUDECODE") })
     }
 

@@ -10,8 +10,8 @@
   --lufs -14        target loudness
   --window S,E      seconds of IN to use for --ab (default: the densest 12 s of speech)
 
-IN is the RAW recording (.mov/.mp4/.wav/.m4a). OUT is 48 kHz mono float WAV with the same timing
-as IN, so cut it afterwards with the take's edit list. The voice chain (EQ + 3.5:1 compressor +
+IN is the RAW recording (.mov/.mp4/.wav/.m4a). OUT is 48 kHz mono float WAV on IN's video clock
+(second 0 is frame 0, also when the audio starts late), so cut it afterwards with the take's times. The voice chain (EQ + 3.5:1 compressor +
 gain + -1 dBFS limiter) always runs exactly once, at the end, in float. A report is written to
 OUT.report.json."""
 import argparse, json, os, subprocess, tempfile, numpy as np, soundfile as sf
@@ -166,7 +166,8 @@ def main():
     p.add_argument("--steps"); p.add_argument("--window")
     a = p.parse_args()
     tmp = tempfile.mkdtemp(prefix="voice-"); raw = f"{tmp}/raw.wav"
-    ff(["-i", os.path.abspath(a.inp), "-vn", "-ac", "1", "-ar", str(SR), "-c:a", "pcm_f32le", raw])
+    # aresample pads the start: the WAV runs on the video's clock, so a take's audio offset stays (2026-10-11)
+    ff(["-i", os.path.abspath(a.inp), "-vn", "-af", "aresample=async=1:first_pts=0", "-ac", "1", "-ar", str(SR), "-c:a", "pcm_f32le", raw])
     r, _ = sf.read(raw)
     D = diagnose(r); steps, why = plan(D)
     if a.steps is not None: steps, why = ([] if a.steps == "none" else a.steps.split(",")), ["--steps override"]

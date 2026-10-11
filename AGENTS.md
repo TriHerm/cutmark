@@ -23,6 +23,9 @@ through the `takes` MCP server. This file is for agents that work on the Takes c
 |---|---|
 | `Sources/Takes/` | The Mac app: SwiftUI, AVFoundation, ScreenCaptureKit. A Swift package, no Xcode project. |
 | `mcp/takes_mcp.py` | The `takes` MCP server: one Python file, standard library only. |
+| `mcp/clean_voice.py`, `mcp/prepare_take.py` | Clean voice and word times for a take. They need packages, so they run through `uv`. |
+| `<session>/_work/` | Clips from `cut_take` and `rough_cut` (working files, hidden on the Assets tab). |
+| `<session>/_edit/` | An edit's sources (`_edit/<name>/`) and `render_edit`'s renders (`_edit/renders/`), hidden on the Assets tab. Each version's recipe sits beside it: `edits/<name>-vN.recipe.json` (`EditRecipe.swift`). |
 | `mcp/tests/` | The server's tests (`unittest`). |
 | `Tests/TakesTests/` | The app's tests (Swift Testing). |
 | `ios/` | The iPhone app (`TakesPhone`). It talks to the Mac over HTTP (`PhoneHTTP.swift`). |
@@ -38,7 +41,7 @@ rest with `grep`. Most files start with a comment that says what they are for.
 | Area | Start here |
 |---|---|
 | Window, sidebar, tabs | `Shell.swift`, `Views.swift` |
-| Look: colours, type, controls | `Theme.swift`, `Look.swift`, `Settings.swift` |
+| Look: colours, type, controls | `Theme.swift`, `Look.swift`, `MenuKit.swift` (menus, panels, switch, confirm), `Settings.swift` |
 | Motion | `PageMotion.swift` (pages arrive), `Motion.swift` (endless animations) |
 | Library on disk | `Library.swift`, `Watch.swift`, `Scripts.swift`, `Assets.swift`, `StyleLibrary.swift` |
 | Recording | `AppModel.swift`, `CameraRecorder.swift`, `ScreenRecorder.swift`, `Notch.swift` (the script in the notch), `ScriptFollower.swift` |
@@ -46,7 +49,8 @@ rest with `grep`. Most files start with a comment that says what they are for.
 | Storyboard | `Storyboard.swift` |
 | Posts | `Post.swift` (LinkedIn), `XPost.swift`, `VideoPost.swift` (YouTube, vertical), `PostDrafts.swift`, `Hooks.swift`, `PostQueue.swift`, `Publish.swift`, `Cover.swift` |
 | Review comments | `Comments.swift`, `OpenComments.swift` |
-| Chat | `Chat.swift` (one Claude Code run per turn), `ChatAttach.swift`, `ChatRefs.swift`, `Dictation.swift` |
+| Chat | `Chat.swift` (one Claude Code or Codex run per turn), `ChatAgents.swift` (agent and model pick, Settings › Agents), `ChatAttach.swift`, `ChatRefs.swift`, `Dictation.swift` |
+| Long jobs (renders the chat starts with `run_job`) | `Jobs.swift` (the Jobs row, and the note to the chat when a job ends) |
 | Sound and voice | `Voice.swift`, `Sounds.swift`, `Broll.swift` |
 | Image, video and voice models | `Gemini.swift`, `Higgsfield.swift`, `Replicate.swift`, `ElevenLabs.swift`, `ModelBrowser.swift` |
 | Plugins | `Plugins/Plugins.swift` (the board and the hooks), `Plugins/Feedback.swift` (rules, comments per video) |
@@ -111,6 +115,15 @@ while a page reads its data: draw nothing, then let the parts arrive. The helper
 `PageMotion.swift`. Draw controls and charts in Takes's own style (`Theme`, `AccentButtonStyle`,
 `ToggleChip`, the Feedback board's `RuleSwitch`), not stock macOS pickers, switches,
 bordered text fields or Swift Charts defaults.
+
+**Menus and panels.** Every menu is the Takes menu kit in `MenuKit.swift` (2026-10-11, design:
+https://claude.ai/artifact/YUNwytSXFvdBuM2JuUF4BZ). Use `TakesMenuButton` for a click menu,
+`.takesContextMenu` for right-click, `.takesPopover` for a panel, `TakesSwitch` for two to four
+choices and `TakesConfirm` in a `.sheet` for a question. Never `Menu`, `.contextMenu`, `.popover`,
+a segmented or pop-up `Picker`, `.alert` or `NSAlert`. Rows: a group opens in place (`MenuGroup`);
+a red danger row goes last, after a divider; the picked row has a check. The same thing in two
+menus (a ⋯ menu and its right-click menu) uses one row builder, so both keep one order. Stays
+native: the menu bar, right-click inside text, date pickers and folder pickers.
 
 **Write.** Short, plain comments that say why, with the date for a decision
 (`// Stays private for now (2026-10-04)`). The app calls its assistant "Takes", and errors from

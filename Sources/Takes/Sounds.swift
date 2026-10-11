@@ -246,19 +246,21 @@ struct SoundsPane: View {
             .padding(.horizontal, 10).frame(width: wide ? 200 : 140, height: 28)
             .background(Theme.paper, in: Capsule())
             .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 0.5))
-            Menu {
+            TakesMenuButton(help: "Where the music comes from") {
+                Image(systemName: "ellipsis").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.muted)
+                    .frame(width: 24, height: 24).contentShape(Rectangle())
+            } content: {
                 if let s = SoundLib.source {
-                    Button("Copy New Files from “\(s.lastPathComponent)”") { refresh(sync: true, report: true) }
+                    MenuButton("Copy New Files from “\(s.lastPathComponent)”", icon: "arrow.down.doc") { refresh(sync: true, report: true) }
                 }
-                Button("Choose Source Folder…") { chooseSource() }
-                Divider()
-                Button("Show Library in Finder") {
+                MenuButton("Choose Source Folder…", icon: "folder.badge.gearshape") { chooseSource() }
+                MenuDivider()
+                MenuButton("Show Library in Finder", icon: "folder") {
                     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                     NSWorkspace.shared.revealSoon([dir])
                 }
-            } label: { Image(systemName: "ellipsis") }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                .help("Where the music comes from")
+            }
+            .fixedSize()
         }
     }
 
@@ -423,10 +425,11 @@ struct SoundRow: View {
         // Play on the first click, not after the double-click interval.
         .simultaneousGesture(TapGesture().onEnded { if NSApp.firstClick { onPlay() } })
         .onDrag { NSItemProvider(contentsOf: sound.url) ?? NSItemProvider() }
-        .contextMenu {
-            Button(effect ? (placeAt == nil ? "Add to This Video" : "Add at the Playhead") : "Use for This Video") { onUse() }
-            Button("Reveal in Finder") { NSWorkspace.shared.revealSoon([sound.url]) }
-            Button("Copy Path") {
+        .takesContextMenu {
+            MenuButton(effect ? (placeAt == nil ? "Add to This Video" : "Add at the Playhead") : "Use for This Video",
+                       icon: effect ? "plus.circle" : "music.note") { onUse() }
+            MenuButton("Reveal in Finder", icon: "folder") { NSWorkspace.shared.revealSoon([sound.url]) }
+            MenuButton("Copy Path", icon: "doc.on.doc") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(sound.url.path, forType: .string)
             }

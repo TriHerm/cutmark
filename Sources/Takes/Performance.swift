@@ -294,12 +294,8 @@ struct PerformanceView: View {
             HStack(spacing: 10) {
                 SectionLabel(text: "posts")
                 Spacer()
-                Picker("", selection: $sort) {
-                    Text("Newest").tag("newest")
-                    Text("Most reach").tag("reach")
-                    Text("Best rate").tag("rate")
-                }
-                .labelsHidden().fixedSize()
+                TakesSwitch(selection: $sort, options: [("newest", "Newest"), ("reach", "Most reach"), ("rate", "Best rate")])
+                    .fixedSize()
             }
             .padding(.bottom, 8)
             header

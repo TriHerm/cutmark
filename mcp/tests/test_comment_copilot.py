@@ -31,7 +31,9 @@ class CommentCopilot(unittest.TestCase):
             f.write(LINT)
         os.environ["TAKES_LINT"] = lint
         # Drafting starts with get_comment_context, which reads the lessons (the rules gate).
-        t.RULES_SEEN.add("comments")
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        t.forget_seen()
+        t.mark_seen([], t.comments_text())
         ref = os.path.join(self.life, "reference-docs", "communication", "linkedin")
         os.makedirs(ref)
         with open(os.path.join(ref, "commenting-targets.md"), "w") as f:
@@ -106,8 +108,8 @@ class CommentCopilot(unittest.TestCase):
         self.assertIn("new_targets", sc["feed"])
         for name in ("feed", "search"):
             self.assertIn("recent-activity/all/", sc[name])  # where a post's link is found
-        self.assertIn("Skip anyone on his target list", sc["search"])
-        self.assertIn("Skip anyone on his target list", sc["commenters"])
+        self.assertIn("Skip anyone on the target list", sc["search"])
+        self.assertIn("Skip anyone on the target list", sc["commenters"])
 
     def test_redraft_after_feedback(self):
         sid = self.add()["id"]

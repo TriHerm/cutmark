@@ -247,6 +247,10 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
     private var events: [ObjectIdentifier: PhoneConnection] = [:]
     /// The Mac's own Tailscale login. Requests from any other login get no answer.
     private var login: String?
+    /// While the login is unknown it is looked up again, at most every 30 s (audit #9, 2026-10-11).
+    private var loginTried: Date?
+    /// How the login is found. Tests set their own.
+    var lookupLogin: @Sendable () -> String? = { Tailscale.login() }
     private var root: URL
     private var waiting: [UUID: CheckedContinuation<Bool, Never>] = [:]
 
@@ -266,11 +270,15 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         phones = (try? JSONDecoder.iso.decode([PairedPhone].self, from: Data(contentsOf: Self.phonesFile))) ?? []
     }
 
-    /// For tests: a server over one folder, with no app and no paired phones. Not started.
+    /// For tests: a server over one folder, with no app. Not started. `login` is the Mac's
+    /// Tailscale login and `tokens` the paired phones (none by default).
     /// `demo` (the README's phone pictures): any caller on 127.0.0.1 may ask, and pairing needs no click.
-    init(root: URL, demo: Bool = false) {
+    init(root: URL, demo: Bool = false, login: String? = nil, tokens: [String] = []) {
         self.root = root.standardizedFileURL
         self.demo = demo
+        self.login = login
+        phones = tokens.map { PairedPhone(name: "iPhone", hash: Self.hash($0), paired: Date()) }
+        lookupLogin = { nil }
     }
     private var demo = false
 
@@ -298,18 +306,33 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             return
         }
         listener = l
+        lock.withLock { loginTried = Date() }
+        let lookup = lookupLogin
         Task.detached(priority: .utility) { [weak self] in
-            let me = Tailscale.login()
+            let me = lookup()
             self?.lock.withLock { self?.login = me }
             Tailscale.serve(https: Self.httpsPort, to: Self.port)
-        }
-        tick = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.watch() }
         }
         awake = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.keepAwake() }
         }
+        awake?.tolerance = 10
         keepAwake()
+    }
+
+    /// The live-update tick runs only while a phone listens: with no phone it woke the app
+    /// 2.5 times a second all day (audit #5, 2026-10-11).
+    @MainActor
+    private func listening(_ on: Bool) {
+        if on, tick == nil {
+            tick = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.watch() }
+            }
+            tick?.tolerance = 0.1
+        } else if !on {
+            tick?.invalidate()
+            tick = nil
+        }
     }
 
     private var tick: Timer?
@@ -358,8 +381,11 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         guard let who = req.header("tailscale-user-login") else {
             return PhoneError(403, "Only through Tailscale")
         }
-        let me = lock.withLock { login }
+        let me = currentLogin()
         if let me, me.lowercased() != who.lowercased() { return PhoneError(403, "This Tailscale login is not the user's") }
+        // With the Mac's login unknown, anyone on this Mac could write the header: only a paired
+        // phone's token gets in then. Pairing waits until the login is known.
+        guard needsToken || me != nil else { return PhoneError(503, "Takes cannot see your Tailscale login yet. Try again in a minute.") }
         guard needsToken else { return nil }
         let token = req.header("authorization").map { $0.replacingOccurrences(of: "Bearer ", with: "") }
             ?? req.query["token"] ?? ""
@@ -372,11 +398,29 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         return ok ? nil : PhoneError(401, "This phone is not paired. Pair it again in the app.")
     }
 
-    /// An absolute path in the library, or nil.
+    /// The Mac's login, looked up again in the background when it is unknown.
+    private func currentLogin() -> String? {
+        let (me, retry): (String?, Bool) = lock.withLock {
+            guard login == nil, (loginTried.map { -$0.timeIntervalSinceNow > 30 } ?? true) else { return (login, false) }
+            loginTried = Date()
+            return (nil, true)
+        }
+        if retry {
+            let lookup = lookupLogin
+            Task.detached(priority: .utility) { [weak self] in
+                guard let found = lookup() else { return }
+                self?.lock.withLock { self?.login = found }
+            }
+        }
+        return me
+    }
+
+    /// An absolute path in the library, or nil. Symlinks are resolved first: a link inside the
+    /// library must not reach a file outside it (audit #9).
     func inLibrary(_ path: String?) -> URL? {
         guard let path, path.hasPrefix("/") else { return nil }
-        let url = URL(fileURLWithPath: path).standardizedFileURL
-        let base = lock.withLock { root }.path + "/"
+        let url = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+        let base = lock.withLock { root }.resolvingSymlinksInPath().path + "/"
         return url.path.hasPrefix(base) && !url.path.contains("/../") ? url : nil
     }
 
@@ -738,6 +782,8 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
 
     private func pair(_ req: PhoneRequest) async -> PhoneResponse {
         if demo { return .encode(["token": "demo"]) }
+        // One question on the Mac at a time: a flood of requests cannot stack up Allow prompts.
+        guard lock.withLock({ waiting.isEmpty }) else { return .error(429, "The Mac is already asking about a phone") }
         let name = (try? JSONDecoder().decode([String: String].self, from: req.body))?["name"] ?? "iPhone"
         let r = PhonePairRequest(name: String(name.prefix(60)), login: req.header("tailscale-user-login") ?? "")
         let allowed: Bool = await withCheckedContinuation { c in
@@ -962,10 +1008,10 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         case let other?: place = "on the \(other) screen"
         case nil: place = ""
         }
-        var s = "The user sent his latest message from the Takes app on his iPhone, not from the Mac"
+        var s = "The user sent the latest message from the Takes app on an iPhone, not from the Mac"
         s += place.isEmpty ? "." : ", while \(place). \"This\" most likely means what that screen shows."
-        if b["voice"] == "1" { s += " He dictated it: read past words the transcription got wrong." }
-        return s + " He may be away from the Mac: don't count on him seeing anything on its screen."
+        if b["voice"] == "1" { s += " It was dictated: read past words the transcription got wrong." }
+        return s + " The user may be away from the Mac: don't count on the user seeing anything on its screen."
     }
 
     /// `tokens`: a phone from 2026-10-05 on says "@comments" when the open comments should go with
@@ -1081,12 +1127,21 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         case "board:comments-post": "post"
         case "board:performance": "performance"
         case "board:styles": "styles"
+        // A plugin's board chat (2026-10-10, Ideas): board:<plugin id>.
+        case let id? where id.hasPrefix("board:") && Plugins.chatPlugin(String(id.dropFirst(6))) != nil:
+            "plugin:" + id.dropFirst(6)
         default: nil
         }
     }
 
+    static func laneTitle(_ lane: String) -> String {
+        if lane.hasPrefix("plugin:") { return Plugins.named(String(lane.dropFirst(7)))?.title ?? "Takes" }
+        return lane == "performance" ? "Performance" : lane == "styles" ? "Styles" : "Comments"
+    }
+
     @MainActor private func boardChat(_ lane: String) -> ClaudeChat? {
         guard let hub = app?.chats else { return nil }
+        if lane.hasPrefix("plugin:") { return hub.boardChat(String(lane.dropFirst(7))) }
         switch lane {
         case "post": return hub.commentsPost
         case "performance": return hub.board
@@ -1109,7 +1164,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
             let text = (b["text"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return .error(400, "The message is empty") }
             // While a run works, the message steers it (as ⌘Return on the Mac).
-            await MainActor.run { self.boardChat(lane)?.send(text, title: lane == "performance" ? "Performance" : lane == "styles" ? "Styles" : "Comments", onStage: nil, now: true, origin: Self.origin(b)) }
+            await MainActor.run { self.boardChat(lane)?.send(text, title: Self.laneTitle(lane), onStage: nil, now: true, origin: Self.origin(b)) }
             return .encode(["ok": true])
         case ("POST", "/api/chat/stop"):
             await MainActor.run { self.boardChat(lane)?.stop() }
@@ -1254,10 +1309,13 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
 
     func eventsOpened(_ c: PhoneConnection) {
         lock.withLock { events[ObjectIdentifier(c)] = c }
-        Task { @MainActor in self.said = [:] }
+        Task { @MainActor in self.said = [:]; self.listening(true) }
     }
 
-    func eventsClosed(_ c: PhoneConnection) { _ = lock.withLock { events.removeValue(forKey: ObjectIdentifier(c)) } }
+    func eventsClosed(_ c: PhoneConnection) {
+        let none = lock.withLock { events.removeValue(forKey: ObjectIdentifier(c)); return events.isEmpty }
+        if none { Task { @MainActor in if self.lock.withLock({ self.events.isEmpty }) { self.listening(false) } } }
+    }
 
     private func broadcast(_ value: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.withoutEscapingSlashes]) else { return }
@@ -1472,7 +1530,8 @@ struct PhonePairBanner: View {
                 }
                 Spacer(minLength: 8)
                 Button("Don't Allow") { app.phone?.answer(r, allow: false) }
-                Button("Allow") { app.phone?.answer(r, allow: true) }.keyboardShortcut(.defaultAction)
+                // No Return shortcut: a stray key press must not let a phone in (audit #9).
+                Button("Allow") { app.phone?.answer(r, allow: true) }
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
             .frame(maxWidth: 560)

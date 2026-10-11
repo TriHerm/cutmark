@@ -441,11 +441,11 @@ struct BrollFolderTile: View {
         .onHover { hover = $0; if $0 { front = folder.url } }
         .animation(Theme.motion, value: hover)
         .help("Hover to see the clips; click to open")
-        .contextMenu {
-            Button("Open", action: open)
-            Button("Show in Finder") { NSWorkspace.shared.revealSoon([folder.url]) }
-            Divider()
-            Button("Move Folder to Trash", role: .destructive, action: trash)
+        .takesContextMenu {
+            MenuButton("Open", icon: "arrow.up.forward.app", action: open)
+            MenuButton("Show in Finder", icon: "folder") { NSWorkspace.shared.revealSoon([folder.url]) }
+            MenuDivider()
+            MenuButton("Move Folder to Trash", icon: "trash", danger: true, action: trash)
         }
         .task(id: BrollLib.reelKey(folder)) {
             if let first = folder.clips.first { poster = await BrollLib.poster(first.url) }
@@ -504,19 +504,19 @@ struct BrollClipTile: View {
         .onHover { hover = $0; if $0 { front = clip.url } }
         .animation(Theme.motion, value: hover)
         .help(info?.description ?? clip.title)
-        .contextMenu {
+        .takesContextMenu {
             if added {
-                Button("Remove from This Session", action: remove)
+                MenuButton("Remove from This Session", icon: "minus.circle", action: remove)
             } else {
-                Button("Add to This Session", action: add)
+                MenuButton("Add to This Session", icon: "plus.circle", action: add)
             }
-            Button("Show in Finder") { NSWorkspace.shared.revealSoon([clip.url]) }
-            Button("Copy Path") {
+            MenuButton("Show in Finder", icon: "folder") { NSWorkspace.shared.revealSoon([clip.url]) }
+            MenuButton("Copy Path", icon: "doc.on.doc") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(clip.url.path, forType: .string)
             }
-            Divider()
-            Button("Move to Trash", role: .destructive, action: trash)
+            MenuDivider()
+            MenuButton("Move to Trash", icon: "trash", danger: true, action: trash)
         }
         .task(id: clip.url) {
             info = BrollLib.cachedInfo(clip.url)

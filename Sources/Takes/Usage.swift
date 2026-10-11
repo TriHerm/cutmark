@@ -93,9 +93,10 @@ final class Usage {
         guard on, !sending, Self.release != nil, let library,
               UserDefaults.standard.string(forKey: Self.sentKey) != Self.today() else { return }
         sending = true
-        let report = report(library)
+        let job = reportJob(library)
         Task {
             defer { sending = false }
+            let report = await Task.detached(priority: .utility) { job() }.value
             guard let body = try? Self.encode(report) else { return }
             var req = URLRequest(url: Self.endpoint)
             req.httpMethod = "POST"
@@ -116,13 +117,20 @@ final class Usage {
 
     /// Today's report for this library. The "See the exact report" button shows the same value.
     func report(_ library: Library) -> Report {
-        let sessions = library.projects.flatMap { library.grouped[$0.url] ?? [] }
+        reportJob(library)()
+    }
+
+    /// The report's inputs from the library, read on main; the returned job reads the disk (every
+    /// edits folder and post), so a view runs it off main.
+    func reportJob(_ library: Library) -> @Sendable () -> Report {
+        let sessions = library.projects.flatMap { library.grouped[$0.url] ?? [] }.map { ($0.url, $0.takeCount, $0.published) }
         let v = ProcessInfo.processInfo.operatingSystemVersion
-        return Self.report(
-            id: Self.id, version: Self.release ?? "source", os: "\(v.majorVersion).\(v.minorVersion)",
-            root: library.root, projects: library.projects.count,
-            sessions: sessions.map { ($0.url, $0.takeCount, $0.published) },
-            plugins: Plugins.all.map(\.id), phone: PhoneServer.usedRecently())
+        let id = Self.id, version = Self.release ?? "source", root = library.root, projects = library.projects.count
+        let plugins = Plugins.all.map(\.id), phone = PhoneServer.usedRecently()
+        return {
+            Self.report(id: id, version: version, os: "\(v.majorVersion).\(v.minorVersion)", root: root, projects: projects,
+                        sessions: sessions, plugins: plugins, phone: phone)
+        }
     }
 
     nonisolated static func report(id: String, version: String, os: String, root: URL, projects: Int,
@@ -210,6 +218,22 @@ struct UsageSentList: View {
 }
 
 /// The exact report, as it would go out now.
+/// Today's report, worked out off main once it shows. It read every post file in body, on each
+/// redraw (2026-10-11).
+struct UsageReportLive: View {
+    let library: Library
+    @State private var json = ""
+
+    var body: some View {
+        UsageReportText(json: json)
+            .task {
+                let job = Usage.shared.reportJob(library)
+                let r = await Task.detached(priority: .userInitiated) { job() }.value
+                json = (try? Usage.encode(r)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+            }
+    }
+}
+
 struct UsageReportText: View {
     let json: String
 
@@ -289,7 +313,7 @@ struct UsageAskCard: View {
                         }
                         .buttonStyle(BracketButtonStyle())
                         if showReport {
-                            UsageReportText(json: (try? Usage.encode(usage.report(app.library))).map { String(decoding: $0, as: UTF8.self) } ?? "")
+                            UsageReportLive(library: app.library)
                                 .transition(.opacity.combined(with: .move(edge: .top)))
                         }
                     }
@@ -371,7 +395,7 @@ struct UsagePage: View {
                                 UsageReportText(json: last.json)
                             } else {
                                 Text("Nothing sent yet. Today's report would be:").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
-                                UsageReportText(json: (try? Usage.encode(usage.report(app.library))).map { String(decoding: $0, as: UTF8.self) } ?? "")
+                                UsageReportLive(library: app.library)
                             }
                         }
                     }

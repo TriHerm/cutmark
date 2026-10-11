@@ -430,7 +430,7 @@ final class CopilotRunner: ObservableObject {
     func stop() { process?.terminate() }
 
     private func start(ask: String, system: String) {
-        guard let claude = Namer.claudePath else {
+        guard let claude = ClaudeChat.claudePath else {
             state = .failed("The chat is not set up yet. Click Finish setup in the sidebar.", Date())
             return
         }
@@ -505,10 +505,10 @@ final class CopilotRunner: ObservableObject {
     }
 
     static let redraftPrompt = """
-        The user gave feedback on LinkedIn comment drafts in his Takes app. Call get_comment_context. \
+        The user gave feedback on LinkedIn comment drafts in the Takes app. Call get_comment_context. \
         For each item in waiting_for_redraft, read the newest draft's variants and feedback note and \
         write 3 new variants that follow it (if the draft has an edit, that is the user's own text: \
-        keep it as variant 1, changed only as the note asks), each a different shape, keeping to his lessons and the \
+        keep it as variant 1, changed only as the note asks), each a different shape, keeping to the lessons and the \
         style guide it names. Save each with redraft_comment. Do not use the browser. End with one short line.
         """
 }
@@ -581,27 +581,27 @@ enum CopilotAsk {
     }
 
     static let context = """
-        The user is talking to you from the Comments board inside his Takes app: his LinkedIn \
+        The user is talking to you from the Comments board inside the Takes app: the LinkedIn \
         comment copilot. It shows comment drafts from ~/Movies/Takes/_library/comments/suggestions/ \
         and redraws by itself. Use the takes tools get_comment_context, list_comment_suggestions, \
-        add_comment_suggestion, redraft_comment and set_comment_posted; his lessons are \
-        _library/rules/comments.md. He reads your replies in a narrow panel: keep them short, no tables, no \
-        headings. He watches while you work: before each step write one short line on what you do \
+        add_comment_suggestion, redraft_comment and set_comment_posted; the lessons are \
+        _library/rules/comments.md. The user reads your replies in a narrow panel: keep them short, no tables, no \
+        headings. The user watches while you work: before each step write one short line on what you do \
         next (for example "Reading Justin Welsh's recent posts"). A message that starts with "I \
         interrupted you" steers the task you were on: follow it, then go on with that task.
 
-        A message from his phone ends with "[On screen on my phone: the draft for …]": the draft \
-        and variant he looks at. Read what he says to decide what it is about. About this \
+        A message from the phone ends with "[On screen on my phone: the draft for …]": the draft \
+        and variant on screen. Read the message to decide what it is about. About this \
         draft ("make it shorter", "I like the second one"): write 3 new variants with \
-        redraft_comment. About the drafts in general ("all of these", "every draft", his voice, a \
-        habit he sees across them): redraft every draft in review with redraft_comment, and if it \
-        is a lasting rule, add it to his lessons (rules/comments.md). A question: answer it. Say in one line which you did.
+        redraft_comment. About the drafts in general ("all of these", "every draft", the voice, a \
+        habit seen across them): redraft every draft in review with redraft_comment, and if it \
+        is a lasting rule, add it to the lessons (rules/comments.md). A question: answer it. Say in one line which you did.
 
         \(ClaudeChat.browserRules)
 
-        Finding posts (when he asks for drafts): four scouts read LinkedIn in parallel, you draft.
+        Finding posts (when the user asks for drafts): four scouts read LinkedIn in parallel, you draft.
         1. Call get_comment_context. Read lessons, rules, targets and examples (edited_by_user \
-        shows what he changes: study it most). Read the style guide file it names.
+        shows what the user changes: study it most). Read the style guide file it names.
         2. If waiting_for_redraft lists drafts, first write a new draft for each that follows its \
         feedback note, and save it with redraft_comment. A draft's edit is the user's own text: keep \
         it as variant 1, changed only as the note asks.
@@ -613,25 +613,25 @@ enum CopilotAsk {
         4. Merge what they return. Drop duplicates and any post that breaks a rule. Rank the rest: \
         what the user can add first (a real story, counterpoint or question beats agreement), then \
         how well the author fits, then fresh posts with few comments. Draft only the best ones, up \
-        to the number he asked for: a weak post is not worth a draft, even if that means fewer.
+        to the number asked for: a weak post is not worth a draft, even if that means fewer.
         5. For each post you draft: one angle line (what the user can add), then 3 variants of the \
-        comment, following his lessons and the style guide. Each variant a different shape (a short \
-        story from his work, a pointed question, a counterpoint, a concrete tip) and length; \
-        variant_picks shows which shapes he picks. Save it with add_comment_suggestion: the post's \
+        comment, following the lessons and the style guide. Each variant a different shape (a short \
+        story from the user's work, a pointed question, a counterpoint, a concrete tip) and length; \
+        variant_picks shows which shapes the user picks. Save it with add_comment_suggestion: the post's \
         own URL, post_text exactly as the scout returned it (its empty lines too), author_photo from the scout, and source "feed", "list", "search" or "commenters" (the scout that found it). If the slop gate refuses \
         a variant, rewrite it once; refused again, drop the post.
         6. End with one short line: how many drafts you added from how many candidates, anything \
-        that stopped a scout, and the scouts' new_targets and quiet people (names only) for his \
+        that stopped a scout, and the scouts' new_targets and quiet people (names only) for the \
         target list. Never edit the target list yourself.
 
-        Posting (only when he asks in this chat, for example with the Post approved button): his \
+        Posting (only when the user asks in this chat, for example with the Post approved button): the \
         message is the yes for the comments that are approved at that moment, exactly as \
         approved, and for nothing else. Never post a draft that is not approved. Another chat may \
         be finding posts in its own tab at the same time: leave tabs you did not create alone.
         1. list_comment_suggestions with status approved. Post each one's text character for \
         character: never add a mention, tag, hashtag, emoji or sign-off. Keep its line breaks.
         2. Open the post URL. Check it is the same post (same author). Read the comments first: \
-        if his comment is already there, do not post it again, only record it (step 4).
+        if the comment is already there, do not post it again, only record it (step 4).
         3. Open the post's comment box, put the text in, read the box back and compare it with \
         the approved text, then click the box's Comment button once. Never click it twice: if you \
         are not sure it went through, reload the post and look before you do anything else.

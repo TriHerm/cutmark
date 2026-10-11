@@ -62,7 +62,7 @@ struct OpenCommentsChip: View {
         }
         .buttonStyle(PressStyle())
         .help("See your open comments: open one, send it to Takes or resolve it")
-        .popover(isPresented: $shown, arrowEdge: .top) { list }
+        .takesPopover(isPresented: $shown) { list }
         .onAppear(perform: load)
         .onChange(of: count) { _, _ in load() }
     }
@@ -100,7 +100,6 @@ struct OpenCommentsChip: View {
             .frame(maxHeight: 320)
         }
         .frame(width: 340)
-        .background(Theme.paper)
     }
 
     private func row(_ c: Comment) -> some View {
@@ -180,7 +179,7 @@ struct PendingFeedbackChip: View {
                 }
                 .buttonStyle(PressStyle())
                 .help("See your notes: send them to Takes or drop one")
-                .popover(isPresented: $shown, arrowEdge: .top) { list(pending) }
+                .takesPopover(isPresented: $shown) { list(pending) }
                 Button { store.sendFeedback(pending) } label: {
                     Text("Send").font(Theme.sans(11.5, .semibold)).foregroundStyle(.white)
                         .padding(.horizontal, 10).padding(.vertical, 5)
@@ -221,7 +220,6 @@ struct PendingFeedbackChip: View {
             .frame(maxHeight: 320)
         }
         .frame(width: 340)
-        .background(Theme.paper)
     }
 
     private func row(_ s: Suggestion) -> some View {

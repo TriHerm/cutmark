@@ -4,12 +4,13 @@ import SwiftUI
 // get the design on the mobile app"): the brand and a new video on top, Find a session, each
 // project as a section of plain rows with the day on the right, Published folded under it, and
 // Performance, Comments and the other pages in the Takes menu. No cards, no floating buttons, no system menus.
+// The menu holds only the pages and Settings (2026-10-11: "pretty overwhelming"): no project
+// filter (fold a project instead), and Search starts from Find a session.
 
 struct SessionsView: View {
     @EnvironmentObject var model: Model
     @Environment(\.tabBar) private var tab
     @State private var search = ""
-    @State private var project: String?
     @State private var path: [Session] = []
     @State private var creating = false
     @State private var note: String?
@@ -24,12 +25,9 @@ struct SessionsView: View {
     @AppStorage("openPublished") private var openPublished = ""
     @AppStorage("newProject") private var lastProject = "Inbox"
 
-    private var projects: [String] { Array(Set(model.sessions.map(\.project))).sorted() }
-
     private var shown: [Session] {
         model.sessions.filter { s in
-            (project == nil || s.project == project)
-                && (search.isEmpty || s.title.localizedCaseInsensitiveContains(search) || s.project.localizedCaseInsensitiveContains(search))
+            search.isEmpty || s.title.localizedCaseInsensitiveContains(search) || s.project.localizedCaseInsensitiveContains(search)
         }
     }
 
@@ -49,7 +47,7 @@ struct SessionsView: View {
                 header
                     .padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 8)
                 if brandOpen { brandPanel.transition(.opacity.combined(with: .move(edge: .top))) }
-                SearchField(prompt: "Find a session", text: $search)
+                SearchField(prompt: "Find a session or a clip", text: $search)
                     .padding(.horizontal, 12).padding(.bottom, 8)
                 if let note {
                     Text(note).font(.inter(.footnote)).foregroundStyle(Palette.warn)
@@ -58,6 +56,7 @@ struct SessionsView: View {
                 }
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 1) {
+                        if !search.isEmpty { clipRow }
                         ForEach(sections, id: \.0) { name, items in section(name, items) }
                         if !archived.isEmpty { archivedGroup }
                         if model.sessions.isEmpty && model.connected {
@@ -89,7 +88,7 @@ struct SessionsView: View {
             }
             .asks(confirm: $confirm, name: $ask)
             .navigationDestination(for: Session.self) { SessionView(session: $0) }
-            .sheet(isPresented: $appearance) { AppearanceSheet { appearance = false } }
+            .sheet(isPresented: $appearance) { AppearanceSheet(forget: { appearance = false; model.unpair() }) { appearance = false } }
             .task(id: model.connected) { if model.connected { await model.loadPlugins() } }
         }
     }
@@ -104,7 +103,7 @@ struct SessionsView: View {
                     // The app icon, blue tile and all, as the Mac's brand menu shows it (2026-10-04).
                     Image("BrandIcon").resizable().interpolation(.high).frame(width: 30, height: 30)
                         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    Text(project ?? "Takes").font(.nunito(size: 22, relativeTo: .title3)).foregroundStyle(Palette.ink).lineLimit(1)
+                    Text("Takes").font(.nunito(size: 22, relativeTo: .title3)).foregroundStyle(Palette.ink).lineLimit(1)
                     Image(systemName: "chevron.down").font(.system(size: 11, weight: .bold)).foregroundStyle(Palette.faint)
                         .rotationEffect(.degrees(brandOpen ? 180 : 0))
                     Circle().fill(model.connected ? Palette.live : Palette.faint).frame(width: 7, height: 7)
@@ -128,22 +127,13 @@ struct SessionsView: View {
         }
     }
 
-    /// What the Mac's brand menu holds, as rows in the sidebar's own style: the pages (they sat
-    /// in the foot and took half the screen, 2026-10-09), the look, which project to show, and
-    /// forgetting the Mac.
+    /// The pages (they sat in the foot and took half the screen, 2026-10-09), then Settings: the
+    /// look and forgetting the Mac. Only pages, so it reads at a glance (2026-10-11).
     private var brandPanel: some View {
         VStack(alignment: .leading, spacing: 1) {
             pages
             Rectangle().fill(Palette.border).frame(height: 1).padding(.vertical, 6).padding(.horizontal, 12)
-            panelRow("Appearance", icon: "paintpalette") { appearance = true; brandOpen = false }
-            Text("Show").font(.inter(.footnote, .medium)).foregroundStyle(Palette.faint)
-                .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 2)
-            panelRow("All projects", icon: project == nil ? "checkmark" : nil) { project = nil; brandOpen = false }
-            ForEach(projects, id: \.self) { p in
-                panelRow(p, icon: project == p ? "checkmark" : nil) { project = p; brandOpen = false }
-            }
-            Rectangle().fill(Palette.border).frame(height: 1).padding(.vertical, 6).padding(.horizontal, 12)
-            panelRow("Forget this Mac", icon: "xmark.circle", danger: true) { model.unpair() }
+            footRow("Settings", icon: "gearshape", hint: "Look, this Mac") { appearance = true }
         }
         .padding(6)
         .background(Palette.paper, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -152,17 +142,20 @@ struct SessionsView: View {
         .padding(.horizontal, 12).padding(.bottom, 10)
     }
 
-    private func panelRow(_ title: String, icon: String?, danger: Bool = false, _ action: @escaping () -> Void) -> some View {
-        Button { Brand.select(); withAnimation(Brand.spring) { action() } } label: {
-            HStack(spacing: 10) {
-                Text(title).font(.inter(.callout, .medium)).foregroundStyle(danger ? Palette.danger : Palette.ink)
+    /// Typing in Find a session also offers the footage: the Mac's ⌘K with the same words.
+    private var clipRow: some View {
+        Button { Brand.select(); SearchSeed.shared.query = search; tab?.wrappedValue = "search" } label: {
+            HStack(spacing: 11) {
+                Image(systemName: "sparkle.magnifyingglass").font(.system(size: 15)).foregroundStyle(Palette.accent).frame(width: 20)
+                Text("Search clips for \u{201C}\(search)\u{201D}").font(.inter(.body, .medium)).foregroundStyle(Palette.ink).lineLimit(1)
                 Spacer()
-                if let icon { Image(systemName: icon).font(.system(size: 13, weight: .semibold)).foregroundStyle(danger ? Palette.danger : Palette.accent) }
+                Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.faint)
             }
-            .padding(.horizontal, 12).frame(height: 40)
+            .padding(.horizontal, 12).frame(height: 44)
             .contentShape(Rectangle())
         }
         .buttonStyle(RowPress())
+        .accessibilityLabel("Search clips")
     }
 
     // MARK: Sections
@@ -290,15 +283,13 @@ struct SessionsView: View {
 
     // MARK: Foot
 
-    /// Performance, Comments, Search, the plugins and Styles: the Mac's sidebar foot, inside the
-    /// Takes menu so the sessions keep the screen.
+    /// Performance, Comments, the plugins and Styles: the Mac's sidebar foot, inside the Takes menu
+    /// so the sessions keep the screen. Search starts from Find a session (2026-10-11).
     @ViewBuilder private var pages: some View {
         if Features.socialBoards {
             footRow("Performance", icon: "chart.bar.xaxis") { tab?.wrappedValue = "performance" }
             footRow("Comments", icon: "text.bubble") { tab?.wrappedValue = "comments" }
         }
-        // The Mac's ⌘K (2026-10-09).
-        footRow("Search", icon: "magnifyingglass") { tab?.wrappedValue = "search" }
         ForEach(model.plugins, id: \.id) { p in footRow(p.title, icon: p.icon) { tab?.wrappedValue = "plugin:" + p.id } }
         footRow("Styles", icon: "square.stack") { tab?.wrappedValue = "styles" }
     }
@@ -306,6 +297,8 @@ struct SessionsView: View {
     /// Update and the waiting changes. Both draw nothing when there is none.
     private var foot: some View {
         VStack(spacing: 1) {
+            // Admin only: Ideas' bar, so an idea is one tap away (2026-10-11). Nothing in the public copy.
+            PrivatePhone.homeBar { tab?.wrappedValue = $0 }
             UpdatePill()
             OutboxBar(outbox: model.outbox)
         }
@@ -313,12 +306,13 @@ struct SessionsView: View {
         .background(Palette.surface)
     }
 
-    private func footRow(_ title: String, icon: String, _ action: @escaping () -> Void) -> some View {
+    private func footRow(_ title: String, icon: String, hint: String? = nil, _ action: @escaping () -> Void) -> some View {
         Button { Brand.select(); brandOpen = false; action() } label: {
             HStack(spacing: 11) {
                 Image(systemName: icon).font(.system(size: 15)).foregroundStyle(Palette.muted).frame(width: 20)
                 Text(title).font(.inter(.body, .medium)).foregroundStyle(Palette.muted)
                 Spacer()
+                if let hint { Text(hint).font(.inter(.footnote)).foregroundStyle(Palette.faint) }
                 Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.faint)
             }
             .padding(.horizontal, 12).frame(height: 44)
@@ -334,7 +328,7 @@ struct SessionsView: View {
         creating = true
         defer { creating = false }
         do {
-            let s = try await model.newVideo(project: project ?? lastProject)
+            let s = try await model.newVideo(project: lastProject)
             model.sessions.removeAll { $0.id == s.id }
             model.sessions.insert(s, at: 0)
             path = [s]

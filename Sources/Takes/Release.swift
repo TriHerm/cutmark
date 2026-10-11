@@ -36,20 +36,23 @@ final class Releaser {
 
     var menuTitle: String { running ? "Releasing… \(run?.current?.title.lowercased() ?? "")" : "Release to GitHub…" }
 
+    /// The confirm card is up (`ReleaseAsk`), and its check: redraw the README pictures first.
+    var asking = false
+    var askMedia = false
+
     /// Asks first (the push is public once the repo is), then runs. `toast` gets the result.
+    /// A Takes confirm card on the main window since 2026-10-11 (was an NSAlert).
     func confirmAndRun(toast: @escaping (String) -> Void) {
         guard Self.repo != nil, !running else { return }
-        let alert = NSAlert()
-        alert.messageText = "Release Takes to GitHub?"
-        alert.informativeText = "Takes copies main without your personal data, builds and tests the copy, "
-            + "and pushes it to the public repo. It runs in the background and takes a few minutes: "
-            + "the sidebar shows how far it is."
-        alert.addButton(withTitle: "Release")
-        alert.addButton(withTitle: "Cancel")
-        let media = NSButton(checkboxWithTitle: "Redraw the README pictures first", target: nil, action: nil)
-        alert.accessoryView = media
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        start(args: media.state == .on ? ["--media"] : [], toast: toast)
+        self.toast = toast
+        askMedia = false
+        asking = true
+    }
+
+    /// The card's Release button.
+    func confirmed() {
+        asking = false
+        start(args: askMedia ? ["--media"] : [], toast: toast)
     }
 
     func retry() { start(args: lastArgs, toast: toast) }
@@ -357,6 +360,21 @@ private extension Int {
 
 // MARK: - Sidebar
 
+/// The question before a release, as a Takes confirm card with its check (2026-10-11).
+struct ReleaseAsk: View {
+    @Bindable var releaser = Releaser.shared
+    var body: some View {
+        TakesConfirm(title: "Release Takes to GitHub?",
+                     message: "Takes copies main without your personal data, builds and tests the copy, "
+                        + "and pushes it to the public repo. It runs in the background and takes a few minutes: "
+                        + "the sidebar shows how far it is.",
+                     confirm: "Release",
+                     check: ("Redraw the README pictures first", $releaser.askMedia),
+                     onConfirm: { releaser.confirmed() },
+                     onCancel: { releaser.asking = false })
+    }
+}
+
 /// Under Update in the sidebar while a release runs or after it ended: the step, a bar and the
 /// time left. A click opens the steps; a stopped release opens them by itself.
 struct ReleaseRow: View {
@@ -371,7 +389,7 @@ struct ReleaseRow: View {
                     .buttonStyle(.plain)
             }
             .onHover { hover = $0 }
-            .popover(isPresented: $releaser.showDetail, arrowEdge: .trailing) { ReleaseDetail(releaser: releaser) }
+            .takesPopover(isPresented: $releaser.showDetail, edge: .trailing) { ReleaseDetail(releaser: releaser) }
             .padding(.bottom, 4)
             .transition(.opacity.combined(with: .scale(scale: 0.95)))
         }

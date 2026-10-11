@@ -53,6 +53,14 @@ enum Transcript {
         }
     }
 
+    /// Apple's words may go in the file: never over prepared words (the server's faster-whisper words
+    /// on the video clock, "v": 2), which cut_take and rough_cut need.
+    static func shouldWrite(_ video: URL) -> Bool {
+        guard let data = try? Data(contentsOf: file(for: video)),
+              let d = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return true }
+        return d["clock"] as? String != "video" && ((d["v"] as? NSNumber)?.intValue ?? 1) < 2
+    }
+
     static func text(for video: URL) -> String? {
         words(for: video).map { $0.map(\.word).joined(separator: " ") }
     }
@@ -217,6 +225,8 @@ final class Transcripts {
             let words = try await SpeechFile.words(of: video, locale: locale, hints: VoiceFollow.hints(script))
             // Renamed or trashed while it ran: the next sweep finds it under its new name.
             guard FileManager.default.fileExists(atPath: video.path) else { return true }
+            // Prepared words came first: they stay.
+            guard Transcript.shouldWrite(video) else { return true }
             try Transcript.write(words, source: "apple \(locale.identifier)", for: video)
             return true
         } catch {

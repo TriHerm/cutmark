@@ -19,11 +19,11 @@ final class Updater {
 
     /// The waiting build: when it was made, and the commits it adds, newest first. `release` is
     /// the tag of a staged GitHub release ("v2026.10.7"), nil for a local build.
-    struct Staged: Equatable { var stamp: String; var changes: [String]; var log: [Change] = []; var release: String? = nil }
+    struct Staged: Equatable, Sendable { var stamp: String; var changes: [String]; var log: [Change] = []; var release: String? = nil }
 
     /// One commit in the What's new panel. "Chat: @comments shows as a chip; …" gives the area
     /// "Chat", the headline before the first ";", and the rest plus the message body as detail.
-    struct Change: Equatable, Identifiable {
+    struct Change: Equatable, Identifiable, Sendable {
         var id: String
         var area: String
         var headline: String
@@ -93,7 +93,13 @@ final class Updater {
     func start() {
         guard timer == nil, running.pathExtension == "app" else { return }
         check()
-        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+        // A build staged from the terminal shows when you come back to Takes. The timer is only
+        // the fallback; it stat-ed a file on main every 5 s and showed up inside stalls (2026-10-11).
+        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
+            MainActor.assumeIsolated { Updater.shared.check() }
+        }
+        timer?.tolerance = 10
+        NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { Updater.shared.check() }
         }
         guard ownRelease != nil else { return }
@@ -247,13 +253,20 @@ final class Updater {
 
     /// Reads the staged Info.plist again only when it changed. A plist is read directly, not
     /// through Bundle, which caches it per path.
+    /// Off main: the disk can be busy (a render) exactly when the check runs.
     func check() {
-        let plist = waiting.appendingPathComponent("Contents/Info.plist")
-        let changed = (try? FileManager.default.attributesOfItem(atPath: plist.path))?[.modificationDate] as? Date
-        if changed != nil, changed == lastRead { return }
-        lastRead = changed
-        let next = Self.read(waiting, ownStamp: Bundle.main.infoDictionary?["BuildStamp"] as? String)
-        if staged != next { staged = next }
+        let waiting = waiting, last = lastRead, own = Bundle.main.infoDictionary?["BuildStamp"] as? String
+        Task.detached(priority: .utility) {
+            let plist = waiting.appendingPathComponent("Contents/Info.plist")
+            let changed = (try? FileManager.default.attributesOfItem(atPath: plist.path))?[.modificationDate] as? Date
+            if changed != nil, changed == last { return }
+            let next = Self.read(waiting, ownStamp: own)
+            await MainActor.run {
+                let u = Updater.shared
+                u.lastRead = changed
+                if u.staged != next { u.staged = next }
+            }
+        }
     }
 
     /// The build staged at `waiting`, or nil when there is none or it is this build.
@@ -377,7 +390,7 @@ struct UpdateButton: View {
                 .buttonStyle(.plain)
                 .onHover { hover = $0 ? .changes : (hover == .changes ? nil : hover) }
                 .help("See what's new")
-                .popover(isPresented: $open, arrowEdge: .trailing) {
+                .takesPopover(isPresented: $open, edge: .trailing) {
                     WhatsNew(staged: staged, updater: updater, update: apply)
                 }
             }

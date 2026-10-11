@@ -25,8 +25,11 @@ class ImportTake(unittest.TestCase):
         self.s = os.path.join(self.root, "Proj", "2026-09-27-test")
         os.makedirs(self.s)
         self.out = tempfile.mkdtemp()
+        # An import starts a job that finds the words (test_edit_ready tests it): none here.
+        self.start_prepare, t.start_prepare = t.start_prepare, lambda s, numbers: None
 
     def tearDown(self):
+        t.start_prepare = self.start_prepare
         shutil.rmtree(self.root)
         shutil.rmtree(self.out)
         os.environ.pop("TAKES_ROOT", None)

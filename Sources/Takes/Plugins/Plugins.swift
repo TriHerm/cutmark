@@ -36,6 +36,9 @@ struct TakesPlugin: Identifiable {
     var phone: PhoneHook? = nil
     /// Turned on or off on the Plugins board (2026-10-09, Consistency marks its plan file off).
     var toggled: (@MainActor (AppModel, Bool) -> Void)? = nil
+    /// What its board chat (hub.boardChat(id)) hears (2026-10-10, Ideas). With one, the phone can
+    /// open that chat too, as board:<id>, before the board was ever shown on the Mac.
+    var chatContext: (@MainActor () -> String)? = nil
 }
 
 /// A plugin's part of the phone server. `route` answers the requests it knows (with the library
@@ -117,6 +120,8 @@ enum Plugins {
     /// The plugins with a board of their own.
     static var boards: [TakesPlugin] { all.filter { $0.board != nil } }
     static func named(_ id: String) -> TakesPlugin? { all.first { $0.id == id } }
+    /// An installed plugin whose board chat the phone may open.
+    static func chatPlugin(_ id: String) -> TakesPlugin? { named(id).flatMap { $0.chatContext == nil ? nil : $0 } }
     static var postSides: [PostSide] { all.flatMap(\.postSides) }
     static var recordHooks: [RecordHook] { all.compactMap(\.record) }
     static var phoneHooks: [PhoneHook] { all.compactMap(\.phone) }

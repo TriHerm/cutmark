@@ -289,9 +289,11 @@ enum PostFile {
 
     /// Picks the video or image the post shows (`rel` inside the session). nil goes back to the
     /// newest edit. With no post yet, it starts an empty one.
+    /// The user's pick: no media_by, so publish_edit never moves the post off it (2026-10-11).
     static func pickMedia(_ rel: String?, in session: URL, _ p: PostPlatform = .linkedin) {
         if var c = read(session, p) {
             c.media = rel
+            c.meta["media_by"] = nil
             write(c, to: session, p)
         } else if let rel {
             write(Content(text: "", media: rel), to: session, p)
@@ -818,7 +820,7 @@ struct PlatformPostPane: View {
                     if platform == .article {
                         Button { showComponents.toggle() } label: { Image(systemName: "square.stack.3d.up").frame(width: 30, height: 28) }
                             .help("Put one of the blog's components in, after the paragraph with the cursor")
-                            .popover(isPresented: $showComponents, arrowEdge: .bottom) {
+                            .takesPopover(isPresented: $showComponents) {
                                 ArticleComponentsHelp { md in
                                     showComponents = false
                                     insertComponent = (md, (insertComponent?.token ?? 0) + 1)
@@ -1035,7 +1037,7 @@ struct StatusControl: View {
                 .transition(.scale(scale: 0.9).combined(with: .opacity))
             }
         }
-        .popover(isPresented: $open, arrowEdge: .bottom) {
+        .takesPopover(isPresented: $open) {
             SchedulePanel(content: content, post: post, close: { open = false })
         }
     }
@@ -1077,10 +1079,52 @@ struct SchedulePanel: View {
     @Environment(AppModel.self) var app
     @State private var date = Date()
     @State private var zoneID = TimeZone.current.identifier
+    /// The zone list or the ⋯ rows, open inside this panel (the kit has one floating panel).
+    @State private var picking = false
+    @State private var more = false
 
     private var zone: TimeZone { TimeZone(identifier: zoneID) ?? .current }
 
     var body: some View {
+        if picking { zonePage } else { form }
+    }
+
+    /// The time zone menu, in place of the calendar while it is open. Each row shows the post's
+    /// time there (2026-10-11).
+    private var zonePage: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button { withAnimation(Theme.motion) { picking = false } } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.left").font(.system(size: 10, weight: .bold))
+                    Text("Time zone").font(Theme.sans(13, .semibold))
+                }
+                .foregroundStyle(Theme.ink).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Back to the date and time")
+            PanelMenu(width: 288, close: { withAnimation(Theme.motion) { picking = false } }) {
+                for z in PostFile.zones(with: zone) {
+                    MenuButton(PostFile.zoneName(z), detail: Self.clock(date, z), checked: z.identifier == zoneID) {
+                        date = PostFile.moved(date, from: zone, to: z)
+                        zoneID = z.identifier
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(width: 320, alignment: .leading)
+        .tint(Theme.accent)
+    }
+
+    /// "9:00 AM": the time in a zone, for the zone rows.
+    static func clock(_ date: Date, _ zone: TimeZone) -> String {
+        let f = DateFormatter()
+        f.timeZone = zone
+        f.dateFormat = "h:mm a"
+        return f.string(from: date)
+    }
+
+    private var form: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(content.status == .posted ? "Posted" : "When does it go out?").font(Theme.sans(15, .bold))
             DatePicker("", selection: $date, displayedComponents: [.date])
@@ -1089,13 +1133,18 @@ struct SchedulePanel: View {
             HStack(spacing: 8) {
                 DatePicker("", selection: $date, displayedComponents: [.hourAndMinute])
                     .labelsHidden().environment(\.timeZone, zone)
-                Picker("", selection: Binding(get: { zoneID }, set: { id in
-                    if let to = TimeZone(identifier: id) { date = PostFile.moved(date, from: zone, to: to) }
-                    zoneID = id
-                })) {
-                    ForEach(PostFile.zones(with: zone), id: \.identifier) { z in Text(PostFile.zoneName(z)).tag(z.identifier) }
+                Button { more = false; withAnimation(Theme.motion) { picking = true } } label: {
+                    HStack(spacing: 5) {
+                        Text(PostFile.zoneName(zone)).font(Theme.sans(12.5)).foregroundStyle(Theme.ink).lineLimit(1)
+                        Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)).foregroundStyle(Theme.faint)
+                    }
+                    .padding(.horizontal, 9).frame(height: 24)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Theme.surface))
+                    .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Theme.border))
+                    .contentShape(Rectangle())
                 }
-                .labelsHidden()
+                .buttonStyle(.plain)
+                .help("The time zone the time is in")
             }
             if zone.identifier != TimeZone.current.identifier {
                 Text("That is \(PostFile.label(date, .current)) here.").font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
@@ -1106,18 +1155,11 @@ struct SchedulePanel: View {
                 .font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
-                Menu {
-                    if content.status == .draft {
-                        Button("Ready, No Time Yet") { post.update { $0.status = .ready }; close() }
-                    }
-                    if content.at != nil, content.status != .posted {
-                        Button("Remove the Time") { post.update { $0.plan(nil, in: $0.tz) }; close() }
-                    }
-                    if content.status != .draft {
-                        Button("Back to Draft") { post.update { $0.status = .draft; $0.plan(nil, in: $0.tz) }; close() }
-                    }
-                } label: { Image(systemName: "ellipsis.circle") }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                Button { withAnimation(Theme.motion) { more.toggle() } } label: {
+                    Image(systemName: "ellipsis.circle").font(.system(size: 14)).frame(width: 26, height: 26)
+                }
+                .buttonStyle(IconButtonStyle())
+                .help("More: ready without a time, remove the time, back to draft")
                 Spacer()
                 Button("Cancel", action: close).keyboardShortcut(.cancelAction)
                     .buttonStyle(AccentButtonStyle(kind: .quiet))
@@ -1132,10 +1174,26 @@ struct SchedulePanel: View {
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(AccentButtonStyle(kind: .solid))
             }
+            if more {
+                let (content, post, close) = (content, post, close)
+                PanelMenu(width: 220, close: { withAnimation(Theme.motion) { more = false } }) {
+                    if content.status == .draft {
+                        MenuButton("Ready, No Time Yet", icon: "checkmark.circle") { post.update { $0.status = .ready }; close() }
+                    }
+                    if content.at != nil, content.status != .posted {
+                        MenuButton("Remove the Time", icon: "clock.badge.xmark") { post.update { $0.plan(nil, in: $0.tz) }; close() }
+                    }
+                    if content.status != .draft {
+                        MenuButton("Back to Draft", icon: "arrow.uturn.backward") {
+                            post.update { $0.status = .draft; $0.plan(nil, in: $0.tz) }; close()
+                        }
+                    }
+                }
+                .transition(.opacity)
+            }
         }
         .padding(16)
         .frame(width: 320)
-        .background(Theme.paper)
         .tint(Theme.accent)
         .onAppear {
             zoneID = content.tz.identifier
@@ -1149,6 +1207,30 @@ struct SchedulePanel: View {
         cal.timeZone = zone
         let tomorrow = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: .now)) ?? .now
         return cal.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow) ?? tomorrow
+    }
+}
+
+/// A Takes menu that opens inside a panel (2026-10-11). The kit shows one floating panel at a time,
+/// so a menu from a panel would close it: this one draws its rows in the panel, which grows to fit.
+/// The keys work as in a kit menu: ↑ ↓, Return, typing finds in a long list.
+private struct PanelMenu: View {
+    var width: CGFloat? = nil
+    let close: () -> Void
+    @MenuBuilder let content: () -> [MenuItem]
+    @State private var state = MenuState()
+    @State private var monitor: Any?
+
+    var body: some View {
+        TakesMenuList(content: content, state: state, width: width)
+            .onAppear {
+                state.searchable = MenuState.wantsFind(content())
+                state.finish = { item in
+                    close()
+                    if let a = item.action { DispatchQueue.main.async { a() } }
+                }
+                monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { e in state.key(e, in: content()) ? nil : e }
+            }
+            .onDisappear { if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil }
     }
 }
 
@@ -1261,7 +1343,7 @@ struct LinkedInCard: View {
             Image(systemName: "ellipsis").font(.system(size: 16, weight: .semibold)).foregroundStyle(LinkedIn.muted)
                 .padding(.top, 4)
         }
-        .popover(isPresented: $editingProfile, arrowEdge: .bottom) { profileEditor }
+        .takesPopover(isPresented: $editingProfile) { profileEditor }
     }
 
     private var avatar: some View {

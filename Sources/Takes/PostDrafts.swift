@@ -198,12 +198,12 @@ struct PostDraftBar: View {
             if renaming != slug && post.draft != slug { post.flush(); withAnimation(Theme.spring) { post.draft = slug } }
         })
         .help(slug == "main" ? note : "\(note.isEmpty ? label : note) · double-click to rename")
-        .contextMenu {
+        .takesContextMenu {
             if slug != "main" {
-                Button("Rename…") { startRename(slug, label) }
-                Button("Use as Main") { post.promote(slug) }
-                Divider()
-                Button("Delete Variant", role: .destructive) { post.delete(slug) }
+                MenuButton("Rename…", icon: "pencil") { startRename(slug, label) }
+                MenuButton("Use as Main", icon: "arrow.up.circle") { post.promote(slug) }
+                MenuDivider()
+                MenuButton("Delete Variant", icon: "trash", danger: true) { post.delete(slug) }
             }
         }
     }

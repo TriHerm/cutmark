@@ -3,17 +3,6 @@ import Testing
 @testable import Takes
 
 struct AgentSetupTests {
-    @Test func findsTheRegisteredScript() {
-        let out = """
-        takes:
-          Scope: User config
-          Type: stdio
-          Command: /usr/bin/python3
-          Args: /Applications/Takes.app/Contents/Resources/takes_mcp.py
-        """
-        #expect(AgentSetup.registeredScripts(in: out) == ["/Applications/Takes.app/Contents/Resources/takes_mcp.py"])
-    }
-
     @Test func copiesOnlyShippedSkills() throws {
         let fm = FileManager.default
         let tmp = fm.temporaryDirectory.appending(path: UUID().uuidString)

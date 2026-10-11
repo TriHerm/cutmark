@@ -1,5 +1,7 @@
+import AppKit
 import Foundation
 import Testing
+import SwiftUI
 @testable import Takes
 
 /// The Consistency plugin: slots, buffer, slots kept and the recording streak, from the plan file,
@@ -156,6 +158,16 @@ import Testing
         #expect(PlanChoice.matching(list, "posts morning").map(\.id) == ["Posts/b"])
         #expect(PlanChoice.matching(list, "kebab posts").isEmpty)
     }
+
+    @Test func flameGrowsWithTheDays() {
+        #expect(FireLevel(days: 0).name == "Pick a day to start")
+        #expect(FireLevel(days: 0).opacity == 0)
+        #expect(FireLevel(days: 2).name == "The sweet spot")
+        #expect(FireLevel(days: 3).name == "On fire")
+        #expect(FireLevel(days: 7) == FireLevel(days: 4))
+        #expect(FireLevel(days: 7).name == "Super Takes")
+        #expect((0...6).map { FireLevel(days: $0).scale } == (0...6).map { FireLevel(days: $0).scale }.sorted())
+    }
 }
 
 extension Snap {
@@ -204,10 +216,50 @@ extension Snap {
         }
         store.stats = s
         shoot("consistency-board", ConsistencyPage(store: store, root: root), size: CGSize(width: 1100, height: 820))
+        // Change days: the flame at each level, with the two-week preview.
+        let mascot = NSImage(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appending(path: "../../assets/brand/mascot.png").standardized)
+        for (name, days) in [("1", ["tue"]), ("2", ["tue", "thu"]), ("3", ["tue", "thu", "fri"]), ("5", ["mon", "tue", "wed", "thu", "fri"])] {
+            let plan = PostingPlan(days: days, time: "08:02", platforms: ["linkedin"])
+            for dark in [true, false] {
+                shoot("consistency-edit-\(name)-\(dark ? "dark" : "light")",
+                      ScrollView { CommitCard(start: plan, first: false, preview: s, mascot: mascot) { _ in } cancel: {}.padding(28) }
+                        .background(Theme.paper),
+                      size: CGSize(width: 900, height: 940), dark: dark)
+            }
+        }
         let d = Date()
         let choices = [PlanChoice(id: "Launch/a", title: "Kebab shop demo", project: "Launch", createdAt: d, done: false),
                        PlanChoice(id: "Launch/b", title: "Why I record every morning", project: "Launch", createdAt: d, done: false),
                        PlanChoice(id: "Posts/c", title: "Three hooks that worked", project: "Posts", createdAt: d, done: true)]
         shoot("consistency-picker", PlanPicker(choices: choices, planned: ["Launch/b"]) { _ in }, size: CGSize(width: 300, height: 260))
+    }
+}
+
+// 2026-10-11: the Plan and Feedback boards rescanned the whole library on every file change.
+struct BoardRefreshTests {
+    let root = URL(fileURLWithPath: "/L")
+
+    @Test func planBoardCountsOnlyTheFilesItReads() {
+        func m(_ p: String) -> Bool { ConsistencyStore.matters(["/L/" + p], root: root) }
+        #expect(m("_library/plan.json"))
+        #expect(m("P/2026-10-01-a/session.json"))
+        #expect(m("P/2026-10-01-a/posts/linkedin.md"))
+        #expect(m("P/2026-10-01-a/edits/cut-v2.mp4"))
+        #expect(m("P/2026-10-02-new"))
+        #expect(!m("P/2026-10-01-a/.claude-chat.json"))
+        #expect(!m("P/2026-10-01-a/comments.json"))
+        #expect(!m("P/2026-10-01-a/stills/a.png"))
+        #expect(!m("P/2026-10-01-a/edits/.tmp-cut.mp4"))
+        #expect(!m("_library/rules/edit.json"))
+    }
+
+    @Test func feedbackBoardCountsCommentsAndRules() {
+        func m(_ p: String) -> Bool { FeedbackStore.matters(["/L/" + p], root: root) }
+        #expect(m("_library/rules/edit.json"))
+        #expect(m("P/2026-10-01-a/comments.json"))
+        #expect(m("P/2026-10-01-a/checks.json"))
+        #expect(!m("P/2026-10-01-a/posts/linkedin.md"))
+        #expect(!m("_library/plan.json"))
     }
 }

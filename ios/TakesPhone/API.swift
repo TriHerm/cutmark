@@ -682,6 +682,8 @@ struct API {
         _ = try await send(request("/api/copilot/run", method: "POST", json: ["lane": lane, "count": count]), as: OK.self)
     }
     func copilotPhoto(_ id: String) -> URL { url("/api/copilot/photo", ["id": id, "token": token ?? ""]) }
+    /// An idea's thumbnail (Ideas, admin only): "thumbnails/<id>-vN.png", a new name for each version.
+    func ideaThumb(_ file: String) -> URL { url("/api/ideas/thumb", ["file": file, "token": token ?? ""]) }
 
     /// The raw answer, so the phone can keep it and show it at once next time.
     func performanceData() async throws -> Data { try await raw(request("/api/performance")) }

@@ -283,8 +283,11 @@ extension PhoneServer {
         if let lib = appModel?.library { lib.moveSessions([Store.dir(s)], to: Store.dir(p)) } else {
             var target = p.appending(path: id)
             var n = 2
-            while FileManager.default.fileExists(atPath: target.path) { target = p.appending(path: "\(id)-\(n)"); n += 1 }
-            try? FileManager.default.moveItem(at: s, to: target)
+            let sid = Store.sessionID(s)
+            while FileManager.default.fileExists(atPath: target.path) || Store.movedAway(target, for: sid) {
+                target = p.appending(path: "\(id)-\(n)"); n += 1
+            }
+            Store.moveSession(from: s, to: target)
         }
         // Library adds -2 when the name is taken there: the new folder is the one that was not there.
         let after = Set((try? FileManager.default.contentsOfDirectory(atPath: p.path)) ?? [])

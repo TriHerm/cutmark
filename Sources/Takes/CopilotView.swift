@@ -130,18 +130,16 @@ struct CommentsView: View {
         return HStack(spacing: 2) {
             ForEach(visible, id: \.id) { t in segment(t.id, t.title, t.count) }
             if !hidden.isEmpty {
-                Menu {
-                    ForEach(hidden, id: \.id) { t in
-                        Button { tab = t.id } label: {
-                            Text(t.count.map { $0 > 0 ? "\(t.title)  \($0)" : t.title } ?? t.title)
-                        }
-                    }
-                } label: {
+                TakesMenuButton(help: "More: \(hidden.map(\.title).joined(separator: ", "))") {
                     Image(systemName: "ellipsis").font(.system(size: 12, weight: .semibold))
                         .frame(width: 28, height: 26)
+                        .modifier(IconHover())
+                } content: {
+                    for t in hidden {
+                        MenuButton(t.title, detail: t.count.flatMap { $0 > 0 ? "\($0)" : nil }) { tab = t.id }
+                    }
                 }
-                .menuStyle(.button).buttonStyle(IconButtonStyle()).menuIndicator(.hidden).fixedSize()
-                .help("More: \(hidden.map(\.title).joined(separator: ", "))")
+                .fixedSize()
             }
         }
         .padding(3)
@@ -188,23 +186,22 @@ struct CommentsView: View {
             .buttonStyle(.plain)
             .help("Find posts in a background Chrome tab and draft comments. You watch it in the chat. Nothing gets posted.")
             Rectangle().fill(Theme.paper.opacity(0.35)).frame(width: 1, height: 16)
-            Menu {
-                Picker("Posts per run", selection: $drafts) {
-                    ForEach([3, 5, 7, 10, 15], id: \.self) { Text("\($0) posts").tag($0) }
-                }
-                .pickerStyle(.inline)
-                Divider()
-                Toggle("Search every day at 8:07", isOn: $daily)
-            } label: {
+            TakesMenuButton(help: "How many posts a run looks for, and the daily search") {
                 HStack(spacing: 3) {
                     Text("\(drafts)").font(Theme.mono(11.5, .semibold))
                     Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
                 }
                 .padding(.leading, 9).padding(.trailing, 12).frame(height: 30)
                 .contentShape(Rectangle())
+            } content: {
+                MenuLabel("Posts per run")
+                for n in [3, 5, 7, 10, 15] {
+                    MenuButton("\(n) posts", checked: drafts == n) { drafts = n }
+                }
+                MenuDivider()
+                MenuButton("Search every day at 8:07", checked: daily, keepsOpen: true) { daily.toggle() }
             }
-            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
-            .help("How many posts a run looks for, and the daily search")
+            .fixedSize()
         }
         .font(Theme.sans(13, .semibold))
         .foregroundStyle(Theme.paper)
@@ -681,11 +678,7 @@ private struct ReviewCard: View {
         let reasons = DeclineReason.reasons(wrongPost: wrongPost)
         let typed = !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         return VStack(alignment: .leading, spacing: 10) {
-            Picker("", selection: $wrongPost) {
-                Text("Bad comment").tag(false)
-                Text("Wrong post").tag(true)
-            }
-            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            TakesSwitch(selection: $wrongPost, options: [(false, "Bad comment"), (true, "Wrong post")])
             .help("Wrong post: you would not comment on this post at all. Bad comment: the post is fine, the draft is not.")
             HStack(spacing: 6) {
                 ForEach(Array(reasons.enumerated()), id: \.element) { i, r in
@@ -1339,11 +1332,7 @@ private struct CopilotDocView: View {
                     .font(Theme.mono(10.5)).foregroundStyle(Theme.faint).help(doc.url.path)
             }
             Spacer()
-            Picker("", selection: $reading) {
-                Text("Read").tag(true)
-                Text("Edit").tag(false)
-            }
-            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            TakesSwitch(selection: $reading, options: [(true, "Read"), (false, "Edit")])
             .onChange(of: reading) { selection = "" }
             .help("Read shows the formatting; Edit shows the markdown to change it")
             Button(action: start) { Label("Comment", systemImage: "text.bubble") }
@@ -1634,5 +1623,18 @@ private struct RunLabel: LabelStyle {
             configuration.icon.font(.system(size: 9, weight: .bold))
             configuration.title.lineLimit(1)
         }
+    }
+}
+
+/// The look of `IconButtonStyle` for a Takes menu's label: the menu button itself is plain (2026-10-11).
+private struct IconHover: ViewModifier {
+    @State private var hover = false
+    func body(content: Content) -> some View {
+        content
+            .foregroundStyle(hover ? Theme.ink : Theme.muted)
+            .background(RoundedRectangle(cornerRadius: 8).fill(hover ? Theme.hover : .clear))
+            .contentShape(Rectangle())
+            .onHover { hover = $0 }
+            .animation(Theme.motion, value: hover)
     }
 }

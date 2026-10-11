@@ -414,8 +414,14 @@ struct ReviewPlayer: View {
     /// The video's width, for the bar under it: narrow, it drops the time label.
     @State private var videoWidth: CGFloat = 600
     /// The bar sits under the video, never on it (2026-10-09): over the picture it hid captions
-    /// and titles the user was reviewing. Its height plus the gap above it.
-    static let barSpace: CGFloat = 54
+    /// and titles the user was reviewing. Its height plus the gap above it; an edit also has the line
+    /// of check_edit's results under the bar (2026-10-11).
+    static func barSpace(for url: URL, in session: URL) -> CGFloat {
+        EditChecks.isEdit(url, in: session) ? 78 : 54
+    }
+    private var barSpace: CGFloat { embedded ? 54 : Self.barSpace(for: url, in: session) }
+    /// What check_edit found in this edit (edits/ only).
+    @State private var checks: EditChecks.State?
     /// The vertical apps' safe zone over a tall video: pinned with its button, shown while the
     /// pointer is on the button.
     @AppStorage("safeZone") private var safePinned = false
@@ -463,10 +469,10 @@ struct ReviewPlayer: View {
             } else {
                 // The video in its own shape, as big as fits, clear of the pills on top.
                 GeometryReader { geo in
-                    let room = CGSize(width: max(0, geo.size.width - 40), height: max(0, geo.size.height - 76 - Self.barSpace))
+                    let room = CGSize(width: max(0, geo.size.width - 40), height: max(0, geo.size.height - 76 - barSpace))
                     let box = Self.fit(clock.size == .zero ? CGSize(width: 16, height: 9) : clock.size, in: room).size
                     videoBox(width: box.width)
-                        .frame(width: max(box.width, 360), height: box.height + Self.barSpace)
+                        .frame(width: max(box.width, 360), height: box.height + barSpace)
                         .frame(width: geo.size.width, height: geo.size.height)
                         .offset(y: 18)
                         // Hidden until the video's shape is known: else a 16:9 box shows first
@@ -480,6 +486,7 @@ struct ReviewPlayer: View {
             releaseKeys()
             store.load(session)
             if embedded { post.clock = clock; app.postReview = post; return }
+            loadChecks()
             app.player = clock.player
             if let t = app.pendingSeek {
                 app.pendingSeek = nil
@@ -496,7 +503,7 @@ struct ReviewPlayer: View {
             clock.stop(); mode = false
             if app.postReview === post { app.postReview = nil }
         }
-        .onFilesChanged(in: session) { store.load(session); voice.mix?.reload() }
+        .onFilesChanged(in: session) { store.load(session); voice.mix?.reload(); loadChecks() }
         .task { voice.mix?.attach(clock) }
         .onChange(of: mode) { _, on in
             if on { clock.player.pause(); focused = nil }
@@ -506,7 +513,7 @@ struct ReviewPlayer: View {
 
     /// The video with its comment layers and big play button, and the controls under it.
     private func videoBox(width: CGFloat?) -> some View {
-        VStack(spacing: embedded ? 0 : Self.barSpace - 44) {
+        VStack(spacing: embedded ? 0 : 10) {
             Group {
                 if embedded { video.aspectRatio(ratio, contentMode: .fit) } else { video.frame(width: width) }
             }
@@ -527,7 +534,20 @@ struct ReviewPlayer: View {
                       onComment: { mode.toggle() })
                 .frame(height: 44)
                 .padding(embedded ? 8 : 0)
+            if let checks, !embedded {
+                CheckLine(state: checks, width: videoWidth) { t in clock.seek(t) }
+                    .frame(height: barSpace - 54 - 10)
+            }
         }
+    }
+
+    /// check_edit's newest result for this file, when it is an edit.
+    private func loadChecks() {
+        guard !embedded, EditChecks.isEdit(url, in: session) else { return }
+        let rel = url.standardizedFileURL.path.replacingOccurrences(of: session.standardizedFileURL.path + "/", with: "")
+        let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+        let now = EditChecks.read(session, file: rel, modified: modified)
+        if now != checks { checks = now }
     }
 
     private var video: some View {

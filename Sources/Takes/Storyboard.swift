@@ -319,12 +319,24 @@ struct StoryboardPane: View {
         .task(id: doc.url) {
             guard !still else { return }
             stamp = nil; board = nil; images = [:]; picked = nil; trying = [:]
-            // Sketches land one by one while the tab is open: a stat every 1.5 s costs nothing.
+            if shown { await reload(); comments.load(doc.url) }
+        }
+        // Sketches land one by one: a stat every 1.5 s while some are still drawing. The loop
+        // ran forever once the tab opened (2026-10-11); the file watch covers the rest.
+        .task(id: pending) {
+            guard !still, pending else { return }
             while !Task.isCancelled {
-                if shown { await reload(); comments.load(doc.url) }
                 try? await Task.sleep(for: .milliseconds(1500))
+                if shown { await reload(); comments.load(doc.url) }
             }
         }
+        .onFilesChanged(in: doc.url) { Task { await reload(); comments.load(doc.url) } }
+        .onChange(of: shown) { _, on in if on && !still { Task { await reload(); comments.load(doc.url) } } }
+    }
+
+    /// A sketch still drawing.
+    private var pending: Bool {
+        board?.shots.contains { $0.image == nil && $0.video == nil && $0.error == nil } ?? false
     }
 
     /// The camera takes filed under each shot, oldest first.
@@ -744,6 +756,7 @@ private struct ShotDetail: View {
     // GeometryReader (inside one the blur-in never started) and not a measured @State size: that
     // fed the sketch's width back into the size it was measured from and froze the app (2026-10-04).
     var body: some View {
+        let app = app  // the right-click rows run outside body
         ShotSplit(ratio: frameRatio, below: shot.options.isEmpty ? 0 : Self.rowHeight + 12) {
             VStack(alignment: .leading, spacing: 12) {
                 frame
@@ -774,7 +787,7 @@ private struct ShotDetail: View {
             .scrollIndicators(.never)
         }
         .padding(.horizontal, 28).padding(.top, 24).padding(.bottom, 28)
-        .contextMenu { menu }
+        .takesContextMenu { menu(app) }
     }
 
     // One row when it fits; in a narrow column the buttons go to a second row (2026-10-09):
@@ -909,7 +922,7 @@ private struct ShotDetail: View {
                 if shot.generating != nil {
                     HStack(spacing: 7) {
                         ProgressView().controlSize(.mini).tint(.white)
-                        Text("Making the clip…").font(Theme.sans(11.5, .medium)).foregroundStyle(.white)
+                        Text("Making the clip").font(Theme.sans(11.5, .medium)).foregroundStyle(.white)
                     }
                     .padding(.horizontal, 11).padding(.vertical, 7)
                     .background(.black.opacity(0.6), in: Capsule())
@@ -1107,27 +1120,28 @@ private struct ShotDetail: View {
         draft = ""
     }
 
-    @ViewBuilder private var menu: some View {
-        Button("Record this shot") { app.record(shot: shot) }.disabled(app.isRecording)
+    /// A shot's right-click rows (Takes menu kit, 2026-10-11).
+    @MenuBuilder private func menu(_ app: AppModel) -> [MenuItem] {
+        MenuButton("Record this shot", icon: "record.circle", enabled: !app.isRecording) { app.record(shot: shot) }
         if let maker = VideoMaker.current {
-            Button("Make the clip with \(maker.name)") { makeClip() }.disabled(shot.generating != nil)
+            MenuButton("Make the clip with \(maker.name)", icon: "wand.and.stars", enabled: shot.generating == nil) { makeClip() }
         }
         let others = doc.meta.takes.filter { $0.kind == .camera && $0.shot != shot.id }.sorted { $0.number > $1.number }
         if !others.isEmpty {
-            Menu("File a take under this shot") {
-                ForEach(others) { t in
-                    Button("\(t.name ?? "Take \(t.number)")\(t.duration.map { " · \(Storyboard.clock($0))" } ?? "")") {
+            MenuGroup("File a take under this shot", icon: "film") {
+                for t in others {
+                    MenuButton("\(t.name ?? "Take \(t.number)")\(t.duration.map { " · \(Storyboard.clock($0))" } ?? "")") {
                         doc.link(take: t.number, to: shot.id)
                     }
                 }
             }
         }
-        Button("Ask Takes for a variant") { askVariant() }
+        MenuButton("Ask Takes for a variant", icon: "sparkles") { askVariant() }
         if let media {
-            Button(clip != nil ? "Open the clip" : "Open the still") { NSWorkspace.shared.openSoon(media) }
-            Button("Show in Finder") { NSWorkspace.shared.revealSoon([media]) }
+            MenuButton(clip != nil ? "Open the clip" : "Open the still", icon: "arrow.up.forward.app") { NSWorkspace.shared.openSoon(media) }
+            MenuButton("Show in Finder", icon: "folder") { NSWorkspace.shared.revealSoon([media]) }
         } else if let n = shot.image {
-            Button("Open the sketch") { NSWorkspace.shared.openSoon(Storyboard.folder(doc.url).appending(path: n)) }
+            MenuButton("Open the sketch", icon: "scribble") { NSWorkspace.shared.openSoon(Storyboard.folder(doc.url).appending(path: n)) }
         }
     }
 }
@@ -1218,14 +1232,14 @@ private struct TakeThumb: View {
         }
         .buttonStyle(.plain)
         .help(help)
-        .contextMenu {
-            Button(take.keeper ? "Unstar" : "Star as the keeper") { doc.toggleKeeper(take.number) }
-            Button(cut == nil ? "Find the Best Cut" : "Find the Best Cut Again") {
+        .takesContextMenu {
+            MenuButton(take.keeper ? "Unstar" : "Star as the keeper", icon: take.keeper ? "star.slash" : "star") { doc.toggleKeeper(take.number) }
+            MenuButton(cut == nil ? "Find the Best Cut" : "Find the Best Cut Again", icon: "scissors",
+                       enabled: cut?.state != "running") {
                 TakeCut.start(doc.url, take: take.number)
                 cut = TakeCut(state: "running")
             }
-            .disabled(cut?.state == "running")
-            Button("Take it off this shot") { doc.link(take: take.number, to: nil) }
+            MenuButton("Take it off this shot", icon: "minus.circle") { doc.link(take: take.number, to: nil) }
         }
         .task(id: url) { cut = TakeCut.read(doc.url)[String(take.number)] }
         .onReceive(NotificationCenter.default.publisher(for: .takesFilesChanged)) { note in

@@ -1,7 +1,10 @@
-# ffmpeg and Whisper recipes
+# ffmpeg recipes
 
-Replace the CAPS words. `IN.mov` is the keeper take, `VOICE.wav` the `clean_voice` file (or the
-take's own audio), `OUT.mp4` the path from `next_path`.
+Replace the CAPS words. `IN.mov` is the keeper take, `CUT.mp4` the clip from `rough_cut` or
+`cut_take`, `OUT.mp4` the path from `next_path`. Cut takes with `rough_cut` and `cut_take` by
+default: they handle the audio offset, the frame rate and the word edges. For a cut they cannot do
+(a J/L cut, a speed change, an effect), start from `CUT.mp4` and its `.wav`, or take the sound out
+of `IN.mov` as below.
 
 ## Inspect
 
@@ -11,60 +14,24 @@ ffprobe -v error -show_entries stream=index,codec_type,r_frame_rate,avg_frame_ra
   -show_entries format=duration -of json IN.mov
 ```
 
-If `r_frame_rate` and `avg_frame_rate` differ, the file is variable frame rate. Make a CFR copy
-before you cut:
+A take's audio stream often starts 0.16–0.24 s after its video (`start_time`). `cut_take`
+corrects that. The clips (`_work/`) are constant frame rate.
+
+## Sound out of a take, by hand
 
 ```bash
-ffmpeg -i IN.mov -vf fps=30 -c:v libx264 -crf 16 -preset fast -c:a copy cfr.mp4
+# aresample pads the start: second 0 of the WAV is frame 0 of the video. Plain -vn is 5 frames early.
+ffmpeg -i IN.mov -vn -af aresample=async=1:first_pts=0 -ac 1 -ar 48000 -c:a pcm_f32le voice.wav
 ```
-
-## Transcribe with word times
-
-```bash
-whisper VOICE.wav --model small.en --language en --word_timestamps True \
-  --output_format json --output_dir work \
-  --initial_prompt "Umm, let me think like, hmm... Okay, uh, here's what I'm, like, uh, thinking. Um."
-mv work/VOICE.json SESSION/edits/SLUG-vN.words.json   # after the final render: transcribe the edit itself
-```
-
-Use a larger model (`medium.en`, `large-v3`) for hard audio, or `--language` for other languages.
-
-## Find silences
-
-```bash
-ffmpeg -i VOICE.wav -af silencedetect=noise=-40dB:d=0.12 -f null - 2>&1 | grep silence_
-```
-
-Set `noise` a few dB above the room's noise floor. Cut in the middle of a gap, or at its edges
-plus a small pad. Check quiet words did not fall inside a "silence".
-
-## Cut and join
-
-Keep a list of (start, end) pieces. Build one filter graph so video and audio stay in sync:
-
-```bash
-ffmpeg -i cfr.mp4 -i VOICE.wav -filter_complex "
-[0:v]trim=start=1.20:end=4.85,setpts=PTS-STARTPTS[v0];
-[1:a]atrim=start=1.20:end=4.85,asetpts=PTS-STARTPTS,afade=t=in:d=0.015,afade=t=out:st=3.635:d=0.015[a0];
-[0:v]trim=start=5.40:end=9.10,setpts=PTS-STARTPTS[v1];
-[1:a]atrim=start=5.40:end=9.10,asetpts=PTS-STARTPTS,afade=t=in:d=0.015,afade=t=out:st=3.685:d=0.015[a1];
-[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]" \
-  -map "[v]" -map "[a]" -c:v libx264 -crf 18 -preset fast -pix_fmt yuv420p \
-  -c:a pcm_f32le cut.mov
-```
-
-If the take's audio starts later than its video (`start_time` of the audio stream > 0), shift the
-picture: trim the video at `start + OFFSET` for each piece, or the lips run late.
-A script that writes this graph from a cut list is easier than editing it by hand.
 
 ## 9:16 reframe
 
 ```bash
 # 1920x1080 source -> 1080x1920. X = left edge of the crop, centred on the face.
-ffmpeg -i cut.mov -vf "crop=ih*9/16:ih:X:0,scale=1080:1920,setsar=1" -c:a copy vertical.mov
+ffmpeg -i CUT.mp4 -vf "crop=ih*9/16:ih:X:0,scale=1080:1920,setsar=1" -c:a copy vertical.mov
 ```
 
-Find X from stills (`ffmpeg -ss T -i cut.mov -frames:v 1 s.png`) at several points. If the person
+Find X from stills (`ffmpeg -ss T -i CUT.mp4 -frames:v 1 s.png`) at several points. If the person
 moves a lot, split into pieces with their own X, or use a face tracker to build a smooth path.
 
 ## Grade (light)

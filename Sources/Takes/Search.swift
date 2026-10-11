@@ -103,7 +103,9 @@ final class MediaSearch {
     var indexTotal = 0
     var indexing = false
     var indexedFiles = 0
-    var shown = false
+    /// Opening ⌘K loads the model again if the helper let it go while idle, so the first
+    /// search does not wait about 2 s for it.
+    var shown = false { didSet { if shown, !oldValue, process != nil { send(["op": "warm"]) } } }
 
     // MARK: Model files
 
@@ -420,6 +422,8 @@ final class MediaSearch {
                 if hits.count >= limit { break }
                 let name = url.lastPathComponent
                 if ["history", "comments", "posts", "storyboard"].contains(name) { walk.skipDescendants(); continue }
+                // A session's working folders (_edit/, _work/): renders and frozen sources, not results.
+                if name.hasPrefix("_"), name != "_library" { walk.skipDescendants(); continue }
                 let ext = url.pathExtension.lowercased()
                 if media.contains(ext) {
                     let n = name.lowercased()
@@ -664,21 +668,22 @@ struct SearchPalette: View {
                 .help(f == .all ? "Everything (Tab steps through the kinds)" : "Only \(f.title.lowercased())")
             }
             Spacer(minLength: 8)
-            Menu {
-                Button("All projects") { project = nil }
-                Divider()
-                ForEach(app.library.projects) { p in
-                    Button(p.name) { project = p.url }
-                }
-            } label: {
+            let projects = app.library.projects
+            TakesMenuButton {
                 HStack(spacing: 4) {
                     Image(systemName: "folder").font(.system(size: 11))
                     Text(project?.lastPathComponent ?? "All projects").lineLimit(1)
                     Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
                 }
                 .font(Theme.sans(12)).foregroundStyle(project == nil ? Theme.muted : Theme.ink)
+            } content: { [$project] in
+                MenuButton("All projects", icon: "folder", checked: $project.wrappedValue == nil) { $project.wrappedValue = nil }
+                MenuDivider()
+                for p in projects {
+                    MenuButton(p.name, checked: $project.wrappedValue == p.url) { $project.wrappedValue = p.url }
+                }
             }
-            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+            .fixedSize()
         }
         .padding(.horizontal, 12).padding(.bottom, 10)
     }

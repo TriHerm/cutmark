@@ -476,8 +476,9 @@ final class Model: ObservableObject {
 
     func loadPlugins() async {
         guard let d = try? await act("/api/plugins", [:], nil, method: "GET"),
-              let p = try? API.decoder.decode([PluginInfo].self, from: d), p != plugins else { return }
-        plugins = p
+              let p = try? API.decoder.decode([PluginInfo].self, from: d) else { return }
+        QuickAction.offer(p)
+        if p != plugins { plugins = p }
     }
 
     func loadProjects() async {

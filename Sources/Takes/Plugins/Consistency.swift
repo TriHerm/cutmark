@@ -37,17 +37,20 @@ enum Consistency {
 
     @MainActor static func context(_ root: URL) -> String {
         """
-        The user is talking to you from the Plan board inside his Takes app: a calendar of the next weeks. \
-        It shows his posting days (get_plan; change them with set_plan when he asks), a chart of videos \
-        per week (posted, scheduled, planned, against his goal), the open posting days and the video \
-        cards he planned. Each card says Posted or Scheduled from its post: when he says a video went \
-        live, call set_post_status with status posted (and the url if he gives one); the card turns green. \
+        The user is talking to you from the Plan board inside the Takes app: a calendar of the next weeks. \
+        It shows the posting days (get_plan; change them with set_plan when the user asks), a chart of videos \
+        per week (posted, scheduled, planned, against the goal), the open posting days and the planned video \
+        cards. Each card says Posted or Scheduled from its post: when the user says a video went \
+        live, call set_post_status with status posted (and the url if given); the card turns green. \
         Say "posting day", not "slot" or "buffer". Put a session on a day with plan_video \
-        when he asks to plan videos (several in one go is fine; a day with no slot is fine too); he drags \
-        the cards to change the order. Help him fill the next open slot with what he has: a ready post \
+        when the user asks to plan videos (several in one go is fine; a day with no slot is fine too); the user drags \
+        the cards to change the order. Help fill the next open slot with what is there: a ready post \
         without a time, a draft close to done, or a quick take in a cheap format. Ask before you schedule \
-        anything. Be warm and short: praise what he did, never nag about a gap. He reads your replies in a \
+        anything. Be warm and short: praise what was done, never nag about a gap. The user reads your replies in a \
         narrow panel: no tables, no headings.
+        The chart also shows the week streak at the posting goal as a gold chain (one free rest week a \
+        month bridges a miss) and a crown on the week of the best recent post. Cheer streaks, wins and \
+        videos close to out; never point at a gap. \(ConsistencyStore.brief ?? "")
         """
     }
 }
@@ -179,6 +182,8 @@ struct ConsistencyStats: Equatable {
         var late = false
         /// Its post: posted, or scheduled for a time.
         var status: Status?
+        /// How far it got: 0 Idea ... 4 Post (WeekGame.steps).
+        var step: Int?
     }
 
     enum Status: Equatable {
@@ -420,9 +425,8 @@ enum CoachWords {
 
     /// The line under the chart.
     static func recording(_ s: ConsistencyStats) -> String {
-        let takes = s.takesThisWeek == 0 ? "No takes yet this week" : "\(s.takesThisWeek) take\(s.takesThisWeek == 1 ? "" : "s") this week"
-        if s.streak < 2 { return takes + "." }
-        return takes + ". You recorded \(s.streak) weeks in a row."
+        // The week streak lives in the rings card (PlanGame.swift); two streaks would confuse.
+        s.takesThisWeek == 0 ? "No takes yet this week." : "\(s.takesThisWeek) take\(s.takesThisWeek == 1 ? "" : "s") this week."
     }
 
     static func streakNote(_ s: ConsistencyStats) -> String {
@@ -444,19 +448,35 @@ enum CoachWords {
 final class ConsistencyStore {
     var plan: PostingPlan?
     var stats = ConsistencyStats()
+    var game = WeekGame()
     var loaded = false
+    /// The game in a line, for the board chat (Consistency.context).
+    static var brief: String?
     private var busy = false
     private var again = false
+
+    /// The files ConsistencyStats and WeekGame read.
+    nonisolated static func matters(_ paths: [String], root: URL) -> Bool {
+        FileWatch.matters(paths, root: root, library: ["plan.json"], files: ["session.json", "script.md"],
+                          folders: ["posts", "edits", "thumbnails"])
+    }
 
     func refresh(_ root: URL) {
         guard !busy else { again = true; return }
         busy = true
         Task.detached(priority: .utility) {
             let plan = PostingPlan.read(root)
-            let stats = plan.map { ConsistencyStats.scan(root, plan: $0) } ?? ConsistencyStats()
+            var scanned = plan.map { ConsistencyStats.scan(root, plan: $0) } ?? ConsistencyStats()
+            let game = plan.map { WeekGame.scan(root, plan: $0) } ?? WeekGame()
+            for (day, cards) in scanned.videos {
+                scanned.videos[day] = cards.map { c in var c = c; c.step = game.steps[c.id]; return c }
+            }
+            let stats = scanned
             await MainActor.run {
                 if self.plan != plan { self.plan = plan }
                 if self.stats != stats { self.stats = stats }
+                if self.game != game { self.game = game }
+                Self.brief = plan == nil ? nil : game.brief
                 self.loaded = true
                 self.busy = false
                 if self.again { self.again = false; self.refresh(root) }
@@ -538,7 +558,10 @@ struct ConsistencyBoard: View {
             BoardChatCorner(hub: hub, target: target).padding(18)
         }
         .onAppear { store.refresh(root) }
-        .onReceive(NotificationCenter.default.publisher(for: .takesFilesChanged)) { _ in store.refresh(root) }
+        .onReceive(NotificationCenter.default.publisher(for: .takesFilesChanged)) { n in
+            guard ConsistencyStore.matters(n.object as? [String] ?? [], root: root) else { return }
+            store.refresh(root)
+        }
     }
 }
 
@@ -558,7 +581,7 @@ struct ConsistencyPage: View {
                 VStack(alignment: .leading, spacing: 14) {
                     if store.loaded {
                         if store.plan == nil || editing {
-                            CommitCard(start: store.plan, first: store.plan == nil) { plan in
+                            CommitCard(start: store.plan, first: store.plan == nil, root: root) { plan in
                                 let first = store.plan == nil
                                 store.save(root, plan)
                                 withAnimation(.page) { editing = false }
@@ -573,14 +596,14 @@ struct ConsistencyPage: View {
                                 .swapIn(CoachWords.headline(store.stats))
                                 .arrive(0)
                             PlanWeeks(weeks: store.stats.weeks, goal: store.stats.goal,
-                                      note: CoachWords.recording(store.stats))
+                                      note: CoachWords.recording(store.stats), game: store.game, open: open)
                                 .card(padding: 16).arrive(1)
                             SlotStrip(stats: store.stats, weeks: plan.weekCount, choices: choices, open: open,
                                       place: { store.place(root, $0, on: $1, before: $2) },
                                       remove: { store.remove(root, $0) },
                                       setWeeks: { store.setWeeks(root, $0) })
-                                .card(padding: 16).arrive(5)
-                            if !store.stats.readyWithoutTime.isEmpty { ready.arrive(6) }
+                                .card(padding: 16).arrive(2)
+                            if !store.stats.readyWithoutTime.isEmpty { ready.arrive(3) }
                         }
                     }
                 }
@@ -590,6 +613,7 @@ struct ConsistencyPage: View {
             }
         }
         .background(Theme.paper)
+        .onChange(of: store.game) { _, g in if store.loaded, GameSeen.fresh(g) { celebrate = true } }
         .overlay {
             if celebrate {
                 Confetti().allowsHitTesting(false)
@@ -637,76 +661,111 @@ struct ConsistencyPage: View {
 
 // MARK: - The commitment
 
-/// Your days and time, in a few taps: day chips (Tue and Thu picked to start), three times, and the
-/// platforms. Each change gets a warm line back.
+/// Your days and time, in a few taps: a row of day keys (Tue and Thu picked to start), the time,
+/// and the platforms. The mascot's flame grows with the days, and the next two weeks below show
+/// where your videos land before you save (design picked 2026-10-11).
 struct CommitCard: View {
     let first: Bool
+    let root: URL?
     let commit: (PostingPlan) -> Void
     let cancel: () -> Void
+    private let base: PostingPlan?
     @State private var days: Set<String>
     @State private var time: String
     @State private var custom: String
     @State private var platforms: Set<String>
+    @State private var preview: ConsistencyStats?
+    private let mascot: NSImage?
 
-    init(start: PostingPlan?, first: Bool, commit: @escaping (PostingPlan) -> Void, cancel: @escaping () -> Void) {
+    init(start: PostingPlan?, first: Bool, root: URL? = nil, preview: ConsistencyStats? = nil, mascot: NSImage? = Mascot.image,
+         commit: @escaping (PostingPlan) -> Void, cancel: @escaping () -> Void) {
         self.first = first
+        self.root = root
         self.commit = commit
         self.cancel = cancel
+        base = start
         let t = start?.time ?? PostingPlan.times[0].value
         _days = State(initialValue: Set(start?.days ?? Array(PostingPlan.suggested)))
         _time = State(initialValue: t)
         _custom = State(initialValue: PostingPlan.times.contains { $0.value == t } ? "" : t)
         _platforms = State(initialValue: Set(start?.platforms ?? ["linkedin"]))
+        _preview = State(initialValue: preview)
+        self.mascot = mascot
     }
 
     private var ok: Bool { !days.isEmpty && !platforms.isEmpty && PostingPlan.validTime(time) }
 
+    /// The plan as it would be saved, with the saved plan's videos: what the preview shows.
+    private var draft: PostingPlan {
+        var p = base ?? PostingPlan(days: [], time: time, platforms: [])
+        p.days = PostingPlan.weekdays.filter(days.contains)
+        p.time = time
+        p.platforms = platforms.sorted()
+        p.weeks = nil
+        return p
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(first ? "When do you want to show up?" : "Change your days")
-                    .font(Theme.display(28)).foregroundStyle(Theme.ink)
-                Text("Pick the days you'll post. Two a week is a great start, and you can change it any time.")
-                    .font(Theme.sans(13)).foregroundStyle(Theme.muted)
+        let level = FireLevel(days: days.count)
+        VStack(alignment: .leading, spacing: 26) {
+            HStack(alignment: .center, spacing: 18) {
+                FireMascot(level: level, image: mascot)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(first ? "When do you want to show up?" : level.name)
+                        .font(Theme.display(30)).foregroundStyle(Theme.ink)
+                    Text(first ? "\(level.name). \(perMonth)" : perMonth)
+                        .font(Theme.sans(13)).foregroundStyle(Theme.muted)
+                }
+                .swapIn(days.count)
+                Spacer(minLength: 12)
+                if !first { Button("Cancel", action: cancel).buttonStyle(AccentButtonStyle(kind: .quiet)) }
+                Button(first ? "I'm in" : "Save") { commit(draft) }
+                    .buttonStyle(AccentButtonStyle(kind: .accent)).disabled(!ok).keyboardShortcut(.defaultAction)
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                SectionLabel(text: "Days")
-                HStack(spacing: 8) {
+                HStack(alignment: .firstTextBaseline) {
+                    SectionLabel(text: "Days")
+                    Spacer()
+                    Text("Tap a day to turn it on or off. A dot marks a suggested day.")
+                        .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+                }
+                HStack(spacing: 6) {
                     ForEach(PostingPlan.weekdays, id: \.self) { d in
-                        DayChip(day: d, on: days.contains(d), suggested: PostingPlan.suggested.contains(d)) {
+                        DayKey(day: d, on: days.contains(d), suggested: PostingPlan.suggested.contains(d)) {
                             withAnimation(Theme.spring) { if days.contains(d) { days.remove(d) } else { days.insert(d) } }
                         }
                     }
                 }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(CoachWords.forCount(days.count)).font(Theme.sans(13, .semibold))
-                        .foregroundStyle(days.isEmpty ? Theme.muted : Theme.live)
-                    if !days.isEmpty {
-                        Text(CoachWords.perMonth(days.count)).font(Theme.sans(12)).foregroundStyle(Theme.faint)
-                    }
-                }
-                .swapIn(days.count)
             }
 
             VStack(alignment: .leading, spacing: 10) {
                 SectionLabel(text: "Time")
-                HStack(spacing: 8) {
+                HStack(spacing: 4) {
                     ForEach(PostingPlan.times, id: \.value) { t in
-                        OptionChip(title: t.label, detail: PostingPlan.clock(t.value), on: time == t.value && custom.isEmpty) {
+                        TimeSegment(title: t.label, detail: PostingPlan.clock(t.value), on: time == t.value && custom.isEmpty) {
                             withAnimation(Theme.motion) { time = t.value; custom = "" }
                         }
                     }
                     TextField("Other, 09:41", text: $custom)
-                        .textFieldStyle(.plain).font(Theme.sans(13)).monospacedDigit()
-                        .frame(width: 96).padding(.horizontal, 12).frame(height: 40)
-                        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.hover))
-                        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(!custom.isEmpty ? (PostingPlan.validTime(custom) ? Theme.accent : Theme.warn) : .clear, lineWidth: 1.5))
+                        .textFieldStyle(.plain).font(Theme.sans(13)).monospacedDigit().multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity).frame(height: 40)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(custom.isEmpty ? .clear : Theme.accentSoft))
+                        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(!custom.isEmpty && !PostingPlan.validTime(custom) ? Theme.warn : .clear, lineWidth: 1.5))
                         .onChange(of: custom) { _, v in if PostingPlan.validTime(v) { time = v } else if v.isEmpty { time = PostingPlan.times[0].value } }
                         .help("Any time, 24-hour: 09:41")
                 }
+                .padding(4)
+                .background(RoundedRectangle(cornerRadius: 14).fill(Theme.canvas))
+                .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.border))
                 Text("In this Mac's time zone (\(TimeZone.current.abbreviation() ?? TimeZone.current.identifier)). Odd minutes look like a person posted.")
                     .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+            }
+
+            if let preview {
+                SlotStrip(stats: preview, weeks: 2, editable: false)
+                    .card(padding: 16)
+                    .transition(.opacity)
             }
 
             VStack(alignment: .leading, spacing: 10) {
@@ -722,26 +781,114 @@ struct CommitCard: View {
                 }
                 Text("A post on any of these fills the day's slot.").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
             }
+        }
+        .frame(maxWidth: 760, alignment: .leading)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 10)
+        .task(id: draft) {
+            guard let root else { return }
+            let plan = draft
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled else { return }
+            let stats = await Task.detached(priority: .userInitiated) {
+                var s = ConsistencyStats.scan(root, plan: plan)
+                let game = WeekGame.scan(root, plan: plan)
+                for (day, cards) in s.videos { s.videos[day] = cards.map { c in var c = c; c.step = game.steps[c.id]; return c } }
+                return s
+            }.value
+            guard !Task.isCancelled else { return }
+            withAnimation(Theme.motion) { preview = stats }
+        }
+    }
 
-            HStack(spacing: 10) {
-                Button(first ? "I'm in" : "Save") {
-                    commit(PostingPlan(days: Array(days), time: time, platforms: Array(platforms)))
-                }
-                .buttonStyle(AccentButtonStyle(kind: .accent)).disabled(!ok).keyboardShortcut(.defaultAction)
-                if !first { Button("Cancel", action: cancel).buttonStyle(AccentButtonStyle(kind: .quiet)) }
-                Spacer()
+    private var perMonth: String { days.isEmpty ? "Pick at least one day." : CoachWords.perMonth(days.count) }
+}
+
+/// How hot the plan runs: the mascot's flame, from none (no days) to a gold "Super Takes" (four
+/// or more). The user asked for super-saiyan levels (2026-10-11).
+struct FireLevel: Equatable {
+    let rank: Int
+
+    init(days: Int) { rank = min(max(days, 0), 4) }
+
+    var name: String { ["Pick a day to start", "Warming up", "The sweet spot", "On fire", "Super Takes"][rank] }
+    var opacity: Double { [0, 0.45, 0.8, 1, 1][rank] }
+    var scale: CGFloat { [0.6, 0.7, 0.85, 1, 1.22][rank] }
+    var outer: Color { Color(nsColor: NSColor(hex: [0x3B82F6, 0x3B82F6, 0x3B82F6, 0xFF6A1A, 0xFFB800][rank])) }
+    var inner: Color { Color(nsColor: NSColor(hex: [0x8DB4FF, 0x8DB4FF, 0x9FE3FF, 0xFFC14D, 0xFFF3A8][rank])) }
+}
+
+/// The mascot in its flame. The flame flickers unless Reduce Motion is on.
+struct FireMascot: View {
+    let level: FireLevel
+    var size: CGFloat = 72
+    /// Tests pass the brand file: they have no app bundle.
+    var image: NSImage? = Mascot.image
+    @Environment(\.accessibilityReduceMotion) private var reduce
+    @State private var flick = false
+
+    var body: some View {
+        let box = size * 1.5
+        ZStack(alignment: .top) {
+            ZStack {
+                FlameShape(outer: true).fill(level.outer).opacity(0.6)
+                    .scaleEffect(x: 1, y: flick ? 1.09 : 1, anchor: .bottom)
+                FlameShape(outer: false).fill(level.inner).opacity(0.85)
+                    .scaleEffect(x: 1, y: flick ? 1 : 1.07, anchor: .bottom)
+            }
+            .frame(width: box, height: box * 0.84)
+            .scaleEffect(level.scale, anchor: .bottom)
+            .opacity(level.opacity)
+            if let img = image {
+                Image(nsImage: img).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+                    .frame(width: size)
+                    .saturation(level.rank == 0 ? 0 : 1)
+                    .opacity(level.rank == 0 ? 0.6 : 1)
+                    .colorMultiply(level.rank == 4 ? Color(nsColor: NSColor(hex: 0xFFE38A)) : .white)
+                    .shadow(color: level.rank >= 3 ? level.outer.opacity(0.6) : Theme.shadow, radius: level.rank >= 3 ? 12 : 6, y: 3)
+                    .offset(y: box * 0.84 - size * 0.9)
             }
         }
-        .padding(26)
-        .frame(maxWidth: 640, alignment: .leading)
-        .card(padding: 0)
-        .frame(maxWidth: .infinity)
-        .padding(.top, 18)
+        .frame(width: box, height: box * 0.9, alignment: .top)
+        .animation(Theme.spring, value: level)
+        .accessibilityHidden(true)
+        .onAppear {
+            guard !reduce else { return }
+            withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) { flick = true }
+        }
     }
 }
 
-/// A round weekday toggle: "Tue", with a small dot under the suggested ones.
-struct DayChip: View {
+/// A spiky aura in a 200 × 168 box, its base on the bottom edge.
+struct FlameShape: Shape {
+    let outer: Bool
+
+    func path(in rect: CGRect) -> Path {
+        // Start, then (control 1, control 2, end) curves, in the 200 × 168 box.
+        let outerPts: [CGFloat] = [100, 8, 108, 40, 128, 34, 136, 12, 140, 46, 160, 52, 174, 34, 170, 70, 186, 84, 194, 98,
+                                   176, 108, 182, 140, 160, 168]
+        let outerBack: [CGFloat] = [40, 168, 18, 140, 24, 108, 6, 98, 14, 84, 30, 70, 26, 34, 40, 52, 60, 46, 64, 12, 72, 34, 92, 40, 100, 8]
+        let innerPts: [CGFloat] = [100, 40, 106, 62, 120, 58, 126, 42, 130, 66, 146, 72, 156, 60, 154, 88, 166, 100, 170, 110,
+                                   158, 118, 162, 142, 148, 168]
+        let innerBack: [CGFloat] = [52, 168, 38, 142, 42, 118, 30, 110, 34, 100, 46, 88, 44, 60, 54, 72, 70, 66, 74, 42, 80, 58, 94, 62, 100, 40]
+        let (fwd, back) = outer ? (outerPts, outerBack) : (innerPts, innerBack)
+        let p = { (x: CGFloat, y: CGFloat) in CGPoint(x: rect.minX + x / 200 * rect.width, y: rect.minY + y / 168 * rect.height) }
+        var path = Path()
+        path.move(to: p(fwd[0], fwd[1]))
+        for i in stride(from: 2, to: fwd.count, by: 6) {
+            path.addCurve(to: p(fwd[i + 4], fwd[i + 5]), control1: p(fwd[i], fwd[i + 1]), control2: p(fwd[i + 2], fwd[i + 3]))
+        }
+        path.addLine(to: p(back[0], back[1]))
+        for i in stride(from: 2, to: back.count, by: 6) {
+            path.addCurve(to: p(back[i + 4], back[i + 5]), control1: p(back[i], back[i + 1]), control2: p(back[i + 2], back[i + 3]))
+        }
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// A weekday key, as wide as its share of the row: "Tue", with a dot under the suggested ones.
+struct DayKey: View {
     let day: String
     let on: Bool
     let suggested: Bool
@@ -751,22 +898,44 @@ struct DayChip: View {
     var body: some View {
         Button(action: tap) {
             VStack(spacing: 4) {
-                Text(day.prefix(1).uppercased() + day.dropFirst())
-                    .font(Theme.sans(13, .semibold))
-                    .foregroundStyle(on ? Color.white : Theme.ink)
-                    .frame(width: 56, height: 56)
-                    .background(Circle().fill(on ? Theme.accent : hover ? Theme.hover : Theme.canvas))
-                    .overlay(Circle().strokeBorder(on ? .clear : Theme.border))
-                    .shadow(color: on ? Theme.accent.opacity(0.35) : .clear, radius: 8, y: 3)
-                    .scaleEffect(on ? 1.04 : 1)
-                Text(suggested ? "suggested" : " ").font(Theme.sans(9.5)).foregroundStyle(Theme.faint)
+                Text(day.prefix(1).uppercased() + day.dropFirst()).font(Theme.sans(13, .semibold))
+                Circle().fill(suggested ? (on ? Color.white.opacity(0.85) : Theme.accentInk) : .clear).frame(width: 4, height: 4)
             }
+            .foregroundStyle(on ? Color.white : Theme.ink)
+            .frame(maxWidth: .infinity).frame(height: 50)
+            .background(RoundedRectangle(cornerRadius: 12).fill(on ? Theme.accent : hover ? Theme.hover : Theme.canvas))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(on ? .clear : Theme.border))
             .contentShape(Rectangle())
         }
         .buttonStyle(PressScale())
         .onHover { hover = $0 }
         .animation(Theme.motion, value: hover)
         .help(on ? "Posting day. Click to take it off." : "Click to post on this day.")
+    }
+}
+
+/// One part of the time bar: "Morning 8:02 AM".
+struct TimeSegment: View {
+    let title: String
+    let detail: String
+    let on: Bool
+    let tap: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: tap) {
+            HStack(spacing: 5) {
+                Text(title).font(Theme.sans(13, .semibold))
+                Text(detail).font(Theme.sans(12)).opacity(0.75)
+            }
+            .foregroundStyle(on ? Theme.accentInk : Theme.muted)
+            .frame(maxWidth: .infinity).frame(height: 40)
+            .background(RoundedRectangle(cornerRadius: 10).fill(on ? Theme.accentSoft : hover ? Theme.hover : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressScale())
+        .onHover { hover = $0 }
+        .animation(Theme.motion, value: hover)
     }
 }
 
@@ -809,6 +978,8 @@ struct SlotStrip: View {
     var place: (String, Date, String?) -> Void = { _, _, _ in }
     var remove: (String) -> Void = { _ in }
     var setWeeks: (Int) -> Void = { _ in }
+    /// False in the Change-days preview: no +, no drag, no week buttons.
+    var editable = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -825,8 +996,9 @@ struct SlotStrip: View {
                     }
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
+                .allowsHitTesting(editable)
             }
-            HStack(spacing: 6) {
+            if editable { HStack(spacing: 6) {
                 if weeks < PostingPlan.weekRange.upperBound {
                     Button { withAnimation(Theme.spring) { setWeeks(weeks + 1) } } label: {
                         Label("Add a week", systemImage: "plus")
@@ -845,7 +1017,7 @@ struct SlotStrip: View {
                 if stats.videos.isEmpty {
                     Text("Point at a day and click + to add a video, or ask Takes in the chat.").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
                 }
-            }
+            } }
         }
     }
 
@@ -889,7 +1061,7 @@ struct DayCell: View {
                 .buttonStyle(PressScale())
                 .opacity(hover || picking ? 1 : 0)
                 .help("Add a video to this day")
-                .popover(isPresented: $picking, arrowEdge: .bottom) {
+                .takesPopover(isPresented: $picking) {
                     PlanPicker(choices: choices(), planned: Set(cards.map(\.id))) { id in
                         picking = false
                         place(id, date, nil)
@@ -965,6 +1137,7 @@ struct PlanCard: View {
                 Label("Scheduled \(at.formatted(date: .omitted, time: .shortened))", systemImage: "clock")
                     .font(Theme.sans(10.5, .medium)).foregroundStyle(Theme.accentInk)
             case nil:
+                if let step = card.step { StepDots(step: step, size: 5) }
                 if card.late { Text("planned earlier").font(Theme.sans(10)).foregroundStyle(Theme.faint) }
             }
         }
@@ -987,9 +1160,10 @@ struct PlanCard: View {
             before(id)
             return true
         } isTargeted: { on in withAnimation(Theme.motion) { target = on } }
-        .contextMenu {
-            Button("Open") { open(card.url) }
-            Button("Take off the plan") { remove(card.id) }
+        .takesContextMenu {
+            MenuButton("Open", icon: "arrow.up.forward.square") { open(card.url) }
+            MenuDivider()
+            MenuButton("Take off the plan", icon: "calendar.badge.minus", danger: true) { remove(card.id) }
         }
         .help("\(card.title). Click to open, drag to another day.")
         .task(id: card.poster) {

@@ -9,7 +9,7 @@ struct PluginsTests {
         let ids = Plugins.available.map(\.id)
         #expect(ids.prefix(5) == ["feedback", "consistency", "replicate", "higgsfield", "voices"])
         #expect(Set(ids).count == ids.count)
-        #expect(SettingsView.SettingsPage.allCases.map(\.rawValue) == ["appearance", "search", "gemini", "usage", "archived", "privacy"])
+        #expect(SettingsView.SettingsPage.allCases.map(\.rawValue) == ["appearance", "agents", "search", "gemini", "usage", "archived", "privacy"])
     }
 
     @Test func removeAndInstallAgain() {

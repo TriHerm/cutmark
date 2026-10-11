@@ -243,6 +243,10 @@ actor Engine {
     var matrix: [Float] = []
     var rows: [(file: String, item: Item)] = []
     var matrixStale = true
+    // When the model last did work. The weights (0.6-0.8 GB) are let go after a minute without
+    // work and load again on the next search or new file (audit #2, 2026-10-11).
+    var lastUse = Date()
+    static let idleUnload: TimeInterval = 60
 
     init(root: URL, models: URL) {
         self.root = root
@@ -255,6 +259,7 @@ actor Engine {
     static func indexURL(_ root: URL) -> URL { root.appending(path: "_library/search/index.json") }
 
     func textEncoder() async throws -> TextEncoder {
+        lastUse = Date()
         if let encoder { return encoder }
         let e = try await TextEncoder(directory: models.appending(path: "text-q8"))
         encoder = e
@@ -268,6 +273,15 @@ actor Engine {
             visionOn = true
         }
         return e
+    }
+
+    /// Lets the model go once it has been idle for a while. A search or an embed that is still
+    /// running keeps its own reference, so this never pulls weights out from under it.
+    func unloadIfIdle() {
+        guard encoder != nil, !indexing, Date().timeIntervalSince(lastUse) > Self.idleUnload else { return }
+        encoder = nil
+        visionOn = false
+        Memory.clearCache()
     }
 
     func save() {
@@ -507,6 +521,12 @@ case "index":
     done.wait()
 case "serve":
     emit(["event": "ready"])
+    Task {
+        while true {
+            try? await Task.sleep(for: .seconds(15))
+            await engine.unloadIfIdle()
+        }
+    }
     while let line = readLine() {
         guard let data = line.data(using: .utf8),
               let msg = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
@@ -516,6 +536,8 @@ case "serve":
             Task { await engine.runIndex(id: id) }
         case "stop":
             Task { await engine.stop() }
+        case "warm":
+            Task { _ = try? await engine.textEncoder() }
         case "status":
             Task { var s = await engine.status(); s["id"] = id ?? NSNull(); emit(s) }
         case "search":

@@ -4,7 +4,9 @@
 # so point it there.
 set -euo pipefail
 cd "$(dirname "$0")"
-python3 -m unittest discover -q -s mcp/tests || { echo "MCP tests failed"; exit 1; }
+# Without the Claude chat id: a suite started inside a Claude session must not write seen-rules files
+# (2026-10-10). Tests that need an id set it themselves.
+env -u CLAUDE_CODE_SESSION_ID python3 -m unittest discover -q -s mcp/tests || { echo "MCP tests failed"; exit 1; }
 DEV=/Library/Developer/CommandLineTools/Library/Developer
 run() {
   if [[ -d "$DEV/Frameworks/Testing.framework" ]] && ! xcode-select -p | grep -q Xcode.app; then

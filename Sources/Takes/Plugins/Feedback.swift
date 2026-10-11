@@ -5,7 +5,9 @@ import SwiftUI
 /// rule in <root>/_library/rules/<area>.json, one file per step of the content journey (2026-10-09:
 /// one lessons.json held them all, and one Post area held every platform), or "one-off". A comment on a rule that was already there is
 /// a repeat: the same mistake again. A rule with a check is measured by check_edit (loudness, true
-/// peak, pauses, length) and the results land in <session>/checks.json.
+/// peak, pauses, length) and the results land in <session>/checks.json. Since 2026-10-11 check_edit
+/// also runs built-in checks that compare each edit with its take (Sources/Takes/EditChecks.swift):
+/// the board counts their finds apart from the rules'.
 ///
 /// The board shows the counts, the comments per video week by week (the number should go down),
 /// and the rules: you change, turn off or delete any of them, or tell Takes in the chat. A rule you
@@ -22,12 +24,12 @@ enum Feedback {
         })
 
     static let context = """
-    The user is talking to you from the Feedback board inside his Takes app. It shows the rules you \
-    learned from his review comments (get_rules area=all; one file per step in _library/rules/ in his Takes \
-    folder, with comments.md for the comment copilot's lessons), how many comments he leaves per video and how often the same mistake comes back. \
-    Change rules as he asks with set_rule. A rule he wrote, changed or turned off is his. Keep the \
+    The user is talking to you from the Feedback board inside the Takes app. It shows the rules you \
+    learned from the user's review comments (get_rules area=all; one file per step in _library/rules/ in the Takes \
+    folder, with comments.md for the comment copilot's lessons), how many comments the user leaves per video and how often the same mistake comes back. \
+    Change rules as the user asks with set_rule. A rule the user wrote, changed or turned off belongs to the user. Keep the \
     set small: one short sentence per rule, at most 10 per area; merge or sharpen before you add. \
-    He reads your replies in a narrow panel: keep them short, no tables, no headings.
+    The user reads your replies in a narrow panel: keep them short, no tables, no headings.
     """
 
     /// In the order of the content journey: plan, make, package, publish. The MCP has the same list.
@@ -45,6 +47,8 @@ enum Feedback {
     static let splitPost = ["post-1": "post-linkedin", "post-2": "post-linkedin"]
     static let areaMax = 10
     static let ruleMax = 220
+    /// The longer words under a rule (the MCP's DETAILS_MAX).
+    static let detailsMax = 600
 }
 
 struct RuleCheck: Codable, Hashable {
@@ -80,9 +84,31 @@ struct LearnedRule: Codable, Identifiable, Hashable {
     var from: [String]?
     var repeats: [String]?
     var check: RuleCheck?
+    /// Longer words for the rule, past the one sentence (2026-10-10). Takes reads them with it.
+    var details: String?
+    /// Takes suggests to merge this rule into another one: the area was full. You approve it here.
+    var merge: RuleMerge?
+    /// Merged into this rule. Kept off, so the comments that point at it still find it.
+    var mergedInto: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, area, text, on, by, made, changed, from, repeats, check, details, merge
+        case mergedInto = "merged_into"
+    }
 
     var isOn: Bool { on ?? true }
     var yours: Bool { by == "you" }
+    /// Counts toward the 10 of its area: on, not waiting for a merge, not merged away. The MCP's
+    /// counts() is the same rule, so the board and Takes agree when an area is full.
+    var counts: Bool { isOn && merge == nil && mergedInto == nil }
+}
+
+/// A merge Takes suggests: the other rule's id, the sentence that holds both, and the other rule's
+/// text when Takes wrote it (a changed rule makes the sentence stale).
+struct RuleMerge: Codable, Hashable {
+    var into: String
+    var text: String
+    var was: String?
 }
 
 struct LessonsFile: Codable {
@@ -156,7 +182,7 @@ enum Lessons {
         guard !text.isEmpty else { return nil }
         var made: LearnedRule?
         change(root) { f in
-            guard f.rules.filter({ $0.area == area && $0.isOn }).count < Feedback.areaMax else { return }
+            guard f.rules.filter({ $0.area == area && $0.counts }).count < Feedback.areaMax else { return }
             let n = (f.rules.compactMap { r -> Int? in
                 guard r.id.hasPrefix(area + "-") else { return nil }
                 return Int(r.id.dropFirst(area.count + 1))
@@ -181,6 +207,49 @@ enum Lessons {
     nonisolated static func delete(_ root: URL, _ id: String) {
         change(root) { f in f.rules.removeAll { $0.id == id } }
     }
+
+    /// The rule a waiting merge goes into, when the merge still fits it: there, on, and with the
+    /// text Takes saw when it wrote the merged sentence.
+    nonisolated static func mergeTarget(_ rule: LearnedRule, in rules: [LearnedRule]) -> LearnedRule? {
+        guard let m = rule.merge, let t = rules.first(where: { $0.id == m.into }), t.isOn, t.mergedInto == nil,
+              m.was == nil || m.was == t.text else { return nil }
+        return t
+    }
+
+    /// You approve Takes' merge: the other rule gets the merged text and this rule's comments, and
+    /// this rule turns off. The other rule stays yours or Takes'. Nothing happens when the merge no
+    /// longer fits (mergeTarget).
+    nonisolated static func merge(_ root: URL, _ id: String) {
+        change(root) { f in
+            guard let i = f.rules.firstIndex(where: { $0.id == id }), let m = f.rules[i].merge,
+                  mergeTarget(f.rules[i], in: f.rules) != nil,
+                  let j = f.rules.firstIndex(where: { $0.id == m.into }) else { return }
+            let source = f.rules[i]
+            f.rules[j].text = m.text
+            var from = f.rules[j].from ?? []
+            for r in source.from ?? [] where !from.contains(r) { from.append(r) }
+            f.rules[j].from = from
+            var repeats = f.rules[j].repeats ?? []
+            for r in source.repeats ?? [] where !repeats.contains(r) { repeats.append(r) }
+            f.rules[j].repeats = repeats
+            f.rules[j].changed = now()
+            f.rules[i].on = false
+            f.rules[i].mergedInto = m.into
+            f.rules[i].merge = nil
+            f.rules[i].changed = now()
+        }
+    }
+
+    /// You keep both rules: the suggestion goes, the rule stays as it is.
+    nonisolated static func keepBoth(_ root: URL, _ id: String) {
+        change(root) { f in
+            guard let i = f.rules.firstIndex(where: { $0.id == id }) else { return }
+            f.rules[i].merge = nil
+        }
+    }
+
+    /// The rules the board shows: a rule merged into another one is history.
+    nonisolated static func shown(_ rules: [LearnedRule]) -> [LearnedRule] { rules.filter { $0.mergedInto == nil } }
 }
 
 /// The counts on the board, from every session's comments.json and checks.json.
@@ -203,7 +272,10 @@ struct FeedbackStats: Equatable {
     var repeats = 0
     var videos = 0
     var checksRun = 0
+    /// Failures of learned rules ("rule" results).
     var checksCaught = 0
+    /// Failures of the built-in checks ("check" results, 2026-10-11).
+    var builtinCaught = 0
     /// Resolved since the first rule, with no lesson.
     var unlabeled = 0
     var weeks: [Week] = []
@@ -242,7 +314,9 @@ struct FeedbackStats: Equatable {
                let checks = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] {
                 for run in checks.values {
                     s.checksRun += 1
-                    s.checksCaught += (run["results"] as? [[String: Any]] ?? []).filter { ($0["pass"] as? Bool) == false }.count
+                    let failed = (run["results"] as? [[String: Any]] ?? []).filter { ($0["pass"] as? Bool) == false }
+                    s.builtinCaught += failed.filter { $0["check"] != nil }.count
+                    s.checksCaught += failed.filter { $0["check"] == nil }.count
                 }
             }
             guard !mine.isEmpty else { continue }
@@ -281,6 +355,12 @@ struct FeedbackStats: Equatable {
 
 @MainActor @Observable
 final class FeedbackStore {
+    /// The files FeedbackStats and Lessons read.
+    nonisolated static func matters(_ paths: [String], root: URL) -> Bool {
+        FileWatch.matters(paths, root: root, library: ["rules", "lessons.json"],
+                          files: ["session.json", "comments.json", "checks.json"], folders: [])
+    }
+
     var rules: [LearnedRule] = []
     var stats = FeedbackStats()
     var loaded = false
@@ -326,7 +406,10 @@ struct FeedbackBoard: View {
             BoardChatCorner(hub: hub, target: target).padding(18)
         }
         .onAppear { store.refresh(root) }
-        .onReceive(NotificationCenter.default.publisher(for: .takesFilesChanged)) { _ in store.refresh(root) }
+        .onReceive(NotificationCenter.default.publisher(for: .takesFilesChanged)) { n in
+            guard FeedbackStore.matters(n.object as? [String] ?? [], root: root) else { return }
+            store.refresh(root)
+        }
     }
 }
 
@@ -386,8 +469,10 @@ struct FeedbackPage: View {
                  good: s.repeats == 0 ? nil : false)
                 .help("Comments on something a rule already covered. A rule that repeats should get a check.")
                 .arrive(3)
-            tile("Caught by checks", "\(s.checksCaught)", note: "in \(s.checksRun) check\(s.checksRun == 1 ? "" : "s") run")
-                .help("Problems check_edit found before you saw the edit.")
+            tile("Caught by checks", "\(s.checksCaught)", note: "in \(s.checksRun) check\(s.checksRun == 1 ? "" : "s") run"
+                 + (s.builtinCaught > 0 ? ". Built-in checks: \(s.builtinCaught)." : ""))
+                .help("Problems the rule checks found before you saw the edit. Since 2026-10-11, check_edit also "
+                      + "compares sound and picture with the take: the built-in checks.")
                 .arrive(4)
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -642,8 +727,9 @@ struct RulesCard: View {
     }
 
     var body: some View {
-        let rules = store.rules
+        let rules = Lessons.shown(store.rules)
         let shown = area.map { a in rules.filter { $0.area == a } } ?? rules
+        let waiting = rules.filter { $0.merge != nil }.count
         return VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -654,6 +740,10 @@ struct RulesCard: View {
                 if store.stats.unlabeled > 0 {
                     MetaTag(text: "\(store.stats.unlabeled) resolved without a lesson", icon: "exclamationmark.circle", tint: Theme.warn)
                         .help("Comments resolved after the first rule, with nothing learned. Resolving one in the app gives none.")
+                }
+                if waiting > 0 {
+                    MetaTag(text: "\(waiting) merge\(waiting == 1 ? "" : "s") to check", icon: "arrow.triangle.merge", tint: Theme.accentInk)
+                        .help("Takes wants to merge rules in a full area. Find the box under the rule.")
                 }
                 if !adding && !rules.isEmpty {
                     Button { withAnimation(.page) { adding = true } } label: {
@@ -676,11 +766,8 @@ struct RulesCard: View {
                     let mine = rules.filter { $0.area == a.id }
                     if !mine.isEmpty {
                         VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                Text(a.title).font(Theme.sans(11.5, .semibold)).foregroundStyle(Theme.muted)
-                                Text("\(mine.filter(\.isOn).count) of \(Feedback.areaMax)").font(Theme.sans(11)).foregroundStyle(Theme.faint)
-                            }
-                            .padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 2)
+                            AreaHeader(title: a.title, rules: mine)
+                                .padding(.horizontal, 10).padding(.top, 6).padding(.bottom, 2)
                             ForEach(mine) { RuleRow(rule: $0, store: store, root: root) }
                         }
                     }
@@ -694,6 +781,7 @@ struct RulesCard: View {
         .card(padding: 16)
         .animation(.page, value: area)
         .animation(.page, value: rules.map(\.id))
+        .animation(.page, value: rules.map { $0.merge == nil })
     }
 
     private func areaChips(_ rules: [LearnedRule]) -> some View {
@@ -726,6 +814,28 @@ struct RulesCard: View {
         }
         .padding(14)
         .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.canvas))
+    }
+}
+
+/// An area's name over its rules: how many are on, and the merges that wait for you.
+private struct AreaHeader: View {
+    let title: String
+    let rules: [LearnedRule]
+
+    var body: some View {
+        let on = rules.filter(\.isOn).count
+        let waiting = rules.filter { $0.merge != nil }.count
+        HStack(spacing: 6) {
+            Text(title).font(Theme.sans(11.5, .semibold)).foregroundStyle(Theme.muted)
+            HStack(spacing: 0) {
+                Text("\(on) rule\(on == 1 ? "" : "s")").foregroundStyle(on > Feedback.areaMax ? Theme.warn : Theme.faint)
+                if waiting > 0 {
+                    Text(" · \(waiting) merge\(waiting == 1 ? "" : "s") wait\(waiting == 1 ? "s" : "")").foregroundStyle(Theme.warn)
+                }
+            }
+            .font(Theme.sans(11))
+            .help(on > Feedback.areaMax ? "More than \(Feedback.areaMax) rules here. Turn off or delete one you need less." : "")
+        }
     }
 }
 
@@ -774,7 +884,8 @@ private struct RuleComposer: View {
         self.done = done
     }
 
-    private var full: Bool { store.rules.filter { $0.area == area && $0.isOn }.count >= Feedback.areaMax }
+    private var count: Int { store.rules.filter { $0.area == area && $0.counts }.count }
+    private var full: Bool { count >= Feedback.areaMax }
     private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
@@ -787,7 +898,7 @@ private struct RuleComposer: View {
                 }
                 .padding(1)
             }
-            TextField("", text: $text, prompt: Text(full ? "\(Feedback.areas.first { $0.id == area }?.title ?? "This area") has 10 rules. Change or delete one first."
+            TextField("", text: $text, prompt: Text(full ? "\(Feedback.areas.first { $0.id == area }?.title ?? "This area") has \(count) rules. Change or delete one first."
                                                         : "One short sentence, for example: Keep pauses under 0.3 s.")
                 .foregroundStyle(Theme.faint), axis: .vertical)
                 .textFieldStyle(.plain).font(Theme.sans(13)).foregroundStyle(Theme.ink)
@@ -872,8 +983,11 @@ private struct RuleRow: View {
     let root: URL
     @State private var editing = false
     @State private var draft = ""
+    @State private var editingDetails = false
+    @State private var detailsDraft = ""
     @State private var hover = false
     @FocusState private var focused: Bool
+    @FocusState private var detailsFocused: Bool
 
     private var icon: String { Feedback.areas.first { $0.id == rule.area }?.icon ?? "circle" }
 
@@ -903,6 +1017,26 @@ private struct RuleRow: View {
                         .onTapGesture { draft = rule.text; editing = true; focused = true }
                         .help("Click to change it")
                 }
+                if editingDetails {
+                    TextField("", text: $detailsDraft, axis: .vertical)
+                        .textFieldStyle(.plain).font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                        .focused($detailsFocused)
+                        .onSubmit(saveDetails)
+                        .onExitCommand { editingDetails = false }
+                        .onChange(of: detailsFocused) { _, f in if !f && editingDetails { saveDetails() } }
+                        .padding(.horizontal, 8).padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.paper))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.accent.opacity(0.6), lineWidth: 1.5))
+                        .padding(.horizontal, -8).padding(.vertical, -5)
+                } else if let details = rule.details, !details.isEmpty {
+                    Text(details).font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture { detailsDraft = details; editingDetails = true; detailsFocused = true }
+                        .help("More about this rule. Click to change it.")
+                }
                 HStack(spacing: 6) {
                     if rule.yours {
                         MetaTag(text: "Yours", icon: "person.fill", tint: Theme.accentInk)
@@ -917,6 +1051,10 @@ private struct RuleRow: View {
                             .help(rule.check == nil ? "The same mistake came back. A check would catch it." : "The same mistake came back.")
                     }
                     Text(meta).font(Theme.sans(11)).foregroundStyle(Theme.faint).lineLimit(1)
+                }
+                if rule.merge != nil {
+                    MergeSuggestion(rule: rule, store: store, root: root)
+                        .transition(.opacity.combined(with: .offset(y: -6)))
                 }
             }
             Button {
@@ -955,5 +1093,64 @@ private struct RuleRow: View {
         guard !text.isEmpty, text != rule.text else { return }
         let id = rule.id, root = root
         store.change(root) { Lessons.edit(root, id) { $0.text = String(text.prefix(Feedback.ruleMax)) } }
+    }
+
+    private func saveDetails() {
+        editingDetails = false
+        let text = detailsDraft.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard text != (rule.details ?? "") else { return }
+        let id = rule.id, root = root
+        store.change(root) { Lessons.edit(root, id) { $0.details = text.isEmpty ? nil : String(text.prefix(Feedback.detailsMax)) } }
+    }
+}
+
+/// Takes' suggestion under a new rule in a full area: the other rule, the merged sentence, and your
+/// choice. No ids: the board shows rules by their words.
+private struct MergeSuggestion: View {
+    let rule: LearnedRule
+    let store: FeedbackStore
+    let root: URL
+
+    var body: some View {
+        let merge = rule.merge
+        let other = store.rules.first { $0.id == merge?.into }
+        let fits = Lessons.mergeTarget(rule, in: store.rules) != nil
+        let after = store.rules.filter { $0.area == rule.area && $0.counts }.count + 1
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Takes wants to merge this rule with another one.")
+                .font(Theme.sans(12, .semibold)).foregroundStyle(Theme.ink)
+                .fixedSize(horizontal: false, vertical: true)
+            if fits, let other, let merge {
+                Text("Other rule: \u{201C}\(other.text)\u{201D}").font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Merged: \u{201C}\(merge.text)\u{201D}").font(Theme.sans(12)).foregroundStyle(Theme.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(other == nil || other?.isOn == false || other?.mergedInto != nil
+                     ? "The other rule is gone or off." : "The other rule changed since. Ask Takes for a new merge.")
+                    .font(Theme.sans(12)).foregroundStyle(Theme.muted)
+            }
+            HStack(spacing: 4) {
+                if fits {
+                    Button("Merge") {
+                        let id = rule.id, root = root
+                        store.change(root) { Lessons.merge(root, id) }
+                    }
+                    .buttonStyle(BracketButtonStyle())
+                    .help("The other rule gets the merged text. This rule turns off.")
+                }
+                Button("Keep both") {
+                    let id = rule.id, root = root
+                    store.change(root) { Lessons.keepBoth(root, id) }
+                }
+                .buttonStyle(BracketButtonStyle())
+                .help("Keep both rules as they are. This area then has \(after) rules.")
+            }
+            .padding(.leading, -8)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.paper))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.accentSoft, lineWidth: 1.5))
     }
 }

@@ -520,7 +520,7 @@ private struct StartPage: View {
         .frame(width: 20, height: 20)
     }
 
-    /// The three setup steps, in one line each.
+    /// The setup steps, two to a line.
     private var connect: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
@@ -533,7 +533,10 @@ private struct StartPage: View {
                 item("Claude Code", setup.claude, "Install", setup.installClaude)
                 item("Sign in", setup.claude == .ok ? setup.signedIn : .missing, "Sign in", setup.signIn,
                      enabled: setup.claude == .ok)
+            }
+            HStack(spacing: 8) {
                 item("Video tools", setup.ffmpeg, "Get", setup.installFFmpeg)
+                item("Apple developer tools", setup.devTools, "Get", setup.installDevTools)
             }
         }
         .card(padding: 14)

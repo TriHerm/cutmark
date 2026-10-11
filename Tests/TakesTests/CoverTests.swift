@@ -80,7 +80,7 @@ struct CoverTests {
         #expect(Cover.current(s) == nil)
         #expect(PostFile.media(PostFile.read(s), in: s)?.lastPathComponent == "a-v1.mp4")
 
-        Cover.remove(from: s, .vertical)
+        try await Cover.remove(from: s, .vertical)
         #expect(Cover.current(s, .vertical) == nil)
         #expect(PostFile.read(s, .vertical)?.media == "edits/v-v1.mp4")
     }

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Installs Takes and what it needs: the app, ffmpeg and Claude Code. One line in Terminal:
+# Installs Takes and what it needs: the app, ffmpeg, Apple's developer tools and Claude Code. One line in Terminal:
 #   curl -fsSL https://gettakes.app/install | bash
 # Takes is not notarized (no paid Apple developer account). A browser download gets a quarantine
 # flag and macOS blocks the app; a download with curl gets no flag, so Takes opens at once.
@@ -57,7 +57,16 @@ else
     echo "ffmpeg is in $bin."
 fi
 
-# 3. Claude Code, with Anthropic's own installer, then sign in.
+# 3. Apple's developer tools: the takes MCP server, which links Takes to your agents, runs on
+# their Python. Apple's dialog installs them in a few minutes; Takes connects the agents after.
+if xcode-select -p >/dev/null 2>&1; then
+    echo "Apple's developer tools are installed."
+else
+    say "Installing Apple's developer tools. Click Install in Apple's dialog; it goes on in the background."
+    xcode-select --install 2>/dev/null || echo "Install them later: open Takes and click Finish setup."
+fi
+
+# 4. Claude Code, with Anthropic's own installer, then sign in.
 claude=$(command -v claude || true)
 [ -n "$claude" ] || { [ -x "$bin/claude" ] && claude="$bin/claude"; } || true
 if [ -z "$claude" ]; then

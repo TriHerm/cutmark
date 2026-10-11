@@ -89,7 +89,7 @@ struct XThreadCard: View {
         .overlay(alignment: .top) { XFeed.divider.frame(height: 1) }
         .overlay(alignment: .bottom) { XFeed.divider.frame(height: 1) }
         .environment(\.colorScheme, .light)
-        .popover(isPresented: $editingProfile, arrowEdge: .bottom) { profileEditor }
+        .takesPopover(isPresented: $editingProfile) { profileEditor }
     }
 
     // MARK: One tweet

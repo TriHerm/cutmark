@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import CryptoKit
 import Foundation
 
 // On disk, everything is plain folders so Claude (or Finder) can read and write it:
@@ -41,6 +42,7 @@ struct SessionMeta: Codable, Equatable {
     var style: String?  // the style this video uses (StyleLibrary.swift); nil = its project's
     var archived: Bool?  // out of the way: in the closed group at the bottom (phone swipe, sidebar menu)
     var opens: [String: String]?  // first open: {"tab": "assets", "file": "edits/x.mp4"} (SessionView.read)
+    var id: String?  // 12 hex characters that stay on a rename or move (Store.derivedID); nil = not stored yet
 }
 
 struct Project: Identifiable, Hashable {
@@ -116,6 +118,108 @@ enum Store {
     static func modified(_ url: URL) -> Date? {
         try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
     }
+
+    // MARK: Session id and old paths (2026-10-11, same files as mcp/takes_mcp.py)
+    // session.json "id": sha1 of createdAt (as session.json spells it) and the folder's inode, 12 hex
+    // characters. The inode stays on a rename and on a move inside the volume, so the app and the server
+    // get the same id for an old session without a write. Once written, the stored id wins.
+    // <root>/.moves.json: {"<old Project/folder>": "<new Project/folder>"}, one entry per folder move,
+    // so an agent that still has an old path finds the session.
+
+    static let movesFile = ".moves.json"
+    static let movesMax = 500
+
+    /// "2026-10-11T08:02:00Z": how session.json spells createdAt.
+    static func isoString(_ date: Date) -> String { ISO8601DateFormatter().string(from: date) }
+
+    static func derivedID(_ session: URL, createdAt: String? = nil) -> String? {
+        var created = createdAt
+        if created == nil, let data = try? Data(contentsOf: session.appending(path: "session.json")),
+           let d = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            created = d["createdAt"] as? String
+        }
+        if created == nil, let born = try? session.resourceValues(forKeys: [.creationDateKey]).creationDate {
+            created = isoString(born)
+        }
+        guard let created, let attrs = try? FileManager.default.attributesOfItem(atPath: session.path),
+              let inode = (attrs[.systemFileNumber] as? NSNumber)?.uint64Value else { return nil }
+        let hex = Insecure.SHA1.hash(data: Data("\(created):\(inode)".utf8)).map { String(format: "%02x", $0) }.joined()
+        return String(hex.prefix(12))
+    }
+
+    /// The stored id, else the derived one.
+    static func sessionID(_ session: URL) -> String? { readMeta(session)?.id ?? derivedID(session) }
+
+    /// "Project/folder" of a session folder.
+    static func relative(_ session: URL) -> String {
+        let u = session.standardizedFileURL
+        return u.deletingLastPathComponent().lastPathComponent + "/" + u.lastPathComponent
+    }
+
+    static func libraryRoot(of session: URL) -> URL {
+        session.standardizedFileURL.deletingLastPathComponent().deletingLastPathComponent()
+    }
+
+    /// Nil when the file exists but does not read: then nothing writes over it.
+    static func readMoves(_ root: URL) -> [String: String]? {
+        let file = root.appending(path: movesFile)
+        guard FileManager.default.fileExists(atPath: file.path) else { return [:] }
+        guard let data = try? Data(contentsOf: file) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: String]
+    }
+
+    /// Moves a session folder and notes the move, so the old path still finds it.
+    @discardableResult
+    static func moveSession(from old: URL, to new: URL) -> Bool {
+        guard (try? FileManager.default.moveItem(at: old, to: new)) != nil else { return false }
+        recordMove(from: old, to: new)
+        return true
+    }
+
+    /// A move back to a name that is a key removes that key first, so no loop forms (A → B → A).
+    static func recordMove(from old: URL, to new: URL) {
+        let root = libraryRoot(of: new)
+        let a = relative(old), b = relative(new)
+        guard a != b, var d = readMoves(root) else { return }
+        d[b] = nil
+        d[a] = b
+        while d.count > movesMax, let k = d.keys.sorted().first { d[k] = nil }
+        guard let data = try? JSONSerialization.data(withJSONObject: d, options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? data.write(to: root.appending(path: movesFile), options: .atomic)
+    }
+
+    /// The folder an old path moved to (up to 20 steps), or nil.
+    static func followMoves(_ path: URL) -> URL? {
+        let root = libraryRoot(of: path)
+        guard let moves = readMoves(root) else { return nil }
+        var rel = relative(path), seen = Set<String>()
+        for _ in 0..<20 {
+            guard let next = moves[rel], seen.insert(rel).inserted else { return nil }
+            rel = next
+            let u = root.appending(path: rel, directoryHint: .isDirectory)
+            if FileManager.default.fileExists(atPath: u.path) { return u }
+        }
+        return nil
+    }
+
+    /// An old name of another session that still exists: a new folder must not take it. A name that
+    /// leads to session `id` itself (rename back, Undo Rename) or to nothing (trashed) is free.
+    static func movedAway(_ path: URL, for id: String?) -> Bool {
+        guard let to = followMoves(path) else { return false }
+        return sessionID(to) != id
+    }
+
+    // MARK: Recording marker
+    // <root>/.recording holds the app's pid while a take records: the server's word finder waits for it.
+
+    static func markRecording(_ root: URL, _ on: Bool) {
+        let file = root.appending(path: ".recording")
+        if on {
+            try? String(ProcessInfo.processInfo.processIdentifier).write(to: file, atomically: true, encoding: .utf8)
+        } else {
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
 }
 
 /// The session that is open in the detail pane.
@@ -159,12 +263,12 @@ final class SessionDoc {
     init(url: URL) {
         let url = Store.dir(url)
         self.url = url
-        if let m = Store.readMeta(url) {
-            meta = m
-        } else {
-            let created = (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date()
-            meta = SessionMeta(title: Self.titleFromFolder(url.lastPathComponent), createdAt: created, named: true)
-        }
+        var m = Store.readMeta(url) ?? SessionMeta(
+            title: Self.titleFromFolder(url.lastPathComponent),
+            createdAt: (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date(), named: true)
+        // The same id the server derives; saved with the next save, never written on open.
+        if m.id == nil { m.id = Store.derivedID(url) }
+        meta = m
         script = (try? String(contentsOf: url.appending(path: "script.md"), encoding: .utf8)) ?? ""
         metaStamp = Store.modified(url.appending(path: "session.json"))
         scriptStamp = Store.modified(url.appending(path: "script.md"))
@@ -214,7 +318,8 @@ final class SessionDoc {
     func reloadFromDiskIfChanged() -> Bool {
         guard FileManager.default.fileExists(atPath: url.path) else { return false }
         let ms = Store.modified(url.appending(path: "session.json"))
-        if ms != metaStamp, let m = Store.readMeta(url) {
+        if ms != metaStamp, var m = Store.readMeta(url) {
+            if m.id == nil { m.id = meta.id }
             // The same content again (Claude's MCP writes it often) redraws nothing.
             if m != meta { meta = m }
             metaStamp = ms
@@ -248,7 +353,11 @@ final class SessionDoc {
     func addTakes(_ takes: [Take]) {
         meta.takes.append(contentsOf: takes)
         save()
-        for t in Transcripts.voiceTakes(takes) { Transcripts.shared.add(fileURL(t)) }
+        for t in Transcripts.voiceTakes(takes) {
+            Transcripts.shared.add(fileURL(t))
+            // Word times on the video clock for the cut (faster-whisper): a job in the Jobs row.
+            _ = Voice.launcher(["--prepare", url.path, String(t.number)])
+        }
     }
 
     /// A take just recorded for a storyboard shot: named after the shot ("Hook 1: I do my
@@ -329,10 +438,11 @@ final class SessionDoc {
         let parent = url.deletingLastPathComponent()
         var target = Store.dir(parent.appending(path: "\(date)-\(Library.slug(clean))"))
         var n = 2
-        while target != url && FileManager.default.fileExists(atPath: target.path) {
+        if meta.id == nil { meta.id = Store.derivedID(url) }
+        while target != url && (FileManager.default.fileExists(atPath: target.path) || Store.movedAway(target, for: meta.id)) {
             target = Store.dir(parent.appending(path: "\(date)-\(Library.slug(clean))-\(n)")); n += 1
         }
-        if target != url, (try? FileManager.default.moveItem(at: url, to: target)) != nil {
+        if target != url, Store.moveSession(from: url, to: target) {
             let old = url.lastPathComponent
             let order = Store.readOrder(parent)
             if order.contains(old) {
@@ -565,10 +675,12 @@ final class Library {
             return
         }
         if current?.url == url { return }
-        current?.close()
-        let doc = SessionDoc(url: url)
-        current = doc
-        onOpen?(doc)
+        var doc: SessionDoc!
+        Perf.spans("session open", [
+            ("close", { self.current?.close() }),
+            ("doc", { doc = SessionDoc(url: url) }),
+            ("show", { self.current = doc; self.onOpen?(doc) }),
+        ])
     }
 
     @discardableResult
@@ -600,12 +712,14 @@ final class Library {
         let date = SessionDoc.dayFormatter.string(from: now)
         var url = p.appending(path: "\(date)-untitled")
         var n = 2
-        while FileManager.default.fileExists(atPath: url.path) {
+        // A name another session moved away from stays its old path: skip it.
+        while FileManager.default.fileExists(atPath: url.path) || Store.movedAway(url, for: nil) {
             url = p.appending(path: "\(date)-untitled-\(n)"); n += 1
         }
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         let doc = SessionDoc(url: url)
         doc.meta = SessionMeta(title: "Untitled", createdAt: now, named: false)
+        doc.meta.id = Store.derivedID(url, createdAt: Store.isoString(now))
         doc.save()
         loadSessions()
         current?.close()
@@ -643,12 +757,13 @@ final class Library {
     func moveSessions(_ urls: Set<URL>, to project: URL) {
         if let c = current, urls.contains(c.url) { c.close(); current = nil }
         for u in urls where u.deletingLastPathComponent() != project {
+            let id = Store.sessionID(u)
             var target = project.appending(path: u.lastPathComponent)
             var n = 2
-            while FileManager.default.fileExists(atPath: target.path) {
+            while FileManager.default.fileExists(atPath: target.path) || Store.movedAway(target, for: id) {
                 target = project.appending(path: "\(u.lastPathComponent)-\(n)"); n += 1
             }
-            try? FileManager.default.moveItem(at: u, to: target)
+            Store.moveSession(from: u, to: target)
         }
         loadSessions()
         selectedSessions = []

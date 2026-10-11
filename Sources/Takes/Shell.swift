@@ -115,6 +115,7 @@ struct Sidebar: View {
     @Environment(AppModel.self) var app
     var library: Library
     @State private var find = ""
+    @State private var searching = false
     @FocusState private var finding: Bool
 
     var body: some View {
@@ -122,9 +123,9 @@ struct Sidebar: View {
         // One grid (2026-10-03): every part sits 10 pt in from the sidebar's edges, and its own
         // content 10 pt further, so icons, chevrons, dots and buttons share one left and right line.
         VStack(spacing: 0) {
-            Color.clear.frame(height: 10)
-            BrandHeader(library: library)
-                .padding(.leading, 20).padding(.trailing, 10).padding(.bottom, 10)
+            BrandHeader(library: library, searching: $searching)
+                .padding(.leading, 14).padding(.trailing, 6).padding(.bottom, 6)
+            if searching || !find.isEmpty {
             HStack(spacing: 6) {
                 HStack(spacing: 7) {
                     Image(systemName: "magnifyingglass").font(.system(size: 11, weight: .medium))
@@ -147,27 +148,25 @@ struct Sidebar: View {
                 .animation(Theme.motion, value: find.isEmpty)
                 .animation(Theme.motion, value: finding)
             }
-            .padding(.horizontal, 10).padding(.bottom, 10)
+            .padding(.horizontal, 6).padding(.bottom, 8)
+            .onAppear { finding = true }
+            .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+            // New session as a row, as New chat in Codex.
+            SideRow(selected: false) {
+                NavLabel(icon: "square.and.pencil", title: "New session", key: "⌘N")
+            }
+            .onTapGesture { if !library.isRecording { library.createSession() } }
+            .help("New session (⌘N)")
+            .padding(.horizontal, 6).padding(.bottom, 8)
             SessionList(library: library, queue: app.posts, filter: find)
             FirstVideoGuide()
                 .animation(Theme.spring, value: FirstTake.shared.guide)
-            Rule().padding(.top, FirstTake.shared.guide == nil ? 0 : 8)
-            VStack(spacing: 1) {
-                BoardRows()
-                SideRow(selected: app.board == .styles) {
-                    NavLabel(icon: "square.stack", title: "Styles", key: "⇧⌘Y", active: app.board == .styles)
-                }
-                .onTapGesture { app.board = .styles }
-                .help("Your styles side by side, the one this video uses, and the parts Takes kept")
-                SideRow(selected: app.board == .plugins) {
-                    NavLabel(icon: "puzzlepiece.extension", title: "Plugins", key: "⇧⌘P", active: app.board == .plugins)
-                }
-                .onTapGesture { app.board = .plugins }
-                .help("Turn plugins on and off, and set them up: Higgsfield, Voices and more")
-            }
-            .padding(.horizontal, 10).padding(.top, 8).padding(.bottom, 10)
+            BoardRows()
+                .padding(.horizontal, 6).padding(.top, 4).padding(.bottom, 8)
         }
-        .background(Theme.surface)
+        .animation(Theme.motion, value: searching)
+        .onExitCommand { searching = false; find = "" }
     }
 }
 
@@ -204,83 +203,104 @@ struct NavLabel<Trailing: View>: View {
 /// Update sits at the bottom, above Performance (2026-10-03): up here it had no room for its name.
 struct BrandHeader: View {
     var library: Library
+    /// The find field shows under the brand only while you search (2026-10-11).
+    @Binding var searching: Bool
 
     var body: some View {
         let _ = Perf.body("BrandHeader")
-        HStack(spacing: 8) {
-            BrandMenu(library: library).padding(.leading, -6)  // the logo stays on the list's edge
-            // New project moved to the foot of the list (2026-10-03); a session is the common case.
-            Button { library.createSession() } label: {
-                Image(systemName: "square.and.pencil").font(.system(size: 12.5, weight: .medium))
+        HStack(spacing: 4) {
+            BrandMenu(library: library).padding(.leading, -6)  // the name stays on the list's edge
+            Button { searching.toggle() } label: {
+                Image(systemName: "magnifyingglass").font(.system(size: 13))
                     .frame(width: 28, height: 28)
             }
             .buttonStyle(IconButtonStyle())
-            .help("New session (⌘N)")
-            .disabled(library.isRecording)
+            .help("Find a session")
         }
-        .frame(height: 34)
+        .frame(height: 36)
     }
 }
 
 /// The logo and name, as a menu (2026-10-04): Settings, the look, and the library folder.
+/// A Takes menu since 2026-10-11: the look is a mode switch and theme dots in the menu itself.
 struct BrandMenu: View {
     var library: Library
     @Environment(AppModel.self) private var app
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     @State private var hover = false
-    private var look: Look { Look.shared }
 
     var body: some View {
-        Menu {
-            Button("Settings…") { openSettings() }.keyboardShortcut(",")
-            Menu("Appearance") {
-                Picker("Mode", selection: Binding(get: { look.mode }, set: { look.mode = $0 })) {
-                    ForEach(Look.Mode.allCases) { Text($0.name).tag($0) }
-                }
-                .pickerStyle(.inline)
-                Picker("Theme", selection: Binding(get: { look.palette }, set: { look.palette = $0 })) {
-                    ForEach(ThemePalette.allCases) { Text($0.name).tag($0) }
-                }
-                .pickerStyle(.inline)
-            }
-            Divider()
-            Button("Reveal Library in Finder") { library.reveal(library.root) }
-            Button("Change Library Folder…") { app.chooseLibraryFolder() }
-            Divider()
-            AboutButton()
-        } label: {
+        let openSettings = openSettings, openWindow = openWindow, app = app, library = library
+        TakesMenuButton(width: 264, help: "Settings, appearance and the library") {
             HStack(spacing: 8) {
+                // The logo is back beside the name (2026-10-11).
                 Image(nsImage: NSApp.applicationIconImage).resizable().interpolation(.high)
-                    .frame(width: 27, height: 27)
-                Text("Takes").font(Theme.display(19)).foregroundStyle(Theme.ink)
-                Spacer(minLength: 0)
-                // At the row's end, so the row reads as one control (2026-10-04).
+                    .frame(width: 22, height: 22)
+                Text("Takes").font(Theme.sans(17, .semibold)).foregroundStyle(Theme.ink)
+                // Beside the name, as in Codex (2026-10-11).
                 Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
                     .foregroundStyle(Theme.faint)
                     .opacity(hover ? 1 : 0.6)
+                Spacer(minLength: 0)
             }
             // The whole row up to the new-session button: an easy target (2026-10-04).
-            .padding(.leading, 6).padding(.trailing, 10).frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+            .padding(.leading, 6).padding(.trailing, 10).frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 9).fill(hover ? Theme.hover : .clear))
             .contentShape(Rectangle())
+        } content: {
+            MenuButton("Settings…", icon: "gearshape", detail: "⌘ ,") { openSettings() }
+            MenuDivider()
+            MenuLabel("Appearance")
+            MenuView("look") { LookPicker() }
+            MenuDivider()
+            MenuButton("Reveal library in Finder", icon: "folder") { library.reveal(library.root) }
+            MenuButton("Change library folder…", icon: "folder.badge.gearshape") { app.chooseLibraryFolder() }
+            MenuView("path") {
+                Text((library.root.path as NSString).abbreviatingWithTildeInPath)
+                    .font(Theme.sans(11)).foregroundStyle(Theme.faint).lineLimit(1).truncationMode(.middle)
+                    .padding(.leading, 33).padding(.trailing, 8).padding(.bottom, 4)
+            }
+            MenuDivider()
+            MenuButton("About Takes", icon: "info.circle") { openWindow(id: "about") }
         }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
         .frame(maxWidth: .infinity)
         .onHover { hover = $0 }
         .animation(Theme.motion, value: hover)
-        .help("Settings, appearance and the library")
     }
 }
 
-/// A row in a popover menu: soft well on hover.
-struct MenuRowStyle: ButtonStyle {
-    @State private var hover = false
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .background(RoundedRectangle(cornerRadius: 6).fill(hover || configuration.isPressed ? Theme.hover : .clear))
-            .onHover { hover = $0 }
+/// Light, dark or the system's mode, and the theme as dots: the look, right in the logo menu.
+struct LookPicker: View {
+    private var look: Look { Look.shared }
+    @State private var hovered: ThemePalette?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            TakesSwitch(selection: Binding(get: { look.mode }, set: { look.mode = $0 }), title: \.name, fill: true)
+                .padding(.horizontal, 8).padding(.top, 2).padding(.bottom, 4)
+            HStack(spacing: 8) {
+                ForEach(ThemePalette.allCases) { p in
+                    let on = look.palette == p
+                    Button { withAnimation(Theme.motion) { look.palette = p } } label: {
+                        Circle().fill(Color(nsColor: ThemeColors.ns(p.spec.accent)))
+                            .frame(width: 14, height: 14)
+                            .padding(3)
+                            .overlay(Circle().strokeBorder(on ? Theme.ink : hovered == p ? Theme.border : .clear, lineWidth: 1.5))
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { hovered = $0 ? p : (hovered == p ? nil : hovered) }
+                    .help(p.name)
+                    .accessibilityLabel(p.name)
+                    .accessibilityAddTraits(on ? .isSelected : [])
+                }
+                Spacer(minLength: 8)
+                Text((hovered ?? look.palette).name).font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                    .contentTransition(.opacity)
+            }
+            .padding(.horizontal, 6).padding(.top, 4).padding(.bottom, 6)
+        }
     }
 }
 
@@ -329,15 +349,16 @@ struct SessionHeader: View {
     @State private var title = ""
     @State private var titleHover = false
     @FocusState private var editingTitle: Bool
+    @Environment(\.titleInset) private var inset
 
     var body: some View {
         let _ = Perf.body("SessionHeader")
-        HStack(alignment: .center, spacing: 18) {
-            VStack(alignment: .leading, spacing: 3) {
+        HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
                 HStack(spacing: 8) {
                     TextField("Untitled", text: $title)
                         .textFieldStyle(.plain)
-                        .font(Theme.display(30))
+                        .font(Theme.sans(14, .semibold))
                         .foregroundStyle(Theme.ink)
                         .focused($editingTitle)
                         .onSubmit { commitTitle() }
@@ -348,15 +369,12 @@ struct SessionHeader: View {
                         }
                         .onHover { h in withAnimation(Theme.motion) { titleHover = h } }
                         .help("Click to rename")
-                        // Never shorter than its line: once (2026-10-04) the field got half its
-                        // height and showed only the top of the title.
-                        .frame(minHeight: Self.titleHeight)
-                    if app.naming { ProgressView().controlSize(.small) }
+                        .fixedSize()
+                    if app.naming { ProgressView().controlSize(.mini) }
                 }
-                meta
+                meta.layoutPriority(-1)
             }
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(minWidth: 160, maxWidth: .infinity, alignment: .leading)
+            .frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
             ModeSwitcher(tab: $tab)
             HStack(spacing: 6) {
                 HeaderSchedule(doc: doc, platform: PostPlatform(rawValue: platformRaw) ?? .linkedin)
@@ -364,7 +382,9 @@ struct SessionHeader: View {
                 MoreMenu(doc: doc)
             }
         }
-        .padding(.leading, 28).padding(.trailing, 20).padding(.top, 16).padding(.bottom, 14)
+        // The top row (Rail.swift): the title starts where the panel under it starts.
+        .padding(.leading, 20 + inset).padding(.trailing, 12)
+        .frame(height: Chrome.bar)
         // The notice sits on the middle of the window, not of the space left in this row (2026-10-04).
         // The header runs to the window's right edge, so the window's middle is (width - minX) / 2 here.
         .overlay {
@@ -375,17 +395,9 @@ struct SessionHeader: View {
                     .position(x: max(260, (g.size.width - minX) / 2), y: g.size.height / 2)
             }
         }
-        .background(Theme.paper)
         .gesture(WindowDragGesture())
         .onAppear { title = doc.meta.title }
         .onChange(of: doc.meta.title) { _, t in title = t }
-    }
-
-    /// The title font's line height.
-    private static var titleHeight: CGFloat {
-        let size = 30 * 0.8 * TextSize.shared.factor
-        let f = NSFont(name: "Nunito-Bold", size: size) ?? .systemFont(ofSize: size, weight: .bold)
-        return ceil(f.ascender - f.descender + f.leading)
     }
 
     /// ⌘Z after a rename undoes the rename (and ⇧⌘Z redoes it), not the typing in a field that
@@ -400,7 +412,7 @@ struct SessionHeader: View {
 
     private var meta: some View {
         HStack(spacing: 7) {
-            Text(doc.projectName).font(Theme.sans(12, .medium)).foregroundStyle(Theme.muted)
+            Text(doc.projectName)
             dot
             let n = doc.takeGroups.count
             Text("\(n) take\(n == 1 ? "" : "s")")
@@ -411,7 +423,7 @@ struct SessionHeader: View {
                 PublishMenu(doc: doc)
             }
         }
-        .font(Theme.sans(12))
+        .font(Theme.sans(12.5))
         .foregroundStyle(Theme.faint)
         .lineLimit(1)
     }
@@ -436,7 +448,7 @@ struct ModeSwitcher: View {
                     Text(m.title)
                         .font(Theme.sans(13, .medium))
                         .foregroundStyle(on ? Theme.ink : Theme.muted)
-                        .padding(.horizontal, 14).frame(height: 26)
+                        .padding(.horizontal, 12).frame(height: 24)
                         .background {
                             if on {
                                 RoundedRectangle(cornerRadius: 7).fill(Theme.paper)
@@ -452,8 +464,8 @@ struct ModeSwitcher: View {
                 .help(m.help)
             }
         }
-        .padding(3)
-        .background(Theme.hover, in: RoundedRectangle(cornerRadius: 10))
+        .padding(2)
+        .background(Theme.hover, in: RoundedRectangle(cornerRadius: 9))
         .animation(Theme.spring, value: current)
         .fixedSize()
     }
@@ -522,8 +534,8 @@ struct HeaderSchedule: View {
 }
 
 /// Everything else about the session, in one place. Our own popover, not the system menu
-/// (2026-10-06): the same paper, type and hover wells as the rest of Takes. The two lists
-/// (projects, platforms) open in place under their row instead of as side menus.
+/// (2026-10-06). A Takes menu since 2026-10-11: the rows come from `SessionMenu`, the same rows
+/// the sidebar's right-click shows.
 struct MoreMenu: View {
     @Environment(AppModel.self) var app
     var doc: SessionDoc
@@ -531,6 +543,7 @@ struct MoreMenu: View {
 
     var body: some View {
         let _ = Perf.body("MoreMenu")
+        let app = app, doc = doc
         Button { open.toggle() } label: {
             Image(systemName: "ellipsis").font(.system(size: 14, weight: .semibold))
                 .frame(width: 32, height: 30)
@@ -538,132 +551,76 @@ struct MoreMenu: View {
         .buttonStyle(IconButtonStyle())
         .disabled(app.isRecording)
         .help("More")
-        .popover(isPresented: $open, arrowEdge: .bottom) { MorePanel(doc: doc, open: $open) }
+        .takesMenu(isPresented: $open, width: 260) { SessionMenu.rows(app: app, urls: [doc.url]) }
     }
 }
 
-/// The rows of the More menu.
-struct MorePanel: View {
-    @Environment(AppModel.self) var app
-    var doc: SessionDoc
-    @Binding var open: Bool
-    @State var expanded: Fold?
-
-    enum Fold { case move, published }
-
-    var body: some View {
+/// The rows of a session's menu (2026-10-11): the ⋯ button and the sidebar's right-click build
+/// them here, so both show the same rows in the same order. One session gets its links, naming,
+/// the path and Clean up; several get the rows that act on all of them.
+enum SessionMenu {
+    @MainActor @MenuBuilder
+    static func rows(app: AppModel, urls: Set<URL>) -> [MenuItem] {
         let library = app.library
-        let urls: Set<URL> = [doc.url]
+        let one = urls.count == 1 ? urls.first : nil
+        // The open session's doc, so a rename or a check shows at once; another one from disk.
+        let doc = one.map { u in library.current?.url == u ? library.current! : SessionDoc(url: u) }
         let others = library.projects.filter { $0.url != library.selectedProject }
-        let archived = library.sessions.first { $0.url == doc.url }?.archived ?? false
-        return VStack(alignment: .leading, spacing: 1) {
-            row("sparkles", "Name from script", enabled: !app.naming && !doc.script.isEmpty) {
+        let picked = library.sessions.filter { urls.contains($0.url) }
+        let archived = !picked.isEmpty && picked.allSatisfy(\.archived)
+        if let doc {
+            let links = doc.posts.compactMap { p in p.url.flatMap(URL.init(string:)).map { (p.label, $0) } }
+            for (label, url) in links {
+                MenuButton("Open on \(label)", icon: "arrow.up.right.square") { NSWorkspace.shared.openSoon(url) }
+            }
+            if !links.isEmpty { MenuDivider() }
+            // Naming works on the open session only (AppModel.aiName).
+            MenuButton("Name from script", icon: "sparkles",
+                       enabled: library.current === doc && !app.naming && !doc.script.isEmpty) {
                 Task { await app.aiName(doc) }
             }
-            row("doc.on.doc", "Copy folder path") {
+            MenuButton("Copy folder path", icon: "doc.on.doc") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(doc.url.path, forType: .string)
                 app.show(toast: "Path copied. Paste it to Takes.")
             }
-            if doc.isPublished { row("checklist", "Clean up…") { app.cleaningUp = true } }
-            divider
-            if !others.isEmpty {
-                group(.move, "folder", "Move to project") {
-                    ForEach(others) { p in
-                        sub(p.name) { close { library.moveSessions(urls, to: p.url) } }
-                    }
+            if doc.isPublished && library.current === doc {
+                MenuButton("Clean up…", icon: "checklist") { app.cleaningUp = true }
+            }
+            MenuDivider()
+        }
+        if !others.isEmpty {
+            MenuGroup("Move to project", icon: "folder") {
+                for p in others {
+                    MenuButton(p.name) { library.moveSessions(urls, to: p.url) }
                 }
             }
-            group(.published, "paperplane", "Mark as published on") {
-                ForEach(Platforms.all, id: \.self) { p in platform(p) }
-                platform(nil)
-            }
-            row("star.slash", "Trash takes without a star") { library.trashNonKeepers(urls) }
-            row("archivebox", archived ? "Unarchive" : "Archive") { library.setArchived(urls, !archived) }
-            row("folder.badge.gearshape", "Reveal in Finder") { library.reveal(urls) }
-            divider
-            row("trash", "Move session to Trash", danger: true) { library.trashSessions(urls) }
         }
-        .padding(6)
-        .frame(width: 248)
-        .background(Theme.paper)
-        .animation(Theme.motion, value: expanded)
-    }
-
-    private var divider: some View { Rule().padding(.horizontal, 6).padding(.vertical, 5) }
-
-    /// Close the popover first, then act: a move or a trash changes the view under it.
-    private func close(_ action: @escaping () -> Void) {
-        open = false
-        DispatchQueue.main.async(execute: action)
-    }
-
-    private func row(_ icon: String, _ title: String, enabled: Bool = true, danger: Bool = false,
-                     action: @escaping () -> Void) -> some View {
-        Button { close(action) } label: {
-            label(icon, title, danger: danger)
-        }
-        .buttonStyle(MenuRowStyle())
-        .disabled(!enabled)
-        .opacity(enabled ? 1 : 0.4)
-    }
-
-    private func label(_ icon: String, _ title: String, danger: Bool = false) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon).font(.system(size: 12, weight: .medium))
-                .foregroundStyle(danger ? Theme.danger : Theme.muted)
-                .frame(width: 16)
-            Text(title).font(Theme.sans(13)).foregroundStyle(danger ? Theme.danger : Theme.ink)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 8).frame(height: 28)
-        .contentShape(Rectangle())
-    }
-
-    /// A row that opens its list right under it.
-    private func group<Content: View>(_ id: Fold, _ icon: String, _ title: String,
-                                      @ViewBuilder content: () -> Content) -> some View {
-        let on = expanded == id
-        return VStack(alignment: .leading, spacing: 1) {
-            Button { expanded = on ? nil : id } label: {
-                label(icon, title)
-                    .overlay(alignment: .trailing) {
-                        Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(Theme.faint)
-                            .rotationEffect(.degrees(on ? 90 : 0))
-                            .padding(.trailing, 8)
+        MenuGroup(urls.count == 1 ? "Mark as published on" : "Mark \(urls.count) as published on", icon: "paperplane") {
+            if let doc {
+                // A platform switches on and off in place, like the Published control.
+                let choices: [String?] = Platforms.all.map { $0 } + [nil]
+                for p in choices {
+                    let on = doc.posts.contains { $0.platform?.lowercased() == p?.lowercased() }
+                    MenuButton(p ?? "Somewhere else", checked: on, keepsOpen: true) {
+                        doc.setPublished(p, !on)
+                        library.loadSessions()
                     }
-            }
-            .buttonStyle(MenuRowStyle())
-            if on {
-                VStack(alignment: .leading, spacing: 1) { content() }
-                    .padding(.leading, 26)
-                    .transition(.opacity)
-            }
-        }
-    }
-
-    private func sub(_ title: String, checked: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Text(title).font(Theme.sans(12.5)).foregroundStyle(Theme.ink)
-                Spacer(minLength: 0)
-                if checked {
-                    Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.accent)
                 }
+            } else {
+                for p in Platforms.all {
+                    MenuButton(p) { library.markPublished(urls, on: p) }
+                }
+                MenuButton("Somewhere else") { library.markPublished(urls) }
             }
-            .padding(.horizontal, 8).frame(height: 26)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(MenuRowStyle())
-    }
-
-    /// A platform switches on and off in place, like the Published control, so the list stays open.
-    private func platform(_ p: String?) -> some View {
-        let on = doc.posts.contains { $0.platform?.lowercased() == p?.lowercased() }
-        return sub(p ?? "Somewhere else", checked: on) {
-            doc.setPublished(p, !on)
-            app.library.loadSessions()
+        MenuButton("Trash takes without a star", icon: "star.slash") { library.trashNonKeepers(urls) }
+        MenuButton(archived ? "Unarchive" : "Archive", icon: "archivebox") { library.setArchived(urls, !archived) }
+        MenuButton("Reveal in Finder", icon: "folder.badge.gearshape") { library.reveal(urls) }
+        MenuDivider()
+        MenuButton(urls.count == 1 ? "Move session to Trash" : "Move \(urls.count) sessions to Trash",
+                   icon: "trash", danger: true) {
+            library.trashSessions(urls)
         }
     }
 }

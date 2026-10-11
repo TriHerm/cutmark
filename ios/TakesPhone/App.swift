@@ -7,7 +7,11 @@ struct TakesPhoneApp: App {
     @StateObject private var model = Model()
     @Environment(\.scenePhase) private var scene
 
-    init() { Brand.registerFonts() }
+    init() {
+        Brand.registerFonts()
+        // The UI tests pick a Home Screen quick action this way.
+        if let q = ProcessInfo.processInfo.environment["TAKES_QUICK"] { QuickAction.shared.asked = q }
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -35,6 +39,43 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             model.uploads.backgroundDone = completionHandler
             _ = model.uploads.session
         }
+    }
+
+    /// The scene delegate hears the Home Screen quick actions (QuickAction).
+    func application(_ application: UIApplication, configurationForConnecting scene: UISceneSession,
+                     options: UIScene.ConnectionOptions) -> UISceneConfiguration {
+        if let item = options.shortcutItem { QuickAction.shared.asked = item.type }
+        let c = UISceneConfiguration(name: nil, sessionRole: scene.role)
+        c.delegateClass = SceneDelegate.self
+        return c
+    }
+}
+
+final class SceneDelegate: NSObject, UIWindowSceneDelegate {
+    func windowScene(_ windowScene: UIWindowScene, performActionFor shortcutItem: UIApplicationShortcutItem,
+                     completionHandler: @escaping (Bool) -> Void) {
+        QuickAction.shared.asked = shortcutItem.type
+        completionHandler(true)
+    }
+}
+
+/// Press and hold the app icon (2026-10-11): "New idea" opens the list of videos with the keyboard
+/// up in its idea bar (IdeaBar), for an idea on a walk. The mic waits for a tap. Only a Mac whose plugins have a phone Ideas screen adds it (admin only), so the
+/// public copy shows none.
+@MainActor final class QuickAction: ObservableObject {
+    static let shared = QuickAction()
+    static let sayIdea = "say-idea"
+    /// The action picked, until Face ID has opened the app and a screen took it.
+    @Published var asked: String?
+    /// The idea bar on the list of videos takes the keyboard when it shows. The mic stays off:
+    /// The user taps it himself (2026-10-11).
+    @Published var jot = false
+
+    static func offer(_ plugins: [PluginInfo]) {
+        UIApplication.shared.shortcutItems = plugins.contains { $0.id == "ideas" }
+            ? [UIApplicationShortcutItem(type: sayIdea, localizedTitle: "New idea", localizedSubtitle: nil,
+                                         icon: UIApplicationShortcutIcon(systemImageName: "lightbulb"))]
+            : []
     }
 }
 
@@ -91,6 +132,7 @@ struct Root: View {
 /// main screen carries the brand's floating bar, so it goes away when a video opens.
 struct Tabs: View {
     @EnvironmentObject var model: Model
+    @ObservedObject private var quick = QuickAction.shared
     /// Always opens on the list of videos, as the Mac opens on its sidebar: with no tab bar, a
     /// remembered Comments page hid the list (2026-10-04).
     @State private var tab = "videos"
@@ -115,6 +157,17 @@ struct Tabs: View {
             .toolbar(.hidden, for: .tabBar).tag("extra")
         }
         .environment(\.tabBar, $tab)
+        .onAppear { take() }
+        .onChange(of: quick.asked) { _, _ in take() }
+        .onChange(of: model.phase) { _, _ in take() }
+    }
+
+    /// A Home Screen quick action, once the app is open (after Face ID).
+    private func take() {
+        guard model.phase == .open, quick.asked == QuickAction.sayIdea else { return }
+        quick.asked = nil
+        tab = "videos"
+        quick.jot = true
     }
 }
 

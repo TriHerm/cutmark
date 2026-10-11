@@ -16,7 +16,7 @@ struct SetupTests {
     @Test @MainActor func nothingShowsBeforeTheFirstCheck() {
         let s = Setup()
         #expect(!s.needed)
-        s.claude = .ok; s.signedIn = .missing; s.ffmpeg = .ok
+        s.claude = .ok; s.signedIn = .missing; s.ffmpeg = .ok; s.devTools = .ok
         #expect(s.needed && s.left == 1)
         s.signedIn = .ok
         #expect(!s.needed && s.left == 0)
@@ -44,9 +44,9 @@ func ffmpegDownloadsAndRuns() async throws {
 @Test(.enabled(if: ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] != nil)) @MainActor
 func setupSnapshot() throws {
     let s = Setup.shared
-    s.claude = .ok; s.signedIn = .missing; s.ffmpeg = .working
+    s.claude = .ok; s.signedIn = .missing; s.ffmpeg = .working; s.devTools = .missing
     let failed = Setup()
-    failed.claude = .missing; failed.signedIn = .missing; failed.ffmpeg = .failed("The ffmpeg download did not match its checksum.")
+    failed.claude = .missing; failed.signedIn = .missing; failed.ffmpeg = .failed("The ffmpeg download did not match its checksum."); failed.devTools = .ok
     for dark in [false, true] {
         NSAppearance.current = NSAppearance(named: dark ? .darkAqua : .aqua)
         let view = HStack(alignment: .top, spacing: 24) {

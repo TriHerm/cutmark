@@ -174,14 +174,16 @@ struct LookColors {
 
 // MARK: - The picker
 
-/// Mode, theme and accent for this phone, each with a small preview. The Mac keeps its own.
+/// Settings: mode, theme and accent for this phone, each with a small preview (the Mac keeps its
+/// own), then forgetting the Mac. Both left the Takes menu so it holds only pages (2026-10-11).
 struct AppearanceSheet: View {
+    var forget: (() -> Void)? = nil
     let close: () -> Void
     @Environment(\.colorScheme) private var scheme
     private var look: Look { Look.shared }
 
     var body: some View {
-        BrandSheet(title: "Appearance", cancel: "Done", close: close) {
+        BrandSheet(title: "Settings", cancel: "Done", close: close) {
             Button("Reset") { withAnimation(Brand.quick) { look.reset() } }
                 .buttonStyle(.pill(.quiet, small: true))
                 .disabled(look.isDefault)
@@ -222,6 +224,19 @@ struct AppearanceSheet: View {
             }
             Text("Only for this iPhone. The Mac keeps its own look.")
                 .font(.inter(.footnote)).foregroundStyle(Palette.faint).padding(.horizontal, 4)
+            if let forget {
+                FormCard(title: "This Mac") {
+                    Button(role: .destructive) { forget() } label: {
+                        HStack {
+                            Text("Forget this Mac").font(.inter(.callout, .medium))
+                            Spacer()
+                            Image(systemName: "xmark.circle").font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(Palette.danger).frame(height: 32).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.press)
+                }
+            }
         }
         .animation(Brand.quick, value: look.palette)
         .animation(Brand.quick, value: look.accent)

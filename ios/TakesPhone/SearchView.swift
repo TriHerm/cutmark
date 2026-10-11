@@ -20,8 +20,16 @@ struct SearchResult: Codable, Hashable {
     var status: String
 }
 
+/// What Home's "Find a session or a clip" hands to Search, so the Takes menu needs no Search row
+/// (2026-10-11).
+@MainActor final class SearchSeed: ObservableObject {
+    static let shared = SearchSeed()
+    @Published var query: String?
+}
+
 struct SearchView: View {
     @EnvironmentObject var model: Model
+    @ObservedObject private var seed = SearchSeed.shared
     @Environment(\.tabBar) private var tab
     @State private var query = ""
     @State private var filter = "all"
@@ -60,8 +68,15 @@ struct SearchView: View {
                 Viewer(file: Bubble.guess(h.path), sessionID: h.session ?? "", onDone: { showing = nil })
             }
             .task { await model.loadProjects() }
-            .onAppear { focused = true }
+            .onAppear { take(); focused = true }
+            .onChange(of: seed.query) { take() }
         }
+    }
+
+    private func take() {
+        guard let q = seed.query else { return }
+        seed.query = nil
+        query = q
     }
 
     private var field: some View {

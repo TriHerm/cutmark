@@ -235,7 +235,13 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
         app.library.select(s.url)
         guard let doc = app.library.current else { return }
         func paper(_ v: some View) -> some View { v.background(Theme.paper).environment(app).font(Theme.body).tint(Theme.accent) }
-        shoot("ref-more", paper(MorePanel(doc: doc, open: .constant(true), expanded: .move)), size: CGSize(width: 260, height: 420))
+        // The More menu is a Takes menu since 2026-10-11 (SessionMenu); one shot with "Move to project" open.
+        func more(open group: String? = nil) -> some View {
+            let st = MenuState()
+            if let group { st.open.insert(group) }
+            return TakesMenuList(content: { SessionMenu.rows(app: app, urls: [doc.url]) }, state: st, width: 260)
+        }
+        shoot("ref-more", paper(more(open: "g:Move to project")), size: CGSize(width: 260, height: 420))
         shoot("ref-draftbar", paper(DraftBar(doc: doc, showHistory: .constant(false))), size: CGSize(width: 700, height: 90))
         shoot("ref-history", paper(HistorySheet(doc: doc)), size: CGSize(width: 860, height: 560))
         if let t = doc.meta.takes.first {
@@ -249,7 +255,7 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
             shoot("ref-schedule", paper(SchedulePanel(content: c, post: post, close: {})), size: CGSize(width: 320, height: 560))
         }
         for dark in [false, true] {
-            shoot("ref-more\(dark ? "-dark" : "")", paper(MorePanel(doc: doc, open: .constant(true))), size: CGSize(width: 260, height: 380), dark: dark)
+            shoot("ref-more\(dark ? "-dark" : "")", paper(more()), size: CGSize(width: 260, height: 380), dark: dark)
         }
     }
 }

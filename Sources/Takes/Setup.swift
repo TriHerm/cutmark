@@ -4,6 +4,8 @@ import Observation
 import SwiftUI
 
 /// What a new Mac needs before Takes works (2026-10-05): Claude Code, signed in, and ffmpeg.
+/// Since 2026-10-10 also Apple's developer tools: the takes MCP server runs on /usr/bin/python3,
+/// which without them is only a stub, so no agent could use Takes. Their fix opens Apple's dialog.
 /// A downloaded Takes checks this at launch and each time it comes to the front. While a step is
 /// missing, the sidebar shows Finish setup; its panel fixes each step with one click. The app
 /// installs Claude Code with Anthropic's installer and ffmpeg as a static build in ~/.local/bin
@@ -18,11 +20,12 @@ final class Setup {
     var claude: Status = .unknown
     var signedIn: Status = .unknown
     var ffmpeg: Status = .unknown
+    var devTools: Status = .unknown
     private var checking = false
 
     /// True once a check found something to do. Nothing shows before the first check ends.
-    var needed: Bool { [claude, signedIn, ffmpeg].contains { $0 != .ok && $0 != .unknown } }
-    var left: Int { [claude, signedIn, ffmpeg].filter { $0 != .ok }.count }
+    var needed: Bool { [claude, signedIn, ffmpeg, devTools].contains { $0 != .ok && $0 != .unknown } }
+    var left: Int { [claude, signedIn, ffmpeg, devTools].filter { $0 != .ok }.count }
 
     nonisolated static var home: String { FileManager.default.homeDirectoryForCurrentUser.path }
     nonisolated static var localBin: String { home + "/.local/bin" }
@@ -48,13 +51,22 @@ final class Setup {
         checking = true
         defer { checking = false }
         let path = Namer.claudePath
-        let (signed, hasFFmpeg) = await Task.detached(priority: .utility) {
-            (path.map { Self.isSignedIn(claude: $0) } ?? false, Self.tool("ffmpeg") != nil && Self.tool("ffprobe") != nil)
+        let (signed, hasFFmpeg, hasTools) = await Task.detached(priority: .utility) {
+            (path.map { Self.isSignedIn(claude: $0) } ?? false, Self.tool("ffmpeg") != nil && Self.tool("ffprobe") != nil,
+             Self.hasDevTools())
         }.value
         if claude != .working { claude = path == nil ? .missing : .ok }
         if signedIn != .working { signedIn = signed ? .ok : .missing }
         if ffmpeg != .working { ffmpeg = hasFFmpeg ? .ok : .missing }
+        if devTools != .working {
+            // Tools that came since the last check: the agents get the takes server now.
+            if hasTools, devTools == .missing { AgentSetup.run() }
+            devTools = hasTools ? .ok : .missing
+        }
     }
+
+    /// `xcode-select -p` finds the Command Line Tools (or Xcode) and never opens a dialog.
+    nonisolated static func hasDevTools() -> Bool { run("/usr/bin/xcode-select", ["-p"]).0 }
 
     nonisolated static func isSignedIn(claude: String) -> Bool {
         let (_, out) = run(claude, ["auth", "status"])
@@ -101,6 +113,24 @@ final class Setup {
             NSWorkspace.shared.openSoon(script)
         } catch {
             signedIn = .failed("Could not open Terminal. Run claude auth login in Terminal.")
+        }
+    }
+
+    /// Opens Apple's install dialog, then waits for the tools (it takes some minutes) and sets up
+    /// the agents. Closing the dialog leaves the step open, to try again.
+    func installDevTools() {
+        devTools = .working
+        Task {
+            _ = await Task.detached { Self.run("/usr/bin/xcode-select", ["--install"]) }.value
+            for _ in 0..<360 {  // 30 minutes
+                try? await Task.sleep(for: .seconds(5))
+                if await Task.detached(operation: { Self.hasDevTools() }).value {
+                    devTools = .ok
+                    AgentSetup.run()
+                    return
+                }
+            }
+            devTools = .missing
         }
     }
 
@@ -172,6 +202,7 @@ final class Setup {
 /// "Finish setup" at the top of the sidebar while a step is missing. It opens the checklist.
 struct SetupButton: View {
     private var setup = Setup.shared
+    @Environment(\.openSettings) private var openSettings
     @State private var open = false
     @State private var hover = false
 
@@ -196,7 +227,7 @@ struct SetupButton: View {
             .background(Theme.accentSoft)
             .clipShape(RoundedRectangle(cornerRadius: 9))
             .padding(.bottom, 4)
-            .popover(isPresented: $open, arrowEdge: .trailing) { SetupPanel(setup: setup) }
+            .takesPopover(isPresented: $open, edge: .trailing) { [openSettings] in SetupPanel(setup: setup, settings: openSettings) }
             .transition(.opacity.combined(with: .scale(scale: 0.95)))
         }
     }
@@ -205,6 +236,8 @@ struct SetupButton: View {
 /// The three steps, each with its state and the button that does it, then the optional Gemini key.
 struct SetupPanel: View {
     var setup: Setup
+    /// The caller's Settings action: a Takes panel is its own window, outside the app's scenes.
+    var settings: OpenSettingsAction? = nil
     @Environment(\.openSettings) private var openSettings
     @State private var hasGemini = GeminiKey.found
 
@@ -222,7 +255,7 @@ struct SetupPanel: View {
             Spacer(minLength: 8)
             Button(hasGemini ? "Details" : "Add Key") {
                 UserDefaults.standard.set(SettingsView.SettingsPage.gemini.rawValue, forKey: "settingsPage")
-                openSettings()
+                (settings ?? openSettings)()
             }
         }
     }
@@ -244,6 +277,8 @@ struct SetupPanel: View {
                      enabled: setup.claude == .ok, setup.signIn)
                 step("Get ffmpeg", "Cuts and exports video. About 60 MB, into ~/.local/bin.",
                      setup.ffmpeg, action: "Download", busy: "Downloading…", setup.installFFmpeg)
+                step("Get Apple's developer tools", "Takes' link to your agents runs on them. Apple's own installer opens; it takes a few minutes.",
+                     setup.devTools, action: "Install", busy: "Installing…", setup.installDevTools)
             }
             .padding(18)
             Divider().overlay(Theme.border)

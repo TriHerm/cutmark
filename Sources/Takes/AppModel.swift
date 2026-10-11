@@ -24,6 +24,8 @@ final class AppModel {
     let chats = ChatHub()
     /// Posts marked ready, scheduled or posted, with their times.
     let posts = PostQueue()
+    /// Long jobs the takes MCP runs (renders and the like), per session (Jobs.swift).
+    let jobs = JobBoard()
 
     @ObservationIgnored @AppStorage("mode") private var modeStore: Mode = .camera
     @ObservationIgnored @AppStorage("countdown") private var countdownStore = true
@@ -169,6 +171,10 @@ final class AppModel {
     /// The review player in the post preview, so C, Space and ←/→ reach it there too.
     @ObservationIgnored weak var postReview: PostReview?
     var sessionsToggle = 0
+    /// Back and forward (Navigation.swift).
+    var trail = NavTrail()
+    var navSettle: Task<Void, Never>?
+    @ObservationIgnored var navRestoring = false
     /// The cleanup sheet for the open session (Publish.swift).
     var cleaningUp = false
 
@@ -258,7 +264,7 @@ final class AppModel {
         }
         // Tests leave the app's logs alone: their perf lines and stall samples went into
         // ~/Library/Logs/Takes beside the app's and read as the app's own (2026-10-04).
-        if !Self.testing { HangWatch.start(); Perf.start(); PostFile.warmPortraits(library.root) }
+        if !Self.testing { Perf.start(); PostFile.warmPortraits(library.root) }
         copilot.askChat = { [chats] text in chats.comments.send(text, title: "Comments", onStage: nil) }
         voice.source = { [weak self] in self?.promptText ?? "" }
         voice.problem = { [weak self] in self?.show(toast: $0) }
@@ -281,6 +287,7 @@ final class AppModel {
         screen.refreshDisplays()
         Task { await camera.boot() }
         if !Self.testing {
+            Store.markRecording(library.root, false)  // a marker a crash left behind
             phone = PhoneServer(app: self)
             phone?.start()
             Transcripts.shared.start(root: { [weak self] in self?.library.root },
@@ -311,7 +318,23 @@ final class AppModel {
         // Changes Claude makes through the MCP server show up without a click: FSEvents tells us,
         // so an idle app does no disk work at all.
         watch.watch(library.root)
-        library.onRoot = { [weak self] url in self?.watch.watch(url); Self.seedStyles(url) }
+        library.onRoot = { [weak self] url in self?.watch.watch(url); Self.seedStyles(url); self?.jobs.scan(root: url) }
+        // Jobs: a job's end tells its session's chat (open this run, or with a saved conversation).
+        jobs.chatFor = { [chats] s in
+            chats.existing(s) ?? (FileManager.default.fileExists(atPath: ClaudeChat.file(s).path) ? chats.chat(s) : nil)
+        }
+        ClaudeChat.heldNotes = { [jobs] s in jobs.takeHeld(s) }
+        if !Self.testing { jobs.scan(root: library.root) }
+        monitors.append(NotificationCenter.default.addObserver(forName: .takesJobsChanged, object: nil, queue: .main) { [weak self] note in
+            MainActor.assumeIsolated {
+                if let s = note.object as? URL { self?.jobs.reload(s) }
+            }
+        })
+        monitors.append(NotificationCenter.default.addObserver(forName: .takesChatIdle, object: nil, queue: .main) { [weak self] note in
+            MainActor.assumeIsolated {
+                if let s = note.object as? URL { self?.jobs.chatIdle(s) }
+            }
+        })
         Self.seedStyles(library.root)
         monitors.append(NotificationCenter.default.addObserver(
             forName: .takesFilesChanged, object: nil, queue: .main
@@ -335,8 +358,12 @@ final class AppModel {
             }
         }
         pollTimer?.tolerance = 5
-        chats.resume()
-        if Features.socialBoards { scout.start(chats) }
+        // Tests must never touch the real chats: resume() deletes resume.json and the scout
+        // archives the live Comments chat and starts a new one (audit #37, 2026-10-11).
+        if !Self.testing {
+            chats.resume()
+            if Features.socialBoards { scout.start(chats) }
+        }
         // The camera runs only while you can see it.
         for name in [NSWindow.didChangeOcclusionStateNotification, NSApplication.didHideNotification,
                      NSApplication.didUnhideNotification, NSWindow.didMiniaturizeNotification,
@@ -594,6 +621,7 @@ final class AppModel {
         }
         phase = .starting
         library.isRecording = true
+        Store.markRecording(library.root, true)
         let n = doc.nextTakeNumber
         let nn = String(format: "%02d", n)
         let camURL = doc.url.appending(path: "take-\(nn)-camera.mov")
@@ -617,6 +645,7 @@ final class AppModel {
             await screen.stopRecording()
             for u in [camURL, screenURL].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
             library.isRecording = false
+            Store.markRecording(library.root, false)
             phase = .idle
             // A failed shot stays on Record with the error and the shot's lines: Record tries again.
         }
@@ -642,6 +671,7 @@ final class AppModel {
         async let a: Void = camera.stopRecording()
         async let b: Void = screen.stopRecording()
         _ = await (a, b)
+        Store.markRecording(library.root, false)
         for h in Plugins.recordHooks { h.take(TakeMoment(session: p.doc.url, number: p.number, started: nil)) }
 
         var takes = [Take(number: p.number, kind: .camera, file: p.cam.lastPathComponent,

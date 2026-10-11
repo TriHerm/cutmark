@@ -1,7 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// Takes › Settings (⌘,): Appearance (mode, palette, accent, text size), Gemini (what the key is
+/// Takes › Settings (⌘,): Appearance (mode, palette, accent, text size), Agents (which agent runs
+/// the chat and on which model, and which agents can open the library: 2026-10-11), Gemini (what the key is
 /// for, 2026-10-08), Usage (the opt-in counts, 2026-10-10), the archived sessions, which the sidebar no longer shows, and in the admin
 /// build what is private and what is public (2026-10-07). Higgsfield, Voices and the plugins moved
 /// to the Plugins board in the sidebar (2026-10-08).
@@ -10,11 +11,12 @@ struct SettingsView: View {
     @AppStorage("settingsPage") private var page = SettingsPage.appearance.rawValue
 
     enum SettingsPage: String, CaseIterable, Identifiable {
-        case appearance, search, gemini, usage, archived, privacy
+        case appearance, agents, search, gemini, usage, archived, privacy
         var id: String { rawValue }
         var name: String {
             switch self {
             case .appearance: return "Appearance"
+            case .agents: return "Agents"
             case .search: return "Search"
             case .gemini: return "Gemini"
             case .usage: return "Usage"
@@ -25,6 +27,7 @@ struct SettingsView: View {
         var icon: String {
             switch self {
             case .appearance: return "paintpalette"
+            case .agents: return "cpu"
             case .search: return "magnifyingglass"
             case .gemini: return "key"
             case .usage: return "chart.bar"
@@ -70,6 +73,7 @@ struct SettingsView: View {
             Group {
                 switch current {
                 case .appearance: AppearancePage()
+                case .agents: AgentsPage()
                 case .search: SearchPage()
                 case .gemini: GeminiPage()
                 case .usage: UsagePage()
@@ -270,12 +274,9 @@ private struct AppearancePage: View {
                 }
 
                 group("Text size") {
-                    Picker("", selection: Binding(get: { TextSize.shared.step }, set: { TextSize.shared.step = $0 })) {
-                        ForEach(TextSize.factors.indices, id: \.self) { i in
-                            Text(["Normal", "Large", "Larger"][i]).tag(i)
-                        }
-                    }
-                    .pickerStyle(.segmented).labelsHidden().frame(width: 260)
+                    TakesSwitch(selection: Binding(get: { TextSize.shared.step }, set: { TextSize.shared.step = $0 }),
+                                options: TextSize.factors.indices.map { ($0, ["Normal", "Large", "Larger"][$0]) }, fill: true)
+                        .frame(width: 260)
                     .help("Also ⌘+ and ⌘−")
                 }
 

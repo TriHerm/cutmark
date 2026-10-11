@@ -1,36 +1,25 @@
 import Foundation
 
-/// First-launch setup for Claude Code (2026-10-04), so a downloaded Takes works without build.sh:
-/// registers the `takes` MCP server (or points it again at this copy when the app moved), and
-/// copies the skills the build ships in Resources/skills to ~/.claude/skills. It touches only
-/// the `takes` server and the skill folders it ships. In the background, once per launch.
+/// First-launch setup for the agents (2026-10-04), so a downloaded Takes works without build.sh.
+/// Since 2026-10-10 any MCP agent, not only Claude Code: `takes_mcp.py --setup --once` adds the
+/// `takes` server to Claude Code, Codex, Cursor, Gemini CLI, opencode, pi and Claude Desktop, each
+/// one found on this Mac. It adds it once per agent (Claude Code always), and again only when the
+/// app moved. The skills the build ships in Resources/skills go to ~/.claude/skills (Claude Code,
+/// Cursor) and ~/.agents/skills (Codex, pi, opencode, Gemini CLI). It touches only the `takes`
+/// server and the skill folders it ships. In the background, once per launch.
 enum AgentSetup {
     static func run() {
-        guard let claude = Namer.claudePath else { return }
         let resources = Bundle.main.bundleURL.appending(path: "Contents/Resources")
         let server = resources.appending(path: "takes_mcp.py").path
         guard FileManager.default.fileExists(atPath: server) else { return }
         Task.detached(priority: .utility) {
-            ensureServer(claude: claude, server: server)
-            copySkills(from: resources.appending(path: "skills"))
+            // Without the Command Line Tools, /usr/bin/python3 opens Apple's install dialog.
+            guard shell("/usr/bin/xcode-select", ["-p"]).0 else { return }
+            _ = shell("/usr/bin/python3", [server, "--setup", "--once"])
+            let skills = resources.appending(path: "skills")
+            copySkills(from: skills)
+            copySkills(from: skills, to: FileManager.default.homeDirectoryForCurrentUser.appending(path: ".agents/skills"))
         }
-    }
-
-    /// Adds the server when it is missing, or when its script no longer exists.
-    nonisolated static func ensureServer(claude: String, server: String) {
-        let (ok, out) = shell(claude, ["mcp", "get", "takes"])
-        if ok {
-            let paths = registeredScripts(in: out)
-            if paths.isEmpty || paths.contains(where: { FileManager.default.fileExists(atPath: $0) }) { return }
-            _ = shell(claude, ["mcp", "remove", "takes", "--scope", "user"])
-        }
-        _ = shell(claude, ["mcp", "add", "takes", "--scope", "user", "--", "/usr/bin/python3", server])
-    }
-
-    /// The takes_mcp.py paths in `claude mcp get takes` output.
-    nonisolated static func registeredScripts(in text: String) -> [String] {
-        text.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" })
-            .map(String.init).filter { $0.hasSuffix("takes_mcp.py") }
     }
 
     /// Copies each shipped skill folder over the user's copy of the same name. Only these names.
@@ -51,7 +40,7 @@ enum AgentSetup {
         p.arguments = args
         var env = ProcessInfo.processInfo.environment
         for k in env.keys where k.hasPrefix("CLAUDECODE") || k.hasPrefix("CLAUDE_CODE_") { env[k] = nil }
-        env["PATH"] = ClaudeChat.shellPath
+        env["PATH"] = ClaudeChat.shellPath + ":/opt/homebrew/bin:/usr/local/bin"
         p.environment = env
         let out = Pipe()
         p.standardOutput = out

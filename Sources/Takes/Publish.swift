@@ -138,7 +138,7 @@ enum Cleanup {
     /// Transcripts and subtitles that sit next to a video and go with it.
     static func sidecars(of url: URL) -> [URL] {
         let stem = url.deletingPathExtension()
-        return [".words.json", ".srt", ".vtt"].map { URL(fileURLWithPath: stem.path + $0) }
+        return [".words.json", ".srt", ".vtt", EditRecipe.suffix].map { URL(fileURLWithPath: stem.path + $0) }
             .filter { FileManager.default.fileExists(atPath: $0.path) }
     }
 
@@ -190,7 +190,7 @@ struct PublishMenu: View {
         .disabled(app.isRecording)
         .help(doc.isPublished ? "Posted on \(doc.posts.map(\.label).joined(separator: ", ")). Click to change or clean up."
                               : "Mark where this video is posted, then clean up the session")
-        .popover(isPresented: $open, arrowEdge: .bottom) { panel }
+        .takesPopover(isPresented: $open) { panel }
     }
 
     private var panel: some View {
@@ -213,7 +213,6 @@ struct PublishMenu: View {
             .padding(.horizontal, 12).padding(.bottom, 10)
         }
         .frame(width: 250)
-        .background(Theme.paper)
         .tint(Theme.accent)
     }
 

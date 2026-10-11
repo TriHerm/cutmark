@@ -38,6 +38,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/Takes "$APP/Contents/MacOS/Takes"
 cp mcp/takes_mcp.py "$APP/Contents/Resources/takes_mcp.py"
 cp mcp/clean_voice.py "$APP/Contents/Resources/clean_voice.py"
+cp mcp/prepare_take.py "$APP/Contents/Resources/prepare_take.py"
 cp assets/Takes.icns "$APP/Contents/Resources/Takes.icns"
 mkdir -p "$APP/Contents/Resources/Fonts" && cp assets/fonts/*.ttf "$APP/Contents/Resources/Fonts/"
 mkdir -p "$APP/Contents/Resources/Onboarding" && cp assets/onboarding/creator.jpg "$APP/Contents/Resources/Onboarding/"
@@ -148,8 +149,7 @@ if [[ "${1:-}" == "install" ]]; then
   cp -R "$APP" ~/Applications/Takes.app
   open -g ~/Applications/Takes.app
   echo "Installed ~/Applications/Takes.app"
-  # MCP server for Claude Code, pointing at the installed copy (stable path).
-  if command -v claude >/dev/null && ! claude mcp get takes >/dev/null 2>&1; then
-    claude mcp add takes --scope user -- /usr/bin/python3 "$HOME/Applications/Takes.app/Contents/Resources/takes_mcp.py"
-  fi
+  # The takes MCP server in each agent on this Mac (Claude Code, Codex, Cursor, …), pointing at the
+  # installed copy (stable path). Once per agent: one the user removed stays removed.
+  /usr/bin/python3 "$HOME/Applications/Takes.app/Contents/Resources/takes_mcp.py" --setup --once
 fi

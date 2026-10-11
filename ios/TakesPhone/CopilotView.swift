@@ -906,6 +906,10 @@ struct BoardChatView: View {
     let id: String
     let title: String
     var empty = "Nothing here yet. Find posts starts a run."
+    /// The screen it was sent from, for the Mac (a plugin's title). Nil: worked out from the id.
+    var from: String? = nil
+    /// Starts the mic when the chat opens (2026-10-10, Say an idea on the Ideas screen).
+    var listen = false
     @State private var draft = ""
     /// Some of the draft was dictated.
     @State private var spoke = false
@@ -1008,6 +1012,7 @@ struct BoardChatView: View {
         .background(Palette.canvas.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .task {
+            if listen, !voice.recording { await toggleVoice() }
             if let c = try? await model.api.chat(id) { model.open(id, chat: c) }
         }
         .onDisappear {
@@ -1043,8 +1048,8 @@ struct BoardChatView: View {
             latestRequest += 1
             draft = ""
             spoke = false
-            let from = id.hasPrefix("board:comments") ? "Comments" : id.hasPrefix("board:performance") ? "Performance"
-                : id == StylesView.chatID ? "Styles" : nil
+            let from = self.from ?? (id.hasPrefix("board:comments") ? "Comments" : id.hasPrefix("board:performance") ? "Performance"
+                : id == StylesView.chatID ? "Styles" : nil)
             if !(await model.say(text, in: id, from: from, voice: dictated)) { draft = text; spoke = dictated }
         }
     }

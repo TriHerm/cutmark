@@ -45,7 +45,17 @@ enum Voice {
         try? data.write(to: json(s, key), options: .atomic)
     }
 
-    /// Runs the server script in the background: `--voice-run session n kind` or `--voice-mix session key`.
+    /// What starts the server script; tests put a recorder here.
+    @MainActor static var launcher: ([String]) -> Bool = { launch($0) }
+
+    /// Where the voice WAV starts in the player's composition. A WAV on the video clock (clean_voice
+    /// from 2026-10-11 on: "clock": "video") starts at frame 0; an older one at the take's first sound.
+    nonisolated static func insertTime(clock: String?, audioStart: CMTime) -> CMTime {
+        clock == "video" ? .zero : audioStart
+    }
+
+    /// Runs the server script in the background: `--voice-run session n kind`, `--voice-mix session key`
+    /// or `--prepare session n` (word times for a new take).
     @discardableResult
     static func launch(_ args: [String]) -> Bool {
         guard let script = Bundle.main.url(forResource: "takes_mcp", withExtension: "py") else { return false }
@@ -216,11 +226,12 @@ final class VoiceMix: ObservableObject {
                 try t?.insertTimeRange(whole, of: a, at: .zero)
                 if let t { orig.append(t) }
             }
+            let at = Voice.insertTime(clock: Voice.read(session, key)?["clock"] as? String, audioStart: audioStart)
             func voice(_ asset: AVURLAsset) async throws -> AVAssetTrack? {
                 guard let a = try await asset.loadTracks(withMediaType: .audio).first else { return nil }
-                let d = min(try await asset.load(.duration), duration - audioStart)
+                let d = min(try await asset.load(.duration), duration - at)
                 let t = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
-                try t?.insertTimeRange(CMTimeRange(start: .zero, duration: d), of: a, at: audioStart)
+                try t?.insertTimeRange(CMTimeRange(start: .zero, duration: d), of: a, at: at)
                 return t
             }
             guard let c = try await voice(cleanAsset), let d = try await voice(dryAsset) else { return }
@@ -275,7 +286,7 @@ struct VoiceButton: View {
         }
         .buttonStyle(.plain)
         .help("Clean voice: make this take sound like a proper mic")
-        .popover(isPresented: $open, arrowEdge: .top) { VoicePanel(voice: voice) }
+        .takesPopover(isPresented: $open) { VoicePanel(voice: voice) }
     }
 
     private var active: Bool { voice.ready && voice.on }
@@ -358,11 +369,8 @@ struct VoicePanel: View {
             }
             VStack(alignment: .leading, spacing: 4) {
                 Text("Loudness").font(Theme.sans(12, .medium))
-                Picker("", selection: Binding(get: { voice.quiet }, set: { voice.quiet = $0; voice.changed() })) {
-                    Text("Normal · -14 LUFS").tag(false)
-                    Text("Quiet · -18 LUFS").tag(true)
-                }
-                .pickerStyle(.segmented).labelsHidden().frame(maxWidth: .infinity)
+                TakesSwitch(selection: Binding(get: { voice.quiet }, set: { voice.quiet = $0; voice.changed() }),
+                            options: [(false, "Normal · -14 LUFS"), (true, "Quiet · -18 LUFS")], fill: true)
                 .help("Normal is right for social video. Quiet leaves room for music under the voice.")
             }
             .disabled(!voice.on)

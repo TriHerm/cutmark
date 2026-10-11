@@ -41,6 +41,19 @@ enum Perf {
         }
     }
 
+    /// The parts of a click, timed on the spot: "session open: doc 2 ms, chat 1 ms, view 0 ms".
+    /// Shows which part of the time `mark` logs is the app's own work, and which is SwiftUI drawing.
+    static func spans(_ what: String, _ parts: [(String, () -> Void)]) {
+        var out: [String] = []
+        for (name, run) in parts {
+            let t = CACurrentMediaTime()
+            run()
+            out.append(String(format: "%@ %.0f ms", name, (CACurrentMediaTime() - t) * 1000))
+        }
+        guard started else { return }
+        lines.append("\(stamp()) \(what): " + out.joined(separator: ", "))
+    }
+
     static func start() {
         guard !started else { return }
         started = true
@@ -120,7 +133,11 @@ enum Stall {
                 var file: String?
                 if done.wait(timeout: .now() + 1.5) == .timedOut {
                     file = HangWatch.sample(prefix: "stall")
-                    done.wait()
+                    // Still frozen at 6 s: a hang, sampled once per freeze.
+                    if done.wait(timeout: .now() + Double(HangWatch.limit) - 1.5) == .timedOut {
+                        HangWatch.sample()
+                        done.wait()
+                    }
                 }
                 let ms = (CACurrentMediaTime() - sent) * 1000
                 guard ms >= 100 else { continue }
