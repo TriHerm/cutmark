@@ -69,7 +69,7 @@ cp Info.plist "$APP/Contents/Info.plist"
 # The search helper (embed/, ⌘K by meaning). MLX needs Xcode and its Metal toolchain, which
 # `swift build` and the Command Line Tools lack. Without them Takes still builds, and ⌘K matches
 # file names and transcripts only. The model itself is never in the app: Takes downloads it.
-XCODE=/Applications/Xcode.app/Contents/Developer
+XCODE="${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null || true)}"
 if [[ -d embed && -d "$XCODE" ]] && DEVELOPER_DIR="$XCODE" xcrun metal --version >/dev/null 2>&1; then
   (cd embed && DEVELOPER_DIR="$XCODE" xcodebuild -quiet -scheme TakesEmbed -configuration Release \
     -destination 'platform=macOS,arch=arm64' -derivedDataPath .build-xcode build > .build-xcode.log 2>&1) \
