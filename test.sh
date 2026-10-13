@@ -24,7 +24,9 @@ if [[ -n "$FULL" && -f scripts/public/check-public-build.sh ]]; then TREE="$(tre
 env -u CLAUDE_CODE_SESSION_ID python3 mcp/tests/run_parallel.py || { echo "MCP tests failed"; exit 1; }
 DEV=/Library/Developer/CommandLineTools/Library/Developer
 run() {
-  if [[ -d "$DEV/Frameworks/Testing.framework" ]] && ! xcode-select -p | grep -q Xcode.app; then
+  local selected
+  selected="$(xcode-select -p 2>/dev/null || true)"
+  if [[ -d "$DEV/Frameworks/Testing.framework" && "$selected" == /Library/Developer/CommandLineTools* ]]; then
     swift test -Xswiftc -F -Xswiftc "$DEV/Frameworks" \
       -Xlinker -F -Xlinker "$DEV/Frameworks" \
       -Xlinker -rpath -Xlinker "$DEV/Frameworks" -Xlinker -rpath -Xlinker "$DEV/usr/lib" "$@"
