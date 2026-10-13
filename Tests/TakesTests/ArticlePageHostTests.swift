@@ -32,6 +32,18 @@ import WebKit
         (v as? WKWebView).map { [$0] } ?? v.subviews.flatMap(webs)
     }
 
+    private func web(in v: NSView, showing want: String) async -> WKWebView? {
+        for _ in 0..<100 {
+            settle(v)
+            for web in webs(in: v) {
+                let text = ((try? await web.evaluateJavaScript("document.querySelector('article')?.innerText ?? ''")) as? String ?? "")
+                if text.contains(want) { return web }
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return nil
+    }
+
     private func settle(_ h: NSView) { for _ in 0..<4 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)); h.layoutSubtreeIfNeeded() } }
 
     private func article(_ md: String) -> ArticleView {
@@ -80,8 +92,7 @@ import WebKit
         // a short settle (the check below failed in a full run, 2026-10-04): wait for it.
         for _ in 0..<100 where ArticlePageHost.idle.isEmpty { settle(h) }
         h.rootView = AnyView(article("Fourth article body.\n").id("c").frame(width: 700, height: 600))
-        settle(h)
-        let fourth = webs(in: h).first
+        let fourth = await web(in: h, showing: "Fourth")
         #expect(fourth === first || fourth === second)
         if let fourth { #expect(await text(fourth, until: "Fourth").contains("Fourth article")) }
 
