@@ -40,15 +40,17 @@ run() {
 TIMED='aSteerShowsNoErrorAndGoesOn|theNextArticleUsesALoadedPage|theHiddenDockedChatSkipsStreamedWords|effectPlaysAtItsSecond|resetWhileRunningKeepsTheNewAsk|watcherSeesAWrite|aSlowAgentStopsAtItsTime|newDraftReplacesTheTextWhileTyping|aCodexConversationStartsAThreadAndResumesIt|aPiConversationKeepsItsIDAndTellsTheTakesServer|installsThePackOnceAndOpensItOnItsEdit'
 if [[ -z "$FULL" ]]; then
   run "$@"
-elif [[ "${CUTMARK_CI_SERIAL_SWIFT:-}" == 1 ]]; then
-  # Hosted CI runs share process-global test hooks (agent overrides, AppKit/WebKit state) across
-  # otherwise unrelated suites. Run Swift Testing serially there so the release gate measures the
-  # product instead of scheduler order. MCP tests above stay parallel and remain the slowest stage.
-  run --no-parallel "$@"
 else
-  run --skip "$TIMED" "$@"
-  echo "Timed tests, one at a time..."
-  run --filter "$TIMED" --no-parallel "$@"
+  if [[ "${CUTMARK_CI_SERIAL_SWIFT:-}" == 1 ]]; then
+    # Hosted CI runs share process-global test hooks (agent overrides, AppKit/WebKit state) across
+    # otherwise unrelated suites. Run Swift Testing serially there so the release gate measures the
+    # product instead of scheduler order. MCP tests above stay parallel and remain the slowest stage.
+    run --no-parallel "$@"
+  else
+    run --skip "$TIMED" "$@"
+    echo "Timed tests, one at a time..."
+    run --filter "$TIMED" --no-parallel "$@"
+  fi
   # A full run also builds and tests the public copy (2026-10-08): code that uses a private
   # plugin passes here and fails there. Only the private repo has the script.
   if [[ -f scripts/public/check-public-build.sh && "${TAKES_SKIP_PUBLIC:-}" != 1 ]]; then
