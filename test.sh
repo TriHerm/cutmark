@@ -37,7 +37,7 @@ run() {
 # Tests that time real playback, web views or streamed output. Beside 250 parallel tests the Mac is
 # too busy for their timing, and they failed the public release (2026-10-06) though each passes
 # alone. A full run leaves them out, then runs them by themselves, one at a time.
-TIMED='aSteerShowsNoErrorAndGoesOn|theNextArticleUsesALoadedPage|theHiddenDockedChatSkipsStreamedWords|effectPlaysAtItsSecond|resetWhileRunningKeepsTheNewAsk|watcherSeesAWrite|aSlowAgentStopsAtItsTime|newDraftReplacesTheTextWhileTyping|aCodexConversationStartsAThreadAndResumesIt'
+TIMED='aSteerShowsNoErrorAndGoesOn|theNextArticleUsesALoadedPage|theHiddenDockedChatSkipsStreamedWords|effectPlaysAtItsSecond|resetWhileRunningKeepsTheNewAsk|watcherSeesAWrite|aSlowAgentStopsAtItsTime|newDraftReplacesTheTextWhileTyping|aCodexConversationStartsAThreadAndResumesIt|installsThePackOnceAndOpensItOnItsEdit'
 if [[ -z "$FULL" ]]; then
   run "$@"
 else
