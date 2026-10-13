@@ -1792,7 +1792,7 @@ private struct ChatPanel: View {
                 }
             } else {
                 Text("Ask Takes about this video.").font(Theme.display(22)).foregroundStyle(Theme.ink)
-                Text("It runs Claude Code, like your terminal, and it knows this session.")
+                Text("It runs \(chat.agent.name), like your terminal, and it knows this session.")
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                 VStack(alignment: .leading, spacing: 6) {
                     if openComments > 0 { suggestion(commentsAsk, commentsLabel) }

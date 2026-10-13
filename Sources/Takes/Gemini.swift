@@ -17,7 +17,7 @@ enum GeminiKey {
         ("pencil.and.scribble", "Storyboard sketches", "Without it, GPT Image draws them with an OpenAI key, or Nano Banana with a Replicate token. Else the chat can draw them itself."),
         ("film.stack", "B-roll names and descriptions", "Gemini watches each clip you save, so Takes can find it later. Without it, a clip keeps its file name."),
         ("scissors", "Best cut of a storyboard take", "Gemini finds the clean part of each take. Without it, Takes finds it when it edits."),
-        ("textformat", "Session names", "Faster names for new sessions. Without it, Claude names them."),
+        ("textformat", "Session names", "Faster names for new sessions. Without it, your agent names them."),
     ]
 
     /// The .env text with `key` as its GEMINI_API_KEY: an old GEMINI_API_KEY line goes, every
