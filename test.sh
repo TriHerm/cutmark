@@ -40,6 +40,11 @@ run() {
 TIMED='aSteerShowsNoErrorAndGoesOn|theNextArticleUsesALoadedPage|theHiddenDockedChatSkipsStreamedWords|effectPlaysAtItsSecond|resetWhileRunningKeepsTheNewAsk|watcherSeesAWrite|aSlowAgentStopsAtItsTime|newDraftReplacesTheTextWhileTyping|aCodexConversationStartsAThreadAndResumesIt|aPiConversationKeepsItsIDAndTellsTheTakesServer|installsThePackOnceAndOpensItOnItsEdit'
 if [[ -z "$FULL" ]]; then
   run "$@"
+elif [[ "${CUTMARK_CI_SERIAL_SWIFT:-}" == 1 ]]; then
+  # Hosted CI runs share process-global test hooks (agent overrides, AppKit/WebKit state) across
+  # otherwise unrelated suites. Run Swift Testing serially there so the release gate measures the
+  # product instead of scheduler order. MCP tests above stay parallel and remain the slowest stage.
+  run --no-parallel "$@"
 else
   run --skip "$TIMED" "$@"
   echo "Timed tests, one at a time..."
