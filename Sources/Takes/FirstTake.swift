@@ -89,7 +89,7 @@ final class FirstTake {
     /// The chat edits only when Claude Code is in, signed in, and ffmpeg and Python are there (Setup).
     var canEdit: Bool {
         let s = Setup.shared
-        return s.claude == .ok && s.signedIn == .ok && s.ffmpeg == .ok && s.devTools == .ok
+        return s.agent == .ok && s.signedIn == .ok && s.ffmpeg == .ok && s.devTools == .ok
     }
 
     /// The ask goes to the session's chat with the take (its screen recording too). Assets opens
@@ -168,7 +168,7 @@ private struct FirstTakeCard: View {
         .focusEffectDisabled()
         .onAppear { focused = true; Chime.play() }
         // Setup checks at launch and again when Takes comes back to the front while a step is left.
-        .task { if Setup.shared.claude == .unknown { await Setup.shared.check() } }
+        .task { if Setup.shared.agent == .unknown { await Setup.shared.check() } }
         .onKeyPress(.rightArrow) { flow.go(flow.scene + 1); return .handled }
         .onKeyPress(.leftArrow) { flow.go(flow.scene - 1); return .handled }
         .onExitCommand { flow.later() }

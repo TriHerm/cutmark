@@ -409,8 +409,11 @@ enum CoachWords {
     static func headline(_ s: ConsistencyStats, now: Date = Date(), cal: Calendar = .current) -> String {
         if s.slots.isEmpty { return "Your plan is set." }
         guard let open = s.nextOpen else { return "Every posting day ahead has a video." }
-        if cal.isDateInToday(open.date) { return "Today is a posting day, and it has no video yet." }
-        if cal.isDateInTomorrow(open.date) { return "Tomorrow is a posting day, and it has no video yet." }
+        // Measured from `now`, not the clock, so the line and its tests agree on what "tomorrow" is.
+        if cal.isDate(open.date, inSameDayAs: now) { return "Today is a posting day, and it has no video yet." }
+        if let tomorrow = cal.date(byAdding: .day, value: 1, to: now), cal.isDate(open.date, inSameDayAs: tomorrow) {
+            return "Tomorrow is a posting day, and it has no video yet."
+        }
         if s.buffer >= 2 { return "Your next \(s.buffer) posting days have a video. Next free one: \(day(open.date))." }
         return "Next posting day without a video: \(day(open.date))."
     }
@@ -1005,7 +1008,7 @@ struct SlotStrip: View {
                 HStack(alignment: .top, spacing: 8) {
                     ForEach(Array(stats.days.dropFirst(week * 7).prefix(7).enumerated()), id: \.offset) { _, d in
                         DayCell(date: d.date, planned: d.planned, slot: stats.slots.first { $0.date == d.date },
-                                cards: stats.videos[d.date] ?? [], choices: choices, open: open, place: place, remove: remove)
+                                cards: stats.videos[d.date] ?? [], onPlan: onPlan, choices: choices, open: open, place: place, remove: remove)
                     }
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
@@ -1034,6 +1037,9 @@ struct SlotStrip: View {
         }
     }
 
+    /// Every session with a card: its post shows on the card, not again as a label on the post's day.
+    private var onPlan: Set<String> { Set(stats.videos.values.flatMap { $0.map(\.id) }) }
+
     private var summary: String {
         let n = stats.videos.values.reduce(0) { $0 + $1.count }
         let slots = "\(stats.slots.filter { !$0.open }.count) of \(stats.slots.count) posting days have a video"
@@ -1047,6 +1053,8 @@ struct DayCell: View {
     let planned: Bool
     let slot: ConsistencyStats.Slot?
     let cards: [ConsistencyStats.Card]
+    /// Sessions with a card on any day (a card dragged off its post's day leaves no label behind).
+    var onPlan: Set<String> = []
     let choices: () -> [PlanChoice]
     let open: (URL) -> Void
     let place: (String, Date, String?) -> Void
@@ -1082,10 +1090,10 @@ struct DayCell: View {
                 }
             }
             ForEach(cards) { card in
-                PlanCard(card: card, open: open, remove: remove) { id in place(id, date, card.id) }
+                PlanCard(card: card, day: date, open: open, remove: remove) { id in place(id, date, card.id) }
             }
             if let slot {
-                let shown = Set(cards.map(\.id))
+                let shown = onPlan.union(cards.map(\.id))
                 let others = slot.filled.indices.filter { $0 >= slot.filledBy.count || !shown.contains(slot.filledBy[$0]) }.map { slot.filled[$0] }
                 if !others.isEmpty {
                     Text(others.joined(separator: ", ")).font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.live)
@@ -1120,6 +1128,8 @@ struct DayCell: View {
 /// A planned video: its picture and title. Click opens the session; drag it to another day.
 struct PlanCard: View {
     let card: ConsistencyStats.Card
+    /// The day the card sits on: a post scheduled for another day names its day.
+    var day: Date? = nil
     let open: (URL) -> Void
     let remove: (String) -> Void
     /// A card dropped on this one goes before it.
@@ -1147,7 +1157,8 @@ struct PlanCard: View {
             case .posted:
                 Label("Posted", systemImage: "checkmark.circle.fill").font(Theme.sans(10.5, .semibold)).foregroundStyle(Theme.live)
             case .scheduled(let at):
-                Label("Scheduled \(at.formatted(date: .omitted, time: .shortened))", systemImage: "clock")
+                let other = day.map { !Calendar.current.isDate($0, inSameDayAs: at) } ?? false
+                Label("Scheduled \(other ? at.formatted(.dateTime.weekday(.abbreviated)) + " " : "")\(at.formatted(date: .omitted, time: .shortened))", systemImage: "clock")
                     .font(Theme.sans(10.5, .medium)).foregroundStyle(Theme.accentInk)
             case nil:
                 if let step = card.step { StepDots(step: step, size: 5) }

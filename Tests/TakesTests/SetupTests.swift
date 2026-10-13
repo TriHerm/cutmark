@@ -6,17 +6,56 @@ import Testing
 
 struct SetupTests {
     @Test func readsSignInFromAuthStatus() {
-        #expect(Setup.signedIn(status: "{\n  \"loggedIn\": true,\n  \"authMethod\": \"claude.ai\"\n}"))
-        #expect(!Setup.signedIn(status: "{\"loggedIn\": false}"))
-        #expect(Setup.signedIn(status: "Warning: something\n{\"loggedIn\": true}"))
-        #expect(!Setup.signedIn(status: "error: not found"))
-        #expect(!Setup.signedIn(status: ""))
+        #expect(AgentKind.claudeSignedIn("{\n  \"loggedIn\": true,\n  \"authMethod\": \"claude.ai\"\n}"))
+        #expect(!AgentKind.claudeSignedIn("{\"loggedIn\": false}"))
+        #expect(AgentKind.claudeSignedIn("Warning: something\n{\"loggedIn\": true}"))
+        #expect(!AgentKind.claudeSignedIn("error: not found"))
+        #expect(!AgentKind.claudeSignedIn(""))
+    }
+
+    @Test func readsSignInOfCodexAndPi() throws {
+        #expect(AgentKind.codexSignedIn("Logged in using ChatGPT\n"))
+        #expect(AgentKind.codexSignedIn("Logged in using an API key - sk-***"))
+        #expect(!AgentKind.codexSignedIn("Not logged in"))
+        #expect(!AgentKind.codexSignedIn(nil))
+        let dir = FileManager.default.temporaryDirectory.appending(path: "pi-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(!AgentKind.piSignedIn(dir: dir))
+        try Data("{}".utf8).write(to: dir.appending(path: "auth.json"))
+        #expect(!AgentKind.piSignedIn(dir: dir))
+        try Data(#"{"providers":{"ollama":{}}}"#.utf8).write(to: dir.appending(path: "models.json"))
+        #expect(AgentKind.piSignedIn(dir: dir))
+        try Data(#"{"providers":{}}"#.utf8).write(to: dir.appending(path: "models.json"))
+        try Data(#"{"openai-codex":{"type":"oauth"}}"#.utf8).write(to: dir.appending(path: "auth.json"))
+        #expect(AgentKind.piSignedIn(dir: dir))
+    }
+
+    /// A Codex-only Mac: new conversations start on Codex, unless an agent was picked.
+    @Test @MainActor func startsOnTheSignedInAgent() throws {
+        let d = try #require(UserDefaults(suiteName: "takes-setup-\(UUID().uuidString)"))
+        Setup.useSignedIn([.codex], defaults: d)
+        #expect(d.string(forKey: "chatAgent") == "codex")
+        d.set("pi", forKey: "chatAgent")
+        Setup.useSignedIn([.codex], defaults: d)
+        #expect(d.string(forKey: "chatAgent") == "pi")
+        let none = try #require(UserDefaults(suiteName: "takes-setup-\(UUID().uuidString)"))
+        Setup.useSignedIn([], defaults: none)
+        #expect(none.string(forKey: "chatAgent") == nil)
+    }
+
+    /// Setup is done only when the agent the chat uses is signed in (review of 2026-10-12).
+    @Test @MainActor func setupFollowsTheAgentTheChatUses() {
+        #expect(Setup.readiness(here: [.claude, .pi], ready: [.claude], preferred: .pi) == (.pi, false))
+        #expect(Setup.readiness(here: [.claude, .pi], ready: [.claude], preferred: .claude) == (.claude, true))
+        #expect(Setup.readiness(here: [.codex], ready: [.codex], preferred: .claude) == (.codex, true))
+        #expect(Setup.readiness(here: [], ready: [], preferred: .claude) == (.claude, false))
     }
 
     @Test @MainActor func nothingShowsBeforeTheFirstCheck() {
         let s = Setup()
         #expect(!s.needed)
-        s.claude = .ok; s.signedIn = .missing; s.ffmpeg = .ok; s.devTools = .ok
+        s.agent = .ok; s.signedIn = .missing; s.ffmpeg = .ok; s.devTools = .ok
         #expect(s.needed && s.left == 1)
         s.signedIn = .ok
         #expect(!s.needed && s.left == 0)
@@ -44,9 +83,9 @@ func ffmpegDownloadsAndRuns() async throws {
 @Test(.enabled(if: ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] != nil)) @MainActor
 func setupSnapshot() throws {
     let s = Setup.shared
-    s.claude = .ok; s.signedIn = .missing; s.ffmpeg = .working; s.devTools = .missing
+    s.agent = .ok; s.signedIn = .missing; s.ffmpeg = .working; s.devTools = .missing
     let failed = Setup()
-    failed.claude = .missing; failed.signedIn = .missing; failed.ffmpeg = .failed("The ffmpeg download did not match its checksum."); failed.devTools = .ok
+    failed.agent = .missing; failed.signedIn = .missing; failed.ffmpeg = .failed("The ffmpeg download did not match its checksum."); failed.devTools = .ok
     for dark in [false, true] {
         NSAppearance.current = NSAppearance(named: dark ? .darkAqua : .aqua)
         let view = HStack(alignment: .top, spacing: 24) {

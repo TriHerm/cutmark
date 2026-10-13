@@ -6,6 +6,13 @@
 #   passed_has    did a full run pass on this tree? build.sh install then skips its own run
 TAKES_CACHE="$HOME/Library/Caches"
 
+# What a run removes when it ends, however it ends: its queue ticket and its temp folder.
+TAKES_EXIT_PATHS=()
+takes_on_exit() {
+  TAKES_EXIT_PATHS+=("$1")
+  trap 'rm -rf "${TAKES_EXIT_PATHS[@]}"' EXIT
+}
+
 # A ticket per run in the queue folder, named by the time it came. The oldest ticket whose
 # process still lives goes; a ticket whose process died is removed. A run inside a run (the
 # public copy's test.sh) holds no ticket of its own: TAKES_QUEUE_HELD.
@@ -15,7 +22,7 @@ queue_wait() {
   mkdir -p "$q"
   mine="$(python3 -c 'import time; print(time.time_ns())')-$$"
   printf '%s\n%s at %s\n' "$$" "$(basename "$PWD")" "$(git rev-parse --short HEAD 2>/dev/null)" > "$q/$mine"
-  trap "rm -f '$q/$mine'" EXIT
+  takes_on_exit "$q/$mine"
   while :; do
     first="" ahead=0
     for f in $(ls "$q" | sort); do

@@ -1602,9 +1602,10 @@ SEEN_DAYS = 30  # Claude Code keeps a conversation 30 days
 
 def chat_id():
     """The Claude Code conversation: the same id for every message and after a restart of Takes
-    (claude sets CLAUDE_CODE_SESSION_ID for its MCP servers). A Takes chat that runs on Codex sets
-    TAKES_CHAT_ID instead (2026-10-11). None for other agents. A Codex or pi process started from a
-    Claude Code Bash tool inherits the id and shares that chat's seen file."""
+    (claude sets CLAUDE_CODE_SESSION_ID for its MCP servers). Every Takes chat also sets TAKES_CHAT_ID
+    (Codex 2026-10-11, all agents 2026-10-12: pi hands it on to its MCP servers). None for other
+    agents. A Codex or pi process started from a Claude Code Bash tool inherits the id and shares
+    that chat's seen file."""
     v = (os.environ.get("TAKES_CHAT_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
     return v if re.fullmatch(r"[A-Za-z0-9-]{8,64}", v) else None
 

@@ -40,7 +40,7 @@ let onboardingDir = ProcessInfo.processInfo.environment["TAKES_ONBOARDING"]
         Look.shared.palette = .graphite
         defer { Look.shared.reset() }
         let setup = Setup.shared
-        setup.claude = .ok; setup.signedIn = .ok; setup.ffmpeg = .ok; setup.devTools = .ok
+        setup.agent = .ok; setup.signedIn = .ok; setup.ffmpeg = .ok; setup.devTools = .ok
         let app = AppModel()
         let flow = Onboarding.shared
         let card = CGSize(width: 800, height: 600)
@@ -113,9 +113,9 @@ let onboardingDir = ProcessInfo.processInfo.environment["TAKES_ONBOARDING"]
                 flow.page = p
                 if p == 2 {
                     // A new Mac: nothing installed yet.
-                    setup.claude = .missing; setup.signedIn = .missing; setup.ffmpeg = .missing; setup.devTools = .missing
+                    setup.agent = .missing; setup.signedIn = .missing; setup.ffmpeg = .missing; setup.devTools = .missing
                     await shoot("3-start-setup\(tag)", window(), dark: dark)
-                    setup.claude = .ok; setup.signedIn = .ok; setup.ffmpeg = .ok; setup.devTools = .ok; setup.devTools = .ok
+                    setup.agent = .ok; setup.signedIn = .ok; setup.ffmpeg = .ok; setup.devTools = .ok; setup.devTools = .ok
                     await shoot("3-start-ready\(tag)", window(), dark: dark)
                 } else {
                     await shoot(p == 0 ? "1-welcome\(tag)" : "2-how\(tag)", window(), dark: dark)

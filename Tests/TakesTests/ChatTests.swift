@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import Testing
 @testable import Takes
 
@@ -350,15 +351,50 @@ struct ChatParagraphTests {
         #expect(ChatRefs.bullet("- **Bold.** rest") == "**Bold.** rest")
     }
 
-    @Test func threeToolCallsInARowFold() {
+    @Test func everyToolRunIsOneTimeline() {
         let tool = { (t: String) in ChatMessage(role: .tool, text: t) }
         let msgs = [tool("computer"), tool("computer"), ChatMessage(role: .claude, text: "ok"),
                     tool("computer"), tool("javascript tool"), tool("computer"), tool("Bash · ls")]
         let items = ChatItem.group(msgs)
-        #expect(items.count == 4)
-        guard case .tools(let run) = items[3] else { Issue.record("no run"); return }
+        #expect(items.count == 3)
+        guard case .tools(let run) = items[2] else { Issue.record("no run"); return }
         #expect(run.count == 4)
         #expect(ChatItem.summary(run) == "4 steps · computer, javascript tool, Bash")
+    }
+
+    @Test func stepWordsChangeTenseWhenDone() {
+        func w(_ line: String) -> (String, String) {
+            let (tool, d) = StepWords.split(line)
+            let r = StepWords.words(tool, details: d.map { [$0] } ?? [], count: 1)
+            return (r.run, r.done)
+        }
+        #expect(w("get session") == ("Opening the session", "Opened the session"))
+        #expect(w("Read · script.md") == ("Reading script.md", "Read script.md"))
+        #expect(w("Bash · Cut the silences") == ("Cutting the silences", "Cut the silences"))
+        #expect(w("Bash · List the stills") == ("Listing the stills", "Listed the stills"))
+        #expect(w("Bash · Render edit v3") == ("Rendering edit v3", "Rendered edit v3"))
+        #expect(w("Bash · Make a thumbnail") == ("Making a thumbnail", "Made a thumbnail"))
+        #expect(w("Grep · silence") == ("Searching for “silence”", "Searched for “silence”"))
+        #expect(w("set post hooks") == ("Writing hooks", "Wrote hooks"))
+        #expect(w("add broll") == ("Adding the broll", "Added the broll"))
+        #expect(w("Bash · ffmpeg -i a.mov").0 == "Running a command")
+    }
+
+    @Test func callsOfOneToolInARowJoin() {
+        let tool = { (t: String, done: Bool) in ChatMessage(role: .tool, text: t, done: done) }
+        let steps = StepWords.steps([tool("get session", true), tool("Read · cut.md", true), tool("Read · captions.md", true),
+                                     tool("Read · hooks.md", false), tool("computer", true), tool("computer", true),
+                                     tool("Bash · Cut the silences", true), tool("Bash · Check the stills", true)])
+        #expect(steps.map(\.count) == [1, 3, 2, 1, 1])
+        #expect(steps[1].run == "Reading 3 files" && !steps[1].done)
+        #expect(steps[1].chips == ["cut.md", "captions.md", "hooks.md"])
+        #expect(steps[2].finished == "Worked in Chrome · 2")
+        #expect(steps[0].chips.isEmpty)
+        var failed = tool("Read · desk.mov", true)
+        failed.failed = true
+        let dead = StepWords.steps([tool("Read · cut.md", true), failed])
+        #expect(dead.count == 2 && dead[1].failed && !dead[0].failed)
+        #expect(StepWords.time(72) == "1m 12s" && StepWords.time(9) == "9s")
     }
 }
 
@@ -745,5 +781,59 @@ struct ChatRunTests {
         #expect(chat.messages.first?.text == "New run")
         #expect(!chat.messages.contains { $0.text == "Old run" })
         #expect(!chat.running)
+    }
+}
+
+@MainActor
+struct ChatTimelineSnapshots {
+    /// The timeline in four moments of one run, to look at. `TAKES_SNAPSHOT=/some/dir`.
+    @Test func snapshots() throws {
+        guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
+        let t0 = Date().addingTimeInterval(-12)
+        func m(_ role: ChatMessage.Role, _ text: String, _ s: Double, done: Bool = true, failed: Bool = false) -> ChatMessage {
+            var x = ChatMessage(role: role, text: text, toolID: role == .tool ? UUID().uuidString : nil, done: done)
+            x.at = t0.addingTimeInterval(s)
+            if failed { x.failed = true }
+            return x
+        }
+        let ask = m(.user, "Cut the silences in today's keeper take and draft the LinkedIn post for it.", 0)
+        let early = [ask, m(.tool, "get session", 0.4), m(.tool, "Read · cut.md", 1.6), m(.tool, "Read · captions.md", 2.0),
+                     m(.tool, "Read · hooks.md", 2.4, done: false)]
+        let mid = [ask, m(.tool, "get session", 0.4), m(.tool, "Read · cut.md", 1.6), m(.tool, "Read · captions.md", 2.0),
+                   m(.tool, "Read · hooks.md", 2.4), m(.tool, "Read · desk.mov", 3.5, failed: true),
+                   m(.tool, "find words", 5.2), m(.tool, "Bash · Cut the silences", 6.8, done: false)]
+        let done = mid.dropLast() + [m(.tool, "Bash · Cut the silences", 6.8), m(.tool, "Bash · Check the stills", 10.1),
+                                     m(.tool, "set post", 12.3), m(.tool, "set post hooks", 14.0),
+                                     m(.claude, "Done. The cut is 1:42 and the post has 3 hooks to pick from.", 17.2)]
+        let folded = Array(done) + [m(.user, "Make it vertical too.", 40)]
+        // The narrowest chat (360 pt) with long file names: the chips must stay inside (2026-10-12).
+        let long = [ask, m(.tool, "Read · 2026-10-12-teleprompter-hook-take-03-camera-transcript.md", 0.4),
+                    m(.tool, "Read · 2026-10-12-teleprompter-hook-take-04-camera-transcript.md", 0.8),
+                    m(.tool, "Read · 2026-10-12-teleprompter-hook-captions-final.md", 1.2),
+                    m(.tool, "Read · 2026-10-12-teleprompter-hook-post-draft.md", 1.6),
+                    m(.claude, "Read the four files.", 3)]
+        let shots: [(String, [ChatMessage], Bool, Bool)] = [
+            ("1-early", early, true, false), ("2-mid", mid, true, false),
+            ("3-done", Array(done), false, false), ("4-folded", folded, false, false), ("5-done-dark", Array(done), false, true),
+            ("6-narrow-long", long, false, false),
+        ]
+        for (name, msgs, running, dark) in shots {
+            let width: CGFloat = name.hasPrefix("6") ? 360 : 420
+            let view = ChatTranscript(messages: msgs, running: running)
+                .padding(16).frame(width: width, height: 520, alignment: .top).background(Theme.raised)
+                .environment(\.colorScheme, dark ? .dark : .light)
+            let host = NSHostingView(rootView: view)
+            host.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            host.frame = NSRect(x: 0, y: 0, width: width, height: 520)
+            let win = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: width, height: 520),
+                               styleMask: .borderless, backing: .buffered, defer: false)
+            win.contentView = host
+            RunLoop.main.run(until: Date().addingTimeInterval(1.5))
+            host.layoutSubtreeIfNeeded()
+            let rep = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: rep)
+            try #require(rep.representation(using: .png, properties: [:]))
+                .write(to: URL(fileURLWithPath: dir).appending(path: "timeline-\(name).png"))
+        }
     }
 }

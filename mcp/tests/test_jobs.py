@@ -327,7 +327,10 @@ class Jobs(unittest.TestCase):
 
     def test_rename_during_job(self):
         r = self.run_job("sleep 1; printf x > edits/a-v1.mp4", ["edits/a-v1.mp4"])
-        time.sleep(0.4)
+        # Rename once it runs: a fixed 0.4 s was too short at load 33 (2026-10-12).
+        for _ in range(100):
+            if self.raw(r["job"])["status"] != "starting": break
+            time.sleep(0.05)
         moved = os.path.join(self.root, "Launch", "2026-10-10-renamed")
         os.rename(self.s, moved)
         out = self.wait(r["job"], s=moved)

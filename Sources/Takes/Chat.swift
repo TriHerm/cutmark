@@ -12,6 +12,9 @@ import SwiftUI
 // conversation" moves it to <session>/.claude-chats/, where the history menu finds it again; a past
 // conversation resumes the same Claude Code conversation id. The Performance board keeps its chat
 // the same way in Application Support/Takes. All of it survives a quit.
+//
+// Since 2026-10-11 the chat also runs on Codex, since 2026-10-12 on pi (ChatAgents.swift). Since 2026-10-12 this file names no
+// agent: the CLI's arguments and output lines are its ChatAdapter's (Agents/ChatAdapters.swift).
 
 struct ChatMessage: Codable, Identifiable, Hashable {
     enum Role: String, Codable { case user, claude, tool, error }
@@ -21,6 +24,8 @@ struct ChatMessage: Codable, Identifiable, Hashable {
     /// Tool calls: the tool's id, so its result can mark it done.
     var toolID: String?
     var done = true
+    /// Tool calls: the tool said it failed. The timeline shows the step as a dead end.
+    var failed: Bool?
     /// When it was sent or came in. Optional: messages from before 2026-10-03 have none.
     var at: Date? = Date()
 
@@ -40,6 +45,7 @@ struct ChatMessage: Codable, Identifiable, Hashable {
         text = try c.decode(String.self, forKey: .text)
         toolID = try c.decodeIfPresent(String.self, forKey: .toolID)
         done = try c.decodeIfPresent(Bool.self, forKey: .done) ?? true
+        failed = try c.decodeIfPresent(Bool.self, forKey: .failed)
         at = try? c.decodeIfPresent(Date.self, forKey: .at)
     }
 }
@@ -59,7 +65,7 @@ struct ChatLog: Codable {
     /// What the user typed and has not sent yet. Kept on disk, so it stays through tab and session
     /// switches, a closed panel and a quit (2026-10-04).
     var draft: String?
-    /// The agent this conversation runs on (ChatAgents.swift): "claude" or "codex". Nil: Claude Code
+    /// The agent this conversation runs on (ChatAgents.swift): "claude", "codex" or "pi". Nil: Claude Code
     /// (logs from before 2026-10-11).
     var agent: String?
     /// Codex's own thread id, which `codex exec resume` takes. Claude Code uses `conversation`.
@@ -130,7 +136,8 @@ final class StreamLines: @unchecked Sendable {
     }
 }
 
-/// Turns the CLI's stream-json lines into chat messages. Pure, so tests can feed it lines.
+/// Turns the agent CLI's output lines into chat messages. Pure, so tests can feed it lines. What each
+/// line means is the agent's own (ChatAdapter in Agents/ChatAdapters.swift).
 struct ChatParser {
     var messages: [ChatMessage]
     var started = false
@@ -138,12 +145,15 @@ struct ChatParser {
     /// The conversation compacted: its rules may be gone from it (the owner resets them).
     var compacted = false
     var context: ChatContext?
-    /// Codex: the thread id from thread.started.
+    /// The agent's own conversation id (Codex: from thread.started).
     var thread: String?
+    /// The agent whose lines these are. Nil: told by the line (Codex's types have a dot).
+    let adapter: (any ChatAdapter)?
 
-    init(_ messages: [ChatMessage], context: ChatContext? = nil) {
+    init(_ messages: [ChatMessage], context: ChatContext? = nil, adapter: (any ChatAdapter)? = nil) {
         self.messages = messages
         self.context = context
+        self.adapter = adapter
     }
 
     mutating func consume(_ line: String) {
@@ -152,152 +162,17 @@ struct ChatParser {
               let type = o["type"] as? String else { return }
         // A subagent's own steps: the panel shows only the call that started it.
         if let parent = o["parent_tool_use_id"] as? String, !parent.isEmpty { return }
-        if type.contains(".") { consumeCodex(type, o); return }
-        switch type {
-        case "system":
-            switch o["subtype"] as? String {
-            case "init": started = true
-            case "compact_boundary":
-                // /compact, or Claude Code compacting by itself when the context is full.
-                let m = o["compact_metadata"] as? [String: Any] ?? [:]
-                let before = m["pre_tokens"] as? Int, after = m["post_tokens"] as? Int
-                var line = "Compacted the conversation"
-                if let before, let after { line += " · \(ChatContext.short(before)) → \(ChatContext.short(after)) tokens" }
-                messages.append(ChatMessage(role: .tool, text: line))
-                if let after { setUsed(after) }
-                compacted = true
-            default: break
-            }
-        case "stream_event":
-            guard let e = o["event"] as? [String: Any] else { return }
-            if e["type"] as? String == "content_block_start",
-               let b = e["content_block"] as? [String: Any], b["type"] as? String == "text" {
-                messages.append(ChatMessage(role: .claude, text: "", done: false))
-            } else if e["type"] as? String == "content_block_delta",
-                      let d = e["delta"] as? [String: Any], d["type"] as? String == "text_delta",
-                      let t = d["text"] as? String {
-                if let i = messages.indices.last, messages[i].role == .claude, !messages[i].done {
-                    messages[i].text += t
-                } else {
-                    messages.append(ChatMessage(role: .claude, text: t, done: false))
-                }
-            }
-        case "assistant":
-            // Each call's usage is the whole context it read: what is in the window now.
-            if let u = (o["message"] as? [String: Any])?["usage"] as? [String: Any] {
-                let keys = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"]
-                setUsed(keys.reduce(0) { $0 + (u[$1] as? Int ?? 0) })
-            }
-            let content = (o["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? []
-            for b in content {
-                switch b["type"] as? String {
-                case "text":
-                    let t = b["text"] as? String ?? ""
-                    if let i = messages.indices.last, messages[i].role == .claude, !messages[i].done {
-                        messages[i].text = t
-                        messages[i].done = true
-                    } else if !t.isEmpty {
-                        messages.append(ChatMessage(role: .claude, text: t))
-                    }
-                case "tool_use":
-                    let id = b["id"] as? String
-                    let line = Self.describe(b["name"] as? String ?? "Tool", b["input"] as? [String: Any] ?? [:])
-                    messages.append(ChatMessage(role: .tool, text: line, toolID: id, done: false))
-                default: break
-                }
-            }
-        case "user":
-            let content = (o["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? []
-            for b in content where b["type"] as? String == "tool_result" {
-                if let id = b["tool_use_id"] as? String, let i = messages.lastIndex(where: { $0.toolID == id }) {
-                    messages[i].done = true
-                }
-            }
-        case "result":
-            finished = true
-            closeOpen()
-            // The window size comes only here. Subagents may run on smaller models: take the largest.
-            let windows = (o["modelUsage"] as? [String: [String: Any]] ?? [:]).values.compactMap { $0["contextWindow"] as? Int }
-            if let w = windows.max(), w > 0 { context = ChatContext(used: context?.used ?? 0, window: w) }
-            if o["is_error"] as? Bool == true || (o["subtype"] as? String).map({ $0 != "success" }) == true {
-                let r = o["result"] as? String ?? ""
-                messages.append(ChatMessage(role: .error, text: r.isEmpty ? "The chat stopped with an error." : r))
-            }
-        default: break
-        }
+        let a: any ChatAdapter = adapter ?? (type.contains(".") ? CodexAdapter() : ClaudeAdapter())
+        a.consume(type, o, into: &self)
     }
 
-    /// `codex exec --json` (2026-10-11): thread.started, item.started / item.completed (agent_message,
-    /// mcp_tool_call, command_execution, file_change, web_search), turn.completed, turn.failed.
-    /// Its "error" items are warnings (a model without metadata, hook trust): the panel skips them.
-    private mutating func consumeCodex(_ type: String, _ o: [String: Any]) {
-        switch type {
-        case "thread.started":
-            started = true
-            thread = o["thread_id"] as? String
-        case "item.started", "item.completed":
-            guard let item = o["item"] as? [String: Any], let kind = item["type"] as? String else { return }
-            let id = item["id"] as? String
-            let done = type == "item.completed"
-            if kind == "agent_message" {
-                let t = (item["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                if done && !t.isEmpty { messages.append(ChatMessage(role: .claude, text: t)) }
-                return
-            }
-            guard let line = Self.describeCodex(kind, item) else { return }
-            if let i = messages.lastIndex(where: { $0.toolID == id && id != nil && $0.role == .tool }) {
-                if done { messages[i].done = true }
-            } else {
-                messages.append(ChatMessage(role: .tool, text: line, toolID: id, done: done))
-            }
-        case "turn.completed":
-            finished = true
-            closeOpen()
-            if let u = o["usage"] as? [String: Any] {
-                let used = (u["input_tokens"] as? Int ?? 0) + (u["output_tokens"] as? Int ?? 0)
-                context = ChatContext(used: used, window: 272_000)
-            }
-        case "turn.failed":
-            finished = true
-            closeOpen()
-            let raw = (o["error"] as? [String: Any])?["message"] as? String ?? ""
-            messages.append(ChatMessage(role: .error, text: Self.codexError(raw)))
-        default: break
-        }
+    /// Text or an error came after the last message the user sent.
+    var answered: Bool {
+        let start = messages.lastIndex { $0.role == .user }.map { $0 + 1 } ?? 0
+        return messages[start...].contains { ($0.role == .claude && !$0.text.isEmpty) || $0.role == .error }
     }
 
-    /// Codex wraps the server's error as JSON in the message: show its inner message.
-    static func codexError(_ raw: String) -> String {
-        if let o = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
-           let m = ((o["error"] as? [String: Any])?["message"] as? String) ?? (o["message"] as? String), !m.isEmpty {
-            return m
-        }
-        return raw.isEmpty ? "The chat stopped with an error." : raw
-    }
-
-    /// The line a Codex step shows, in the same words as Claude's ("Bash · …", "get_session").
-    static func describeCodex(_ kind: String, _ item: [String: Any]) -> String? {
-        switch kind {
-        case "mcp_tool_call":
-            return describe(item["tool"] as? String ?? "Tool", item["arguments"] as? [String: Any] ?? [:])
-        case "command_execution":
-            var c = item["command"] as? String ?? ""
-            // "/bin/zsh -lc 'ffmpeg …'": only the command.
-            if let r = c.range(of: "sh -lc '"), c.hasSuffix("'"), r.upperBound < c.endIndex {
-                c = String(c[r.upperBound..<c.index(before: c.endIndex)])
-            }
-            return describe("Bash", ["command": c])
-        case "file_change":
-            let files = (item["changes"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String }
-            return describe("Edit", files.first.map { ["file_path": $0] } ?? [:])
-        case "web_search":
-            return describe("WebSearch", ["query": item["query"] as? String ?? ""])
-        default:
-            return nil
-        }
-    }
-
-    private mutating func setUsed(_ n: Int) {
+    mutating func setUsed(_ n: Int) {
         context = ChatContext(used: n, window: context?.window ?? 200_000)
     }
 
@@ -326,7 +201,8 @@ struct ChatParser {
     }
 }
 
-/// What the panel draws: a message, or a run of tool calls in a row. Runs of three or more fold up.
+/// What the panel draws: a message, or a run of tool calls in a row. Every run is one timeline
+/// (ChatTimeline.swift); before 2026-10-12 only runs of three or more folded.
 enum ChatItem: Identifiable, Hashable {
     case message(ChatMessage)
     case tools([ChatMessage])
@@ -338,7 +214,7 @@ enum ChatItem: Identifiable, Hashable {
         }
     }
 
-    static let foldAt = 3
+    static let foldAt = 1
 
     static func group(_ messages: [ChatMessage]) -> [ChatItem] {
         var items: [ChatItem] = []
@@ -433,7 +309,7 @@ final class ClaudeChat {
     }
 
     /// The CLI of this conversation's agent.
-    var exePath: String? { agent == .claude ? Self.claudePath : ChatAgent.codex.path }
+    var exePath: String? { agent.path }
 
     /// Picks the agent for this chat and the next ones. A conversation that started on the other
     /// agent cannot go on there: a new one starts, and the old one goes to the history. True then.
@@ -456,7 +332,8 @@ final class ClaudeChat {
     /// Sends what is queued, if nothing runs.
     func sendPending() {
         // Only the app (or a test with a fake claude): a test run must never start the real one.
-        guard Bundle.main.bundleURL.pathExtension == "app" || Self.claudeOverride != nil || Self.codexOverride != nil else { return }
+        guard Bundle.main.bundleURL.pathExtension == "app" || Self.claudeOverride != nil || Self.codexOverride != nil
+                || !Agents.overrides.isEmpty else { return }
         guard !running, !queued.isEmpty, let claude = exePath else { return }
         // A rename since the last run: the title comes from the folder as it is now (2026-10-11).
         follow()
@@ -557,54 +434,6 @@ final class ClaudeChat {
         """
     /// "bypassPermissions" (full access, like his terminal) or "acceptEdits".
     static var access: String { UserDefaults.standard.string(forKey: "claudeAccess") ?? "bypassPermissions" }
-
-    /// `codex exec --json` for a new thread, or `codex exec resume <thread>` (2026-10-11). The ask
-    /// comes on stdin ("-"). Full access maps to Codex's danger-full-access sandbox, edit-only to
-    /// workspace-write; it never asks (there is no one to answer). Codex hands its MCP servers only
-    /// a few variables, so the takes server gets the chat's own through -c, when Codex has it.
-    static func codexArguments(context: String, model: String, thread: String?, chat: String, board: String?,
-                                           access: String? = nil, takesInCodex: Bool = codexHasTakes) -> [String] {
-        let access = access ?? Self.access
-        var a = ["exec"]
-        if thread != nil { a.append("resume") }
-        a += ["--json", "--skip-git-repo-check", "-m", model,
-              "-c", "sandbox_mode=\"\(access == "acceptEdits" ? "workspace-write" : "danger-full-access")\"",
-              "-c", "approval_policy=\"never\"",
-              "-c", "developer_instructions=" + toml(context)]
-        if takesInCodex {
-            a += ["-c", "mcp_servers.takes.env.TAKES_CHAT=\"1\"", "-c", "mcp_servers.takes.env.TAKES_CHAT_ID=" + toml(chat)]
-            if let board { a += ["-c", "mcp_servers.takes.env.TAKES_BOARD=" + toml(board)] }
-        }
-        if let thread { a.append(thread) }
-        a.append("-")
-        return a
-    }
-
-    /// A TOML basic string, as `codex -c key=value` reads it.
-    nonisolated static func toml(_ s: String) -> String {
-        var out = "\""
-        for u in s.unicodeScalars {
-            switch u {
-            case "\\": out += "\\\\"
-            case "\"": out += "\\\""
-            case "\n": out += "\\n"
-            case "\r": out += "\\r"
-            case "\t": out += "\\t"
-            default:
-                if u.value < 0x20 || u.value == 0x7F { out += String(format: "\\u%04X", u.value) } else { out.unicodeScalars.append(u) }
-            }
-        }
-        return out + "\""
-    }
-
-    /// Codex has the takes server in its config (AgentSetup adds it). Without it, -c on its env
-    /// would make a server with no command, and Codex would not start.
-    nonisolated static var codexHasTakes: Bool {
-        let home = ProcessInfo.processInfo.environment["CODEX_HOME"].map { URL(fileURLWithPath: $0) }
-            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: ".codex")
-        let text = (try? String(contentsOf: home.appending(path: "config.toml"), encoding: .utf8)) ?? ""
-        return text.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces).hasPrefix("[mcp_servers.takes") }
-    }
 
     /// Takes chats compact their conversation at this share of the context window, not near the end
     /// (2026-10-09: long chats grew slow and costly). Only Takes' own Claude processes get it: his
@@ -743,8 +572,6 @@ final class ClaudeChat {
 
     /// Tests point this at a fake claude.
     nonisolated(unsafe) static var claudeOverride: String?
-    /// Under test there is no fallback to the real claude, even while another suite clears the override.
-    static var claudePath: String? { claudeOverride ?? (AppModel.testing ? nil : Namer.claudePath) }
 
     /// Counts runs. A run's late callbacks (output, its end) are dropped once a newer run or a
     /// reset took over (2026-10-03).
@@ -825,13 +652,13 @@ final class ClaudeChat {
             return
         }
         guard let claude = exePath else {
-            append(ChatMessage(role: .error, text: agent == .codex
-                ? "Codex is not on this Mac. Pick Claude Code in the line under Takes, or install Codex and try again."
-                : "The chat is not set up yet. Click Finish setup in the sidebar, then try again."))
+            append(ChatMessage(role: .error, text: Agents.installed.isEmpty
+                ? "The chat is not set up yet. Click Finish setup in the sidebar, then try again."
+                : "\(agent.name) is not on this Mac. Pick another agent in the line under Takes, or install \(agent.name) and try again."))
             return
         }
-        if Self.isCompact(text) && agent == .codex {
-            append(ChatMessage(role: .error, text: "Codex compacts the conversation by itself."))
+        if Self.isCompact(text) && !agent.adapter.compacts {
+            append(ChatMessage(role: .error, text: "\(agent.name) compacts the conversation by itself."))
             return
         }
         if Self.isCompact(text) && !log.started {
@@ -861,7 +688,7 @@ final class ClaudeChat {
         if awake == nil {
             awake = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Takes is working")
         }
-        parser = ChatParser(messages, context: context)
+        parser = ChatParser(messages, context: context, adapter: agent.adapter)
         stderr = Data()
 
         var context: String
@@ -930,7 +757,7 @@ final class ClaudeChat {
             """
         }
         let agent = self.agent
-        if agent == .claude, !boardName.hasPrefix("comments") || session != nil { context += "\n\n" + Self.browserRules }
+        if agent.adapter.browser, !boardName.hasPrefix("comments") || session != nil { context += "\n\n" + Self.browserRules }
         context += "\n\n" + ChatRefs.howTo
         if let note = Releaser.agentNote { context += "\n\n" + note }
         if let origin { context += "\n\n" + origin }
@@ -941,17 +768,14 @@ final class ClaudeChat {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: claude)
         if !log.started { log.agent = agent.rawValue }
-        if agent == .codex {
-            p.arguments = Self.codexArguments(context: context, model: agent.model.id, thread: log.started ? log.thread : nil,
-                                              chat: log.conversation, board: session == nil ? boardName : nil)
-        } else {
-            // Print mode loads Claude in Chrome only with --chrome (the terminal enables it by itself).
-            p.arguments = ["-p", "--chrome", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-                           "--permission-mode", Self.access, "--model", agent.model.id, "--append-system-prompt", context]
-                + (log.started ? ["--resume", log.conversation] : ["--session-id", log.conversation])
-        }
+        p.arguments = agent.adapter.chatArguments(ChatTurn(
+            context: context, model: agent.model.id, conversation: log.conversation, thread: log.thread,
+            started: log.started, access: Self.access, board: session == nil ? boardName : nil))
         p.currentDirectoryURL = Self.folder
         p.environment = Self.environment(board: session == nil ? boardName : nil)
+        // The takes server knows the chat by it (rules seen, jobs). Claude Code sets its own
+        // CLAUDE_CODE_SESSION_ID, the same id; pi hands its environment to its MCP servers.
+        p.environment?["TAKES_CHAT_ID"] = log.conversation
         let input = Pipe(), output = Pipe(), errors = Pipe()
         p.standardInput = input
         p.standardOutput = output
@@ -1253,9 +1077,9 @@ final class ClaudeChat {
         watchdog = nil
         deadSince = nil
         pipes = []
-        var parser = self.parser ?? ChatParser(messages, context: context)
+        var parser = self.parser ?? ChatParser(messages, context: context, adapter: agent.adapter)
         let why = String(decoding: stderr, as: UTF8.self)
-        if !killed, why.contains("No conversation found"), log.started, let ask = lastAsk, let claude = self.exePath {
+        if !killed, agent.adapter.lost(why), log.started, let ask = lastAsk, let claude = self.exePath {
             // Drop the failed reply; keep the question (or the note of a job that ended).
             if let q = messages.lastIndex(where: { $0.role == .user || $0.isJobNote }) { messages = Array(messages[...q]) }
             log = ChatLog(conversation: UUID().uuidString.lowercased(), messages: messages)
@@ -1278,6 +1102,12 @@ final class ClaudeChat {
         } else if !parser.finished && status != 0 {
             let why = why.trimmingCharacters(in: .whitespacesAndNewlines)
             parser.messages.append(ChatMessage(role: .error, text: why.isEmpty ? "The chat quit (code \(status))." : String(why.suffix(400))))
+        } else if !parser.finished && parser.messages.last?.role != .error {
+            // Exit 0 with no end of the run: pi did this once (2026-10-12) and the chat said nothing.
+            parser.messages.append(ChatMessage(role: .error, text: "The chat ended without an answer. Send your message again."))
+        } else if parser.finished && agent.adapter.answersEveryTurn && !parser.answered {
+            // Codex or pi ended the turn cleanly with no text and no error: say so, never go quiet.
+            parser.messages.append(ChatMessage(role: .error, text: "The chat ended without an answer. Send your message again."))
         }
         // The run ended on a lost connection: go on by itself once the Mac is back online.
         // Only a conversation that exists can go on.
@@ -1688,12 +1518,6 @@ private struct ChatCornerBody: View {
         .onHover { hover = $0 }
         .help(away ? "Talk to Takes (⇧⌘L)" : open ? "Close the chat (⇧⌘L)" : "Talk to Takes about this session (⇧⌘L)")
     }
-}
-
-/// A thin ring that turns while Claude works (a layer animation: Motion.swift).
-private struct Spinner: View {
-    var color: Color = Theme.muted
-    var body: some View { LayerSpinner(color: color, alpha: 0.9) }
 }
 
 private struct ChatPanel: View {
@@ -2364,17 +2188,23 @@ struct ChatTranscript: View {
                 .buttonStyle(PressStyle())
                 .frame(maxWidth: .infinity)
             }
-            ForEach(items) { item in
+            let list = Array(items)
+            let lastUser = list.lastIndex { if case .message(let m) = $0 { m.role == .user } else { false } }
+            ForEach(Array(list.enumerated()), id: \.element.id) { i, item in
                 Group {
                     switch item {
                     case .message(let m): ChatBubble(message: m).equatable()
                     case .tools(let t):
-                        ToolRun(tools: t, active: running && item.id == items.last?.id)
+                        StepTimeline(tools: t, active: running && i == list.count - 1,
+                                     latest: lastUser.map { $0 < i } ?? true,
+                                     end: i + 1 < list.count ? Self.start(list[i + 1]) : nil)
                     }
                 }
                 .transition(.opacity.combined(with: .offset(y: 6)))
             }
-            if running, messages.last.map({ $0.role != .claude || $0.done }) ?? true {
+            // The timeline says it works: the mascot shows only between a reply and the next step.
+            if running, messages.last.map({ $0.role != .claude || $0.done }) ?? true,
+               !(list.last.map { if case .tools = $0 { true } else { false } } ?? false) {
                 Working(mood: mood).transition(.opacity)
             }
         }
@@ -2383,6 +2213,16 @@ struct ChatTranscript: View {
             guard limit < ChatRows.page else { return }
             try? await Task.sleep(for: .milliseconds(60))
             limit = max(limit, ChatRows.page)
+        }
+    }
+}
+
+extension ChatTranscript {
+    /// When an item came in: the end of the timeline above it.
+    static func start(_ item: ChatItem) -> Date? {
+        switch item {
+        case .message(let m): m.at
+        case .tools(let t): t.first?.at
         }
     }
 }
@@ -2560,35 +2400,12 @@ private struct ChatBubble: View, Equatable {
         case .tool where message.isJobNote:
             JobNoteLine(text: message.text)
         case .tool:
-            ToolLine(text: message.text, done: message.done)
+            StepTimeline(tools: [message], active: false, latest: false, end: nil)
         case .error:
             Text(message.text).font(Theme.sans(12.5)).foregroundStyle(Theme.accentInk)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-    }
-}
-
-/// One tool call: a spinner while it runs, a tick when done.
-private struct ToolLine: View {
-    let text: String
-    let done: Bool
-
-    var body: some View {
-        HStack(spacing: 7) {
-            ZStack {
-                if done {
-                    Image(systemName: "checkmark").font(.system(size: 8, weight: .bold)).foregroundStyle(Theme.faint)
-                        .transition(.scale.combined(with: .opacity))
-                } else {
-                    Spinner().transition(.opacity)
-                }
-            }
-            .frame(width: 12, height: 12)
-            Text(text).font(Theme.mono(11)).foregroundStyle(Theme.muted)
-                .lineLimit(1).truncationMode(.tail)
-        }
-        .animation(Theme.motion, value: done)
     }
 }
 
@@ -2604,46 +2421,6 @@ private struct JobNoteLine: View {
             Text(text).font(Theme.sans(12, .medium)).foregroundStyle(Theme.muted)
                 .lineLimit(2)
         }
-    }
-}
-
-/// Three or more tool calls in a row. While they run, only the newest shows under a count of the
-/// earlier ones; once done, one line. A click opens the full list.
-private struct ToolRun: View {
-    let tools: [ChatMessage]
-    /// The run Claude is still adding to.
-    let active: Bool
-    @State private var open = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Button { withAnimation(Theme.motion) { open.toggle() } } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold))
-                        .rotationEffect(.degrees(open ? 90 : 0))
-                        .frame(width: 12, height: 12)
-                    Text(label).font(Theme.mono(11)).lineLimit(1).truncationMode(.tail)
-                }
-                .foregroundStyle(Theme.faint)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(open ? "Hide the steps" : "Show every step")
-            if open {
-                ForEach(tools) { ToolLine(text: $0.text, done: $0.done) }
-            } else if running, let last = tools.last {
-                ToolLine(text: last.text, done: last.done).id(last.id)
-                    .transition(.opacity)
-            }
-        }
-        .animation(Theme.motion, value: tools.count)
-    }
-
-    private var running: Bool { active || tools.contains { !$0.done } }
-
-    private var label: String {
-        if open { return "\(tools.count) steps" }
-        return running ? "\(tools.count - 1) earlier steps" : ChatItem.summary(tools)
     }
 }
 

@@ -49,7 +49,7 @@ rest with `grep`. Most files start with a comment that says what they are for.
 | Storyboard | `Storyboard.swift` |
 | Posts | `Post.swift` (LinkedIn), `XPost.swift`, `VideoPost.swift` (YouTube, vertical), `PostDrafts.swift`, `Hooks.swift`, `PostQueue.swift`, `Publish.swift`, `Cover.swift` |
 | Review comments | `Comments.swift`, `OpenComments.swift` |
-| Chat | `Chat.swift` (one Claude Code or Codex run per turn), `ChatAgents.swift` (agent and model pick, Settings › Agents), `ChatAttach.swift`, `ChatRefs.swift`, `Dictation.swift` |
+| Chat | `Chat.swift` (one Claude Code, Codex or pi run per turn; `Agents/ChatAdapters.swift` per agent), `ChatAgents.swift` (agent and model pick, Settings › Agents), `ChatAttach.swift`, `ChatRefs.swift`, `Dictation.swift` |
 | Long jobs (renders the chat starts with `run_job`) | `Jobs.swift` (the Jobs row, and the note to the chat when a job ends) |
 | Sound and voice | `Voice.swift`, `Sounds.swift`, `Broll.swift` |
 | Image, video and voice models | `Gemini.swift`, `Higgsfield.swift`, `Replicate.swift`, `ElevenLabs.swift`, `ModelBrowser.swift` |
@@ -88,6 +88,21 @@ workflow it describes.
 When your work is merged or dropped, remove it (`git worktree remove <path>`) and delete its
 branch (`git branch -d <branch>`). Remove a worktree you did not create only when it is clean,
 no process runs in it, and its branch is merged into `origin/main`.
+
+**Scratch libraries.** A test library or a build copy you make to try something (a copy of a
+session, of the whole library, or of the app) is yours to remove when you are done. Copy video
+with `cp -c`: an APFS clone takes no space until one side changes. On 2026-10-11 such leftovers
+held 65 GB of the user's disk.
+
+**Agents.** Takes must work with Claude Code, Codex or pi, whichever the user has. A feature
+that asks an agent goes through `Agents.run(AgentRequest(...))` in `Sources/Takes/Agents/`; never
+start `claude`, `codex` or `pi` yourself. A new need (a tool, an output shape) goes in
+`AgentRequest` and in each adapter. The chat runs through a `ChatAdapter` per agent
+(`Agents/ChatAdapters.swift`: its arguments, and how its output lines become messages); `Chat.swift`
+never asks which agent it runs. `AgentsTests` fails when a file outside `Agents/` names a CLI or
+builds its arguments. Admin-only tools (Comments, Site AI) may stay on Claude Code. Finish setup
+(`Setup.swift`) and `install.sh` are done when any one agent is signed in (`Agents/SignIn.swift`);
+they install Claude Code only on a Mac with none.
 
 **Test.** Read [Tests](#tests). Run `./test.sh` before every push.
 

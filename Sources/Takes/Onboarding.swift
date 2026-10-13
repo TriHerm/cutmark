@@ -47,8 +47,8 @@ final class Onboarding {
     /// Sessions vs projects, in one line (2026-10-08: a new user did not know what a session is).
     static let sessionLine = "A session is one video: its script, takes, edits and posts. A project holds sessions, like a folder."
 
-    /// Writing a script needs only Claude. ffmpeg comes in later, for the edit.
-    static var canWrite: Bool { Setup.shared.claude == .ok && Setup.shared.signedIn == .ok }
+    /// Writing a script needs only a signed-in agent. ffmpeg comes in later, for the edit.
+    static var canWrite: Bool { Setup.shared.agent == .ok && Setup.shared.signedIn == .ok }
 
     static func ask(_ idea: String) -> String {
         "Write a short video script about: \(idea). Keep it under a minute, in my words, and put it in the session's script."
@@ -525,14 +525,14 @@ private struct StartPage: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 number(1, done: Onboarding.canWrite)
-                Text("Connect Takes to Claude").font(Theme.sans(13.5, .semibold))
+                Text("Connect Takes to your agent").font(Theme.sans(13.5, .semibold))
                 Spacer()
                 Text("About 2 minutes").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
             }
             HStack(spacing: 8) {
-                item("Claude Code", setup.claude, "Install", setup.installClaude)
-                item("Sign in", setup.claude == .ok ? setup.signedIn : .missing, "Sign in", setup.signIn,
-                     enabled: setup.claude == .ok)
+                item(setup.agent == .ok ? setup.target.name : "Claude Code", setup.agent, "Install", setup.installAgent)
+                item("Sign in", setup.agent == .ok ? setup.signedIn : .missing, "Sign in", setup.signIn,
+                     enabled: setup.agent == .ok)
             }
             HStack(spacing: 8) {
                 item("Video tools", setup.ffmpeg, "Get", setup.installFFmpeg)

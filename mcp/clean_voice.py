@@ -99,12 +99,26 @@ def plan(d):
     return steps, why
 
 
+def fetch_checkpoint(model):
+    """Only the files ClearVoice loads. Its own download takes the whole repo: for MossFormer2_SR_48K
+    that adds do_03925000, 1.7 GB it never reads (2026-10-12). The list file goes last, so a broken
+    download starts again next time."""
+    d = f"checkpoints/{model}"
+    if os.path.isfile(f"{d}/last_best_checkpoint"): return
+    from huggingface_hub import hf_hub_download
+    repo = f"alibabasglab/{model}"
+    with open(hf_hub_download(repo, "last_best_checkpoint")) as f: names = f.read().split()
+    for n in names: hf_hub_download(repo, n, local_dir=d)
+    hf_hub_download(repo, "last_best_checkpoint", local_dir=d)
+
+
 _cv = {}
 def clearvoice(task, model, i, o):
     cache = os.path.expanduser("~/.cache/clearvoice"); os.makedirs(cache, exist_ok=True)
     cwd = os.getcwd(); os.chdir(cache)            # ClearVoice downloads checkpoints/ into the cwd
     try:
         from clearvoice import ClearVoice
+        fetch_checkpoint(model)
         if model not in _cv: _cv[model] = ClearVoice(task=task, model_names=[model])
         _cv[model].write(_cv[model](input_path=i, online_write=False), output_path=o)
     finally:

@@ -27,7 +27,7 @@ extension ChatRunTests {
             try? FileManager.default.removeItem(at: root)
         }
 
-        func ready(ffmpeg: Setup.Status = .ok) { setup.claude = .ok; setup.signedIn = .ok; setup.ffmpeg = ffmpeg; setup.devTools = .ok }
+        func ready(ffmpeg: Setup.Status = .ok) { setup.agent = .ok; setup.signedIn = .ok; setup.ffmpeg = ffmpeg; setup.devTools = .ok }
 
         @Test func showsOnceToANewLibraryOnly() throws {
             defer { cleanup() }
@@ -63,7 +63,7 @@ extension ChatRunTests {
             #expect(Onboarding.canWrite)
             setup.signedIn = .missing
             #expect(!Onboarding.canWrite)
-            setup.claude = .missing; setup.signedIn = .ok
+            setup.agent = .missing; setup.signedIn = .ok
             #expect(!Onboarding.canWrite)
         }
 
@@ -110,7 +110,7 @@ extension ChatRunTests {
         @Test func writeWaitsForSetup() throws {
             defer { cleanup() }
             let app = try fresh()
-            setup.claude = .missing; setup.signedIn = .missing
+            setup.agent = .missing; setup.signedIn = .missing
             flow.show(); flow.go(2)
             flow.write("A tool I use every day", app: app)
             #expect(flow.shown && app.library.current == nil)
@@ -119,7 +119,7 @@ extension ChatRunTests {
         @Test func recordWithoutAScriptOpensAnEmptySessionOnRecord() throws {
             defer { cleanup() }
             let app = try fresh()
-            setup.claude = .missing  // recording works before setup
+            setup.agent = .missing  // recording works before setup
             SessionMode.set(.post)
             flow.show(); flow.go(2)
             flow.recordNow(app: app)

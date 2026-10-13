@@ -52,19 +52,19 @@ struct CodexParseTests {
     }
 
     @Test func tomlStringsSurviveQuotesAndNewlines() {
-        #expect(ClaudeChat.toml("a \"b\"\n\\c\t") == #""a \"b\"\n\\c\t""#)
-        #expect(ClaudeChat.toml("\u{1}é") == #""\u0001é""#)
+        #expect(CodexAdapter.toml("a \"b\"\n\\c\t") == #""a \"b\"\n\\c\t""#)
+        #expect(CodexAdapter.toml("\u{1}é") == #""\u0001é""#)
     }
 
     @MainActor @Test func codexArgumentsForANewAndAResumedThread() {
-        let new = ClaudeChat.codexArguments(context: "Be short.", model: "gpt-6-astra", thread: nil, chat: "c-1", board: nil,
+        let new = CodexAdapter.chatArguments(context: "Be short.", model: "gpt-6-astra", thread: nil, chat: "c-1", board: nil,
                                             access: "bypassPermissions", takesInCodex: true)
         #expect(new.first == "exec" && !new.contains("resume") && new.last == "-")
         #expect(new.contains("sandbox_mode=\"danger-full-access\""))
         #expect(new.contains("developer_instructions=\"Be short.\""))
         #expect(new.contains("mcp_servers.takes.env.TAKES_CHAT_ID=\"c-1\""))
         #expect(new[new.firstIndex(of: "-m")! + 1] == "gpt-6-astra")
-        let resumed = ClaudeChat.codexArguments(context: "x", model: "gpt-6-luna", thread: "t-9", chat: "c-1", board: "board",
+        let resumed = CodexAdapter.chatArguments(context: "x", model: "gpt-6-luna", thread: "t-9", chat: "c-1", board: "board",
                                                 access: "acceptEdits", takesInCodex: false)
         #expect(Array(resumed.prefix(2)) == ["exec", "resume"])
         #expect(Array(resumed.suffix(2)) == ["t-9", "-"])

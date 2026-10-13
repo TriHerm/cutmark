@@ -81,6 +81,17 @@ if [[ -z "$DEVICE" ]] || ! xcrun devicectl device info details --device "$DEVICE
   exit 0
 fi
 
+# Never build while the screen is locked. Xcode then cannot read its keychain, decides the Apple ID
+# has bad credentials and deletes it from Xcode (2026-10-12: the 08:19 run did this, the screen was
+# locked 07:30-09:38). Then every renew fails with "No Accounts" until the user adds the account again.
+# ioreg's output is read whole first: `ioreg | grep -q` under pipefail gave 141 (ioreg cut off by the
+# early match), which read as unlocked. A failed ioreg counts as locked.
+session=$(ioreg -n Root -d1) || session='"CGSSessionScreenIsLocked"=Yes'
+if [[ $session == *'"CGSSessionScreenIsLocked"=Yes'* ]]; then
+  log "Screen is locked; profile has ${left}h left. Trying again in an hour."
+  exit 0
+fi
+
 log "Renewing (profile has ${left}h left)."
 # Remove the old profile so Xcode fetches a new 7-day one instead of reusing it.
 for f in ${mine[@]+"${mine[@]}"}; do rm -f "$f"; done
@@ -95,7 +106,7 @@ else
   # Xcode can lose the Apple ID (2026-10-06: two days of silent failures). Say what to do, on the
   # phone's Update row too (PhoneUpdate.swift reads this file), not only in a Mac notification.
   if tail -40 "$HOME/Library/Logs/takes-phone-refresh.build.log" | grep -q "No Accounts"; then
-    why="Xcode lost your Apple ID. On the Mac: Xcode > Settings > Apple Accounts, sign in."
+    why="Xcode lost your Apple ID. On the Mac: Xcode > Settings > Apple Accounts, remove the account, then add it again."
   else
     why="The Mac could not renew this app. See takes-phone-refresh.build.log on the Mac."
   fi

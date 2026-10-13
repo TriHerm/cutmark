@@ -15,6 +15,8 @@ struct LayerSpinner: NSViewRepresentable {
     var inset: CGFloat = 2
     /// The part of the circle drawn, 0...1.
     var length: CGFloat = 0.28
+    /// Seconds for one turn.
+    var duration: Double = 0.9
 
     func makeNSView(context: Context) -> SpinnerView { SpinnerView() }
 
@@ -24,6 +26,7 @@ struct LayerSpinner: NSViewRepresentable {
         v.lineWidth = lineWidth
         v.inset = inset
         v.length = length
+        v.duration = duration
         v.needsLayout = true
     }
 
@@ -33,6 +36,7 @@ struct LayerSpinner: NSViewRepresentable {
         var lineWidth: CGFloat = 2
         var inset: CGFloat = 2
         var length: CGFloat = 0.28
+        var duration: Double = 0.9
         private let arc = CAShapeLayer()
 
         override init(frame: NSRect) {
@@ -70,7 +74,7 @@ struct LayerSpinner: NSViewRepresentable {
             let a = CABasicAnimation(keyPath: "transform.rotation.z")
             a.fromValue = 0
             a.toValue = -2 * Double.pi  // clockwise: layer y points up
-            a.duration = 0.9
+            a.duration = duration
             a.repeatCount = .infinity
             a.isRemovedOnCompletion = false
             arc.add(a, forKey: "spin")
@@ -139,6 +143,74 @@ struct LayerPulse: NSViewRepresentable {
             a.fillMode = .backwards
             a.isRemovedOnCompletion = false
             dot.add(a, forKey: "pulse")
+        }
+    }
+}
+
+/// A soft band that sweeps over text, left to right, then rests: 1.2 s sweep, 0.8 s pause. Laid
+/// over the text in the colour behind it, so the letters under the band look lighter.
+struct LayerShimmer: NSViewRepresentable {
+    var color: Color
+    var strength: CGFloat = 0.75
+
+    func makeNSView(context: Context) -> ShimmerView { ShimmerView() }
+
+    func updateNSView(_ v: ShimmerView, context: Context) {
+        v.color = NSColor(color)
+        v.strength = strength
+        v.needsLayout = true
+    }
+
+    final class ShimmerView: NSView {
+        var color: NSColor = .white
+        var strength: CGFloat = 0.75
+        private let band = CAGradientLayer()
+        private var width: CGFloat = -1
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            wantsLayer = true
+            layer?.masksToBounds = true
+            band.startPoint = CGPoint(x: 0, y: 0.5)
+            band.endPoint = CGPoint(x: 1, y: 0.5)
+            layer?.addSublayer(band)
+        }
+
+        required init?(coder: NSCoder) { fatalError() }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func layout() {
+            super.layout()
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            let w = max(36, bounds.width * 0.4)
+            band.bounds = CGRect(x: 0, y: 0, width: w, height: bounds.height)
+            band.position = CGPoint(x: -w / 2, y: bounds.midY)
+            let c = Motion.cg(color, strength, in: self), clear = Motion.cg(color, 0, in: self)
+            band.colors = [clear, c, clear]
+            CATransaction.commit()
+            if bounds.width != width { width = bounds.width; band.removeAnimation(forKey: "sweep") }
+            sweep()
+        }
+
+        override func viewDidMoveToWindow() { sweep() }
+        override func viewDidChangeEffectiveAppearance() { needsLayout = true }
+
+        private func sweep() {
+            guard window != nil, bounds.width > 0, band.animation(forKey: "sweep") == nil else { return }
+            let w = band.bounds.width
+            let a = CABasicAnimation(keyPath: "position.x")
+            a.fromValue = -w / 2
+            a.toValue = bounds.width + w / 2
+            a.duration = 1.2
+            a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            let g = CAAnimationGroup()
+            g.animations = [a]
+            g.duration = 2.0
+            g.repeatCount = .infinity
+            g.isRemovedOnCompletion = false
+            band.add(g, forKey: "sweep")
         }
     }
 }

@@ -56,6 +56,8 @@ cp mcp/clean_voice.py "$APP/Contents/Resources/clean_voice.py"
 cp mcp/prepare_take.py "$APP/Contents/Resources/prepare_take.py"
 cp assets/Takes.icns "$APP/Contents/Resources/Takes.icns"
 mkdir -p "$APP/Contents/Resources/Fonts" && cp assets/fonts/*.ttf "$APP/Contents/Resources/Fonts/"
+# The fonts' licenses (SIL OFL) must go with every copy of the fonts.
+mkdir -p "$APP/Contents/Resources/Licenses" && cp assets/fonts/*-OFL.txt "$APP/Contents/Resources/Licenses/"
 mkdir -p "$APP/Contents/Resources/Onboarding" && cp assets/onboarding/creator.jpg "$APP/Contents/Resources/Onboarding/"
 mkdir -p "$APP/Contents/Resources/Article"
 mkdir -p "$APP/Contents/Resources/Agents" && cp assets/agents/*.svg assets/agents/*.png "$APP/Contents/Resources/Agents/"
@@ -124,6 +126,10 @@ fi
 if [[ -x scripts/public/release.sh ]]; then
   plutil -insert ReleaseRepo -string "$(git worktree list --porcelain | sed -n 1p | cut -d' ' -f2-)" "$APP/Contents/Info.plist"
 fi
+# Strip the symbols before signing (2026-10-12): Takes goes from 37.5 to 12.6 MB and the DMG gets
+# 2 MB smaller. The dSYM keeps the names for crash reports. After signing, a strip breaks the signature.
+dsymutil .build/release/Takes -o build.noindex/Takes.dSYM 2>/dev/null || true
+strip -x "$APP/Contents/MacOS/Takes" "$APP/Contents/MacOS/takes-faces"
 # A stable certificate keeps camera, mic and screen permissions across installs (scripts/setup-signing.sh).
 # Without it, fall back to ad-hoc signing, and macOS asks for the permissions again after each install.
 KC="$HOME/Library/Keychains/takes-signing.keychain-db"

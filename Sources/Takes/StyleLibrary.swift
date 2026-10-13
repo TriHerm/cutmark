@@ -436,6 +436,7 @@ struct StylesBoard: View {
             Group {
                 if Asset.kind(of: url) == .image { StillReview(url: url, session: commentRoot).id(url) }
                 else if Asset.kind(of: url) == .video { ReviewPlayer(url: url, session: commentRoot).id(url) }
+                else if PDFStage.handles(url) { PDFStage(url: url).id(url) }
                 else if DocReview.handles(url) { DocReview(url: url, root: commentRoot).id(url) }
                 else { PlayerView(url: url) { _ in }.id(url) }
             }
@@ -1004,7 +1005,7 @@ struct LibrarySection: View {
         if let onShow { onShow(url); return }
         switch Asset.kind(of: url) {
         case .video, .image, .audio: app.preview = url
-        case .other: if DocReview.handles(url) { app.preview = url } else { NSWorkspace.shared.openSoon(url) }
+        case .other: if DocReview.handles(url) || PDFStage.handles(url) { app.preview = url } else { NSWorkspace.shared.openSoon(url) }
         }
     }
 

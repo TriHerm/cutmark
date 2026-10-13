@@ -11,13 +11,14 @@ import SwiftUI
 // The model is one setting per agent and counts from the next message.
 
 enum ChatAgent: String, Codable, CaseIterable, Identifiable {
-    case claude, codex
+    case claude, codex, pi
     var id: String { rawValue }
 
     var name: String {
         switch self {
         case .claude: return "Claude Code"
         case .codex: return "Codex"
+        case .pi: return "pi"
         }
     }
 
@@ -31,6 +32,7 @@ enum ChatAgent: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .claude: return ChatModel.claude
         case .codex: return CodexModels.list
+        case .pi: return PiModels.list
         }
     }
 
@@ -42,21 +44,34 @@ enum ChatAgent: String, Codable, CaseIterable, Identifiable {
 
     var modelKey: String { "chatModel.\(rawValue)" }
 
-    /// The CLI on this Mac, or nil.
-    @MainActor var path: String? {
+    var kind: AgentKind {
         switch self {
-        case .claude: return ClaudeChat.claudePath
-        case .codex: return ClaudeChat.codexOverride ?? Self.find("codex")
+        case .claude: return .claude
+        case .codex: return .codex
+        case .pi: return .pi
         }
     }
 
-    /// In ~/.local/bin, Homebrew, or on the login shell's PATH.
-    nonisolated static func find(_ name: String) -> String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let dirs = ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"]
-            + ClaudeChat.shellPath.split(separator: ":").map(String.init)
-        return dirs.map { "\($0)/\(name)" }.first { FileManager.default.isExecutableFile(atPath: $0) }
+    /// Its CLI's arguments and output for the chat (Agents/ChatAdapters.swift).
+    var adapter: any ChatAdapter {
+        switch self {
+        case .claude: return ClaudeAdapter()
+        case .codex: return CodexAdapter()
+        case .pi: return PiAdapter()
+        }
     }
+
+    /// Whose plan it runs on, until the sign-in check says more.
+    var plan: String {
+        switch self {
+        case .claude: return "Uses your Claude plan"
+        case .codex: return "Uses your ChatGPT plan"
+        case .pi: return "Uses the model set in pi"
+        }
+    }
+
+    /// The CLI on this Mac, or nil.
+    @MainActor var path: String? { Agents.path(kind) }
 }
 
 struct ChatModel: Hashable, Identifiable, Codable {
@@ -96,7 +111,7 @@ enum CodexModels {
         guard !loading else { return }
         loading = true
         Task.detached(priority: .utility) {
-            guard let codex = ClaudeChat.codexOverride ?? ChatAgent.find("codex"), let out = AgentCheck.run(codex, ["debug", "models"]), let models = parse(out), !models.isEmpty,
+            guard let codex = Agents.path(.codex), let out = AgentCheck.run(codex, ["debug", "models"]), let models = parse(out), !models.isEmpty,
                   let d = try? JSONEncoder().encode(models) else { return }
             await MainActor.run { UserDefaults.standard.set(d, forKey: "codexModels") }
         }
@@ -113,6 +128,22 @@ enum CodexModels {
             let shown = (m["display_name"] as? String).map { $0.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "GPT 6", with: "GPT-6") } ?? slug
             return ChatModel(id: slug, name: shown, hint: m["description"] as? String ?? "")
         }
+    }
+}
+
+/// pi works with many providers, and its own settings pick the model (/model in pi). The chat offers
+/// that one: an empty id passes no --model.
+enum PiModels {
+    static var list: [ChatModel] {
+        [ChatModel(id: "", name: defaultModel ?? "pi's model", hint: "The model set in pi. Change it with /model in pi.")]
+    }
+
+    /// defaultModel in pi's settings.json (PI_CODING_AGENT_DIR, else ~/.pi/agent).
+    static var defaultModel: String? {
+        guard let d = try? Data(contentsOf: AgentKind.piDir.appending(path: "settings.json")),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let m = o["defaultModel"] as? String, !m.isEmpty else { return nil }
+        return m
     }
 }
 
@@ -139,7 +170,7 @@ enum AgentCheck {
     }
 }
 
-/// What Settings › Agents and the chat's card show: sign-in of the two chat agents, and which MCP
+/// What Settings › Agents and the chat's card show: sign-in of the chat agents, and which MCP
 /// agents have the takes server (takes_mcp.py --agents). Read when a page opens, and on Check again.
 @MainActor
 @Observable
@@ -177,16 +208,19 @@ final class AgentsStatus {
         checking = true
         CodexModels.refresh()
         let server = server
-        let claude = ChatAgent.claude.path
         Task.detached(priority: .userInitiated) {
-            let codex = ClaudeChat.codexOverride ?? ChatAgent.find("codex")
+            // Finding the CLIs may start a login shell: off the main thread.
+            let paths = AgentKind.allCases.map(Agents.path)
+            let (claude, codex, pi) = (paths[0], paths[1], paths[2])
             let claudeLine = claude.map { Self.claudeLine(AgentCheck.run($0, ["auth", "status"])) }
             let codexLine = codex.map { Self.codexLine(AgentCheck.run($0, ["login", "status"], errors: true)) }
+            let piLine = pi.map { _ in AgentKind.piSignedIn() ? ChatAgent.pi.plan : "Not signed in: run pi in Terminal, then /login" }
             let rows = server.flatMap { AgentCheck.run("/usr/bin/python3", [$0, "--agents"], seconds: 90) }.map(Self.parse) ?? []
             await MainActor.run {
                 let s = AgentsStatus.shared
-                s.signedIn = [.claude: claudeLine, .codex: codexLine]
-                s.installed = [.claude: claude != nil, .codex: codex != nil]
+                // pi signs in per provider (pi auth check needs one): its line says whose model it uses.
+                s.signedIn = [.claude: claudeLine, .codex: codexLine, .pi: piLine]
+                s.installed = [.claude: claude != nil, .codex: codex != nil, .pi: pi != nil]
                 if server != nil { s.library = rows }
                 s.checking = false
             }
@@ -215,20 +249,22 @@ final class AgentsStatus {
 
     /// `claude auth status` prints JSON with loggedIn and authMethod.
     nonisolated static func claudeLine(_ out: String?) -> String {
-        guard let out, let o = try? JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any],
-              o["loggedIn"] as? Bool == true else { return "Not signed in: run claude in Terminal once" }
+        // The JSON can follow a warning line, as in Setup's check (AgentKind.claudeSignedIn).
+        guard let out, AgentKind.claudeSignedIn(out), let start = out.firstIndex(of: "{"),
+              let o = try? JSONSerialization.jsonObject(with: Data(out[start...].utf8)) as? [String: Any]
+        else { return "Not signed in: run claude in Terminal once" }
         return (o["authMethod"] as? String) == "claude.ai" ? "Signed in · uses your Claude plan" : "Signed in · uses your API key"
     }
 
     /// `codex login status`: "Logged in using ChatGPT", or using an API key.
     nonisolated static func codexLine(_ out: String?) -> String {
-        guard let out, out.lowercased().contains("logged in") else { return "Not signed in: run codex login in Terminal" }
+        guard let out, AgentKind.codexSignedIn(out) else { return "Not signed in: run codex login in Terminal" }
         return out.contains("ChatGPT") ? "Signed in · uses your ChatGPT plan" : "Signed in · uses your API key"
     }
 
-    /// The agents that have the server, except the two that run the chat: "Cursor, Gemini CLI and 4 more".
+    /// The agents that have the server, except the ones that run the chat: "Cursor, Gemini CLI and 4 more".
     var othersLine: String? {
-        let names = library.filter { $0.connected && $0.name != "Claude Code" && $0.name != "Codex" }.map(\.name)
+        let names = library.filter { l in l.connected && !ChatAgent.allCases.contains { $0.name == l.name } }.map(\.name)
         guard !names.isEmpty else { return nil }
         if names.count <= 2 { return names.joined(separator: " and ") }
         return "\(names[0]), \(names[1]) and \(names.count - 2) more"
@@ -287,7 +323,7 @@ struct AgentCard: View {
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text("Model").font(Theme.sans(11.5, .semibold)).foregroundStyle(Theme.muted)
-                ModelSegments(agent: agent)
+                if agent.models.count > 1 { ModelSegments(agent: agent) }
                 Text(agent.model.hint).font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -325,7 +361,7 @@ struct AgentCard: View {
 
     private func row(_ a: ChatAgent, selected: Bool) -> some View {
         let there = status.has(a)
-        let line = !there ? "Not on this Mac" : (status.signedIn[a] ?? nil) ?? (a == .claude ? "Uses your Claude plan" : "Uses your ChatGPT plan")
+        let line = !there ? "Not on this Mac" : (status.signedIn[a] ?? nil) ?? a.plan
         return Button {
             guard !selected, there else { return }
             if chat.switchAgent(to: a) { switched = a } else { switched = nil }

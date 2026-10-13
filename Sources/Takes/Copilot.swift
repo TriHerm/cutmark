@@ -430,7 +430,7 @@ final class CopilotRunner: ObservableObject {
     func stop() { process?.terminate() }
 
     private func start(ask: String, system: String) {
-        guard let claude = ClaudeChat.claudePath else {
+        guard let claude = Agents.path(.claude) else {
             state = .failed("The chat is not set up yet. Click Finish setup in the sidebar.", Date())
             return
         }

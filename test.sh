@@ -10,6 +10,11 @@ FULL=1
 # A full run waits its turn: one at a time on this Mac (scripts/test-queue.sh).
 source scripts/test-queue.sh
 if [[ -n "$FULL" ]]; then queue_wait; fi
+# Its own temp folder, removed when the run ends (2026-10-11). The MCP tests make folders with
+# mkdtemp and leave them: 88,000 piled up in a week, some with copies of whole libraries.
+RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/takes-test.XXXXXX")"
+takes_on_exit "$RUN_TMP"
+export TMPDIR="$RUN_TMP/"
 # The tree this run tests, to remember when it passes. Only the private repo: the public copy has no git.
 TREE=""
 if [[ -n "$FULL" && -f scripts/public/check-public-build.sh ]]; then TREE="$(tree_now)"; fi

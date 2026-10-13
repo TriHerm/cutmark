@@ -26,7 +26,7 @@ Paste this in Terminal:
 curl -fsSL https://gettakes.app/install | bash
 ```
 
-It installs Takes, ffmpeg, Apple's developer tools and Claude Code, signs you in to Claude and opens Takes. Run it again to update. You can [read the script](https://gettakes.app/install) first: it is 94 lines.
+It installs Takes, ffmpeg and Apple's developer tools, then opens Takes. Takes works with Claude Code, Codex or pi: when one of them is on your Mac, the script uses it and helps you sign in. With none, it installs Claude Code. Run it again to update. You can [read the script](https://gettakes.app/install) first: it is 124 lines.
 
 <details>
 <summary>Other ways to install</summary>
@@ -54,7 +54,7 @@ To install it you need Xcode and an Apple ID: `TAKES_TEAM=<team id> ios/install.
 
 ## How it works
 
-Your library is plain folders in `~/Movies/Takes`. The app records into them, your agent reads and writes them through the `takes` MCP server, and the app updates when a file changes. The chat panel in the app runs on Claude Code or Codex, on your own plan: the line under "Takes" in the chat picks the agent and the model, and Settings › Agents shows which agents can open your library.
+Your library is plain folders in `~/Movies/Takes`. The app records into them, your agent reads and writes them through the `takes` MCP server, and the app updates when a file changes. The chat panel in the app runs on Claude Code, Codex or pi, on your own plan: the line under "Takes" in the chat picks the agent and the model, and Settings › Agents shows which agents can open your library.
 
 The server works with any MCP agent. On its first launch Takes adds it to each one on your Mac: Claude Code, Codex, Cursor, Gemini CLI, opencode, pi (with pi-mcp-adapter) and Claude Desktop. It also adds two skills (`takes-storyboard`, `takes-video-edit`) to `~/.claude/skills` and `~/.agents/skills`. So you can ask from any of them too. Another agent, or one you installed later: Settings › Agents › Connect, or `python3 /Applications/Takes.app/Contents/Resources/takes_mcp.py --setup`.
 

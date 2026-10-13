@@ -1188,6 +1188,8 @@ struct DetailView: View {
                                     StillView(url: url)
                                 } else if Asset.kind(of: url) == .video, let commentRoot {
                                     ReviewPlayer(url: url, session: commentRoot).id(url)
+                                } else if PDFStage.handles(url) {
+                                    PDFStage(url: url).id(url)
                                 } else if DocReview.handles(url), let commentRoot {
                                     DocReview(url: url, root: commentRoot).id(url)
                                 } else {
@@ -2377,11 +2379,9 @@ struct ScriptPage: View {
     var doc: SessionDoc
 
     var body: some View {
+        // The whole width, one page: a column of 860 left dark strips beside it (2026-10-12).
         ScriptPane(doc: doc, onRecord: { SessionMode.set(.record) })
-            .frame(maxWidth: 860)
-            .overlay { HStack { Rule(vertical: true); Spacer(); Rule(vertical: true) } }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Theme.canvas)
     }
 }
 

@@ -4,7 +4,7 @@ import Foundation
 ///
 ///   1. DeepSeek Flash (api.deepseek.com)     DEEPSEEK_API_KEY     ~1s
 ///   2. Gemini 3.8 Flash (Google AI)          GEMINI_API_KEY       ~0.8s
-///   3. The local `claude` CLI (Haiku)        slow: the CLI takes seconds to boot
+///   3. The agent on this Mac (Agents.swift)  slow: the CLI takes seconds to boot
 ///   4. The first words of the script
 ///
 /// Keys: see `Keys`. Each hosted model gets 8 seconds, then the next one takes over.
@@ -24,7 +24,7 @@ enum Namer {
         if let k = keys["DEEPSEEK_API_KEY"], let t = clean(await deepSeek("deepseek-flash", prompt, key: k)) { return t }
         if let k = keys["GEMINI_API_KEY"] ?? keys["GOOGLE_AI_API_KEY"],
            let t = clean(await gemini("gemini-3.8-flash", prompt, key: k)) { return t }
-        if let t = clean(await askClaude(script: excerpt, project: project)) { return t }
+        if let t = clean(await askAgent(script: excerpt, project: project)) { return t }
         return fallback(text)
     }
 
@@ -76,42 +76,16 @@ enum Namer {
         return parts?.compactMap { $0["text"] as? String }.joined()
     }
 
-    // MARK: Local Claude CLI (last resort before the plain fallback)
+    // MARK: The agent on this Mac (last resort before the plain fallback)
 
-    static var claudePath: String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return ["\(home)/.local/bin/claude", "\(home)/.claude/local/claude", "/opt/homebrew/bin/claude",
-                "/usr/local/bin/claude"].first { FileManager.default.isExecutableFile(atPath: $0) }
-    }
-
-    private static func askClaude(script: String, project: String) async -> String? {
-        guard let path = claudePath else { return nil }
+    /// The agent Takes uses (Agents.swift): Claude Code, Codex or pi, on its small model.
+    static func askAgent(script: String, project: String) async -> String? {
         let prompt = """
-        You name video recording sessions. Project: "\(project)". Below on stdin is the script for one video.
+        You name video recording sessions. Project: "\(project)". Below is the script for one video.
         Reply with ONLY a short title of 2 to 6 words that says what the video is about. \
         No quotes, no punctuation at the end, no preamble.
         """
-        return await withCheckedContinuation { cont in
-            DispatchQueue.global().async {
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: path)
-                p.arguments = ["-p", prompt, "--model", "haiku"]
-                p.currentDirectoryURL = FileManager.default.temporaryDirectory
-                let input = Pipe(), output = Pipe()
-                p.standardInput = input
-                p.standardOutput = output
-                p.standardError = FileHandle.nullDevice
-                do { try p.run() } catch { cont.resume(returning: nil); return }
-                input.fileHandleForWriting.write(Data(script.utf8))
-                try? input.fileHandleForWriting.close()
-                let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
-                DispatchQueue.global().asyncAfter(deadline: .now() + 45, execute: killer)
-                let data = output.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit()
-                killer.cancel()
-                cont.resume(returning: p.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil)
-            }
-        }
+        return await Agents.run(AgentRequest(prompt: prompt, input: script, speed: .fast, seconds: 45)).text
     }
 }
 

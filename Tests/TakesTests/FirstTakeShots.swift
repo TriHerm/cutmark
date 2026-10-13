@@ -84,9 +84,9 @@ let firstTakeMedia = ProcessInfo.processInfo.environment["TAKES_FIRSTTAKE_MEDIA"
 
     @Test func editingWaitsForSetup() {
         let s = Setup.shared
-        let was = (s.claude, s.signedIn, s.ffmpeg, s.devTools)
-        defer { (s.claude, s.signedIn, s.ffmpeg, s.devTools) = was }
-        (s.claude, s.signedIn, s.ffmpeg, s.devTools) = (.ok, .missing, .ok, .ok)
+        let was = (s.agent, s.signedIn, s.ffmpeg, s.devTools)
+        defer { (s.agent, s.signedIn, s.ffmpeg, s.devTools) = was }
+        (s.agent, s.signedIn, s.ffmpeg, s.devTools) = (.ok, .missing, .ok, .ok)
         #expect(!FirstTake.shared.canEdit)
         s.signedIn = .ok
         #expect(FirstTake.shared.canEdit)
@@ -141,9 +141,9 @@ let firstTakeMedia = ProcessInfo.processInfo.environment["TAKES_FIRSTTAKE_MEDIA"
         MascotView.bodyImage = NSImage(contentsOf: repo.appending(path: "assets/brand/mascot-body-512.png"))?
             .cgImage(forProposedRect: nil, context: nil, hints: nil)
         let setup = Setup.shared
-        let was = (setup.claude, setup.signedIn, setup.ffmpeg)
-        defer { (setup.claude, setup.signedIn, setup.ffmpeg) = was }
-        (setup.claude, setup.signedIn, setup.ffmpeg) = (.ok, .ok, .ok)
+        let was = (setup.agent, setup.signedIn, setup.ffmpeg)
+        defer { (setup.agent, setup.signedIn, setup.ffmpeg) = was }
+        (setup.agent, setup.signedIn, setup.ffmpeg) = (.ok, .ok, .ok)
         Look.shared.palette = .graphite
         defer { Look.shared.reset() }
         UserDefaults.standard.set(false, forKey: "chatOpen")

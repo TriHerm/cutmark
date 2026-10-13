@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 // About Takes (2026-10-04): its own window in place of the plain system panel. The mascot, the
-// version and the build, what the library holds, what Takes does, and where to find Marvin.
+// version and the build, what the library holds, a note asking for a star or a coffee (2026-10-12,
+// in place of "What Takes does"), and where to find Marvin.
 
 struct AboutView: View {
     @Environment(AppModel.self) var app
@@ -12,7 +13,7 @@ struct AboutView: View {
             hero
             VStack(spacing: 22) {
                 stats
-                features
+                SupportNote()
                 maker
             }
             .padding(.horizontal, 28).padding(.top, 6).padding(.bottom, 22)
@@ -85,40 +86,6 @@ struct AboutView: View {
         .help("Your library: \(app.library.root.path)")
     }
 
-    // MARK: What it does
-
-    private static let featureList: [(icon: String, title: String, detail: String)] = [
-        ("text.alignleft", "Script and prompter", "Read as you record"),
-        ("video", "Camera and screen", "Every take kept"),
-        ("rectangle.split.3x1", "Storyboard", "A sketch for each shot"),
-        ("paperplane", "Posts", Features.blog ? "LinkedIn, X, YouTube, blog" : "LinkedIn, X, YouTube, Shorts"),
-        ("text.bubble", "Comment copilot", "Drafts in your voice"),
-        ("chart.line.uptrend.xyaxis", "Performance", "What worked, and why"),
-        ("bubble.left.and.text.bubble.right", "Takes chat", "Edits, cuts, thumbnails"),
-        ("iphone", "iPhone app", "Record and review away"),
-    ].filter { Features.socialBoards || !["Comment copilot", "Performance"].contains($0.title) }
-
-    private var features: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            label("WHAT TAKES DOES")
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
-                ForEach(Self.featureList, id: \.title) { f in
-                    HStack(spacing: 10) {
-                        Image(systemName: f.icon).font(.system(size: 12.5, weight: .medium))
-                            .foregroundStyle(Theme.accentInk)
-                            .frame(width: 28, height: 28)
-                            .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(f.title).font(Theme.sans(12, .semibold)).lineLimit(1)
-                            Text(f.detail).font(Theme.sans(11)).foregroundStyle(Theme.faint).lineLimit(1)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                }
-            }
-        }
-    }
-
     // MARK: Maker
 
     private var maker: some View {
@@ -137,9 +104,6 @@ struct AboutView: View {
         }
     }
 
-    private func label(_ s: String) -> some View {
-        Text(s).font(Theme.mono(10, .semibold)).foregroundStyle(Theme.faint).tracking(0.6)
-    }
 }
 
 enum About {
@@ -150,6 +114,9 @@ enum About {
         Link(name: "X", handle: "@marvinaziz", mark: "x", url: URL(string: "https://x.com/marvinaziz")!),
         Link(name: "LinkedIn", handle: "marvin-aziz", mark: "linkedin", url: URL(string: "https://www.linkedin.com/in/marvin-aziz")!),
     ]
+
+    static let repo = URL(string: "https://github.com/marvtub/takes-public")!
+    static let coffee = URL(string: "https://paypal.me/webtotheflow")!
 
     static var version: String {
         let i = Bundle.main.infoDictionary
@@ -206,6 +173,105 @@ private struct SocialLink: View {
         .onHover { hover = $0 }
         .animation(Theme.motion, value: hover)
         .help(link.url.absoluteString)
+    }
+}
+
+/// Marvin's note: who builds Takes, and two ways to thank him. Paper-warm card, handwritten
+/// greeting and sign-off, a star button (with the live count) and a coffee button.
+struct SupportNote: View {
+    @AppStorage("about.stars") private var stars = 0
+
+    private static let card = Theme.dynamic(0xFBF6EC, 0x29282A)
+    private static let edge = Theme.dynamic(0xEADFC8, 0x3A3833)
+    private static let hand = Theme.dynamic(0x5A4A2E, 0xF3E7CF)
+    private static let text = Theme.dynamic(0x5B5246, 0xD6D2C8)
+    private static let sign = Theme.dynamic(0x8A7B62, 0xBDB6A6)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Text("MA").font(Theme.sans(12, .bold)).foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(Theme.accent, in: Circle())
+                    .overlay(Circle().strokeBorder(Self.edge, lineWidth: 1).padding(-3))
+                Text("Hey, it's Marvin.").font(Theme.hand(25)).foregroundStyle(Self.hand)
+            }
+            Text("I build Takes on my own, in the open, and give it away for free. If it saved you an evening, here are two ways to say thanks.")
+                .font(Theme.sans(13)).foregroundStyle(Self.text).lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(spacing: 8) {
+                SupportButton(url: About.repo, mark: "github", title: "Give it a star on GitHub",
+                              detail: "Free · helps others find it", fill: Theme.ink, ink: Theme.paper) {
+                    if stars > 0 {
+                        HStack(spacing: 4) {
+                            Image(systemName: "star.fill").font(.system(size: 10)).foregroundStyle(Color(red: 0.89, green: 0.63, blue: 0.03))
+                            Text(stars.formatted()).font(Theme.mono(11.5, .semibold))
+                        }
+                        .foregroundStyle(Theme.paper)
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(Theme.paper.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    }
+                }
+                SupportButton(url: About.coffee, mark: "paypal", title: "Buy me a coffee",
+                              detail: "Any amount · PayPal", fill: Theme.accent, ink: .white) {
+                    Image(systemName: "cup.and.saucer").font(.system(size: 15, weight: .medium)).foregroundStyle(.white)
+                }
+            }
+            .padding(.top, 2)
+            Text("Thank you! Marvin").font(Theme.hand(21)).foregroundStyle(Self.sign)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 14)
+        .background(Self.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Self.edge, lineWidth: 0.5))
+        .task { await loadStars() }
+    }
+
+    /// The repo's star count from GitHub's public API; kept so the next open shows it at once.
+    private func loadStars() async {
+        guard let url = URL(string: "https://api.github.com/repos/marvtub/takes-public"),
+              let (data, _) = try? await URLSession.shared.data(from: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let n = json["stargazers_count"] as? Int else { return }
+        stars = n
+    }
+}
+
+/// One full-width link button in the note: a logo, a title over a detail line, and a trailing part.
+private struct SupportButton<Trailing: View>: View {
+    let url: URL
+    let mark: String
+    let title: String
+    let detail: String
+    let fill: Color
+    let ink: Color
+    @ViewBuilder var trailing: Trailing
+    @State private var hover = false
+
+    var body: some View {
+        Link(destination: url) {
+            HStack(spacing: 11) {
+                if let img = BrandMark.image(mark) {
+                    Image(nsImage: img).resizable().interpolation(.high).frame(width: 20, height: 20)
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(Theme.sans(13, .semibold)).foregroundStyle(ink)
+                    Text(detail).font(Theme.sans(11)).foregroundStyle(ink.opacity(0.7))
+                }
+                Spacer(minLength: 0)
+                trailing
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 46)
+            .background(fill, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .shadow(color: fill.opacity(hover ? 0.35 : 0), radius: 12, y: 6)
+            .offset(y: hover ? -1 : 0)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle())
+        .onHover { hover = $0 }
+        .animation(Theme.motion, value: hover)
+        .help(url.absoluteString)
     }
 }
 

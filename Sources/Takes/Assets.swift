@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import PDFKit
 import QuickLookThumbnailing
 import SwiftUI
 import UniformTypeIdentifiers
@@ -637,11 +638,11 @@ struct AssetsPane: View {
         store.scan(doc)
     }
 
-    /// Videos, images and audio play in the left pane. Other files open in their app.
+    /// Videos, images, audio, text and PDFs show in the left pane. Other files open in their app.
     private func show(_ a: Asset) {
         switch a.kind {
         case .video, .image, .audio: app.preview = a.url
-        case .other: if DocReview.handles(a.url) { app.preview = a.url } else { NSWorkspace.shared.openSoon(a.url) }
+        case .other: if DocReview.handles(a.url) || PDFStage.handles(a.url) { app.preview = a.url } else { NSWorkspace.shared.openSoon(a.url) }
         }
     }
 
@@ -988,6 +989,70 @@ struct StillView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: url) { image = NSImage(contentsOf: url) }
+    }
+}
+
+/// A PDF on the stage: every page in one scroll, fit to the width, text you can select
+/// (2026-10-11: a PDF opened in the video player).
+struct PDFStage: View {
+    let url: URL
+    @State private var page = 1
+    @State private var pages = 0
+
+    static func handles(_ url: URL) -> Bool { url.pathExtension.lowercased() == "pdf" }
+
+    var body: some View {
+        PDFPages(url: url, page: $page, pages: $pages)
+            .overlay(alignment: .bottom) {
+                if pages > 1 {
+                    StagePill(text: "Page \(page) of \(pages)", icon: nil)
+                        .padding(.bottom, 14)
+                        .allowsHitTesting(false)
+                }
+            }
+    }
+}
+
+private struct PDFPages: NSViewRepresentable {
+    let url: URL
+    @Binding var page: Int
+    @Binding var pages: Int
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> PDFView {
+        let v = PDFView()
+        v.displayMode = .singlePageContinuous
+        v.displaysPageBreaks = true
+        v.autoScales = true
+        v.backgroundColor = Theme.stageNS
+        v.pageShadowsEnabled = true
+        NotificationCenter.default.addObserver(context.coordinator, selector: #selector(Coordinator.moved(_:)),
+                                               name: .PDFViewPageChanged, object: v)
+        load(v)
+        return v
+    }
+
+    func updateNSView(_ v: PDFView, context: Context) {
+        context.coordinator.parent = self
+        if v.document?.documentURL != url { load(v) }
+    }
+
+    private func load(_ v: PDFView) {
+        let doc = PDFDocument(url: url)
+        v.document = doc
+        let n = doc?.pageCount ?? 0
+        DispatchQueue.main.async { pages = n; page = 1 }
+    }
+
+    @MainActor final class Coordinator: NSObject {
+        var parent: PDFPages
+        init(_ parent: PDFPages) { self.parent = parent }
+
+        @objc func moved(_ note: Notification) {
+            guard let v = note.object as? PDFView, let doc = v.document, let p = v.currentPage else { return }
+            parent.page = doc.index(for: p) + 1
+        }
     }
 }
 

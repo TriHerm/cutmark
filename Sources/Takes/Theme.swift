@@ -59,6 +59,11 @@ enum Theme {
         let name = weight == .black || weight == .heavy ? "Nunito-ExtraBold" : "Nunito-Bold"
         return NSFont(name: name, size: size) != nil ? .custom(name, size: size) : .system(size: size, weight: .bold, design: .rounded)
     }
+    /// Caveat: handwriting, only for the personal note in About.
+    static func hand(_ size: CGFloat) -> Font {
+        let size = size * TextSize.shared.factor
+        return NSFont(name: "Caveat-Regular", size: size) != nil ? .custom("Caveat", size: size).weight(.bold) : .system(size: size, weight: .medium, design: .serif).italic()
+    }
     /// Numbers and small meta. Inter with even-width digits.
     static func mono(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
         sans(size, weight).monospacedDigit()
@@ -93,7 +98,7 @@ enum Theme {
         }
     }
 
-    private static func dynamic(_ light: UInt32, _ dark: UInt32, alpha: CGFloat = 1) -> Color {
+    static func dynamic(_ light: UInt32, _ dark: UInt32, alpha: CGFloat = 1) -> Color {
         Color(nsColor: dynamicNS(light, dark, alpha: alpha))
     }
 

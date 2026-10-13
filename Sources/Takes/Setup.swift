@@ -3,13 +3,15 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// What a new Mac needs before Takes works (2026-10-05): Claude Code, signed in, and ffmpeg.
+/// What a new Mac needs before Takes works (2026-10-05): an agent, signed in, and ffmpeg. Until
+/// 2026-10-12 the agent had to be Claude Code; now any one of Claude Code, Codex or pi will do, and
+/// Takes installs Claude Code only on a Mac with none (Agents/SignIn.swift).
 /// Since 2026-10-10 also Apple's developer tools: the takes MCP server runs on /usr/bin/python3,
 /// which without them is only a stub, so no agent could use Takes. Their fix opens Apple's dialog.
 /// A downloaded Takes checks this at launch and each time it comes to the front. While a step is
 /// missing, the sidebar shows Finish setup; its panel fixes each step with one click. The app
 /// installs Claude Code with Anthropic's installer and ffmpeg as a static build in ~/.local/bin
-/// (no Homebrew needed). Sign-in opens Terminal, because `claude auth login` needs a terminal.
+/// (no Homebrew needed). Sign-in opens Terminal, because each agent's login needs a terminal.
 @MainActor @Observable
 final class Setup {
     static let shared = Setup()
@@ -17,15 +19,19 @@ final class Setup {
 
     enum Status: Equatable { case unknown, ok, missing, working, failed(String) }
 
-    var claude: Status = .unknown
+    /// An agent is on this Mac.
+    var agent: Status = .unknown
+    /// One of the agents here is signed in.
     var signedIn: Status = .unknown
+    /// The agent the steps name: the one Takes uses, or Claude Code while none is here.
+    var target: AgentKind = .claude
     var ffmpeg: Status = .unknown
     var devTools: Status = .unknown
     private var checking = false
 
     /// True once a check found something to do. Nothing shows before the first check ends.
-    var needed: Bool { [claude, signedIn, ffmpeg, devTools].contains { $0 != .ok && $0 != .unknown } }
-    var left: Int { [claude, signedIn, ffmpeg, devTools].filter { $0 != .ok }.count }
+    var needed: Bool { [agent, signedIn, ffmpeg, devTools].contains { $0 != .ok && $0 != .unknown } }
+    var left: Int { [agent, signedIn, ffmpeg, devTools].filter { $0 != .ok }.count }
 
     nonisolated static var home: String { FileManager.default.homeDirectoryForCurrentUser.path }
     nonisolated static var localBin: String { home + "/.local/bin" }
@@ -50,13 +56,16 @@ final class Setup {
         guard !checking else { return }
         checking = true
         defer { checking = false }
-        let path = Namer.claudePath
-        let (signed, hasFFmpeg, hasTools) = await Task.detached(priority: .utility) {
-            (path.map { Self.isSignedIn(claude: $0) } ?? false, Self.tool("ffmpeg") != nil && Self.tool("ffprobe") != nil,
-             Self.hasDevTools())
+        let (here, ready, hasFFmpeg, hasTools) = await Task.detached(priority: .utility) {
+            let here = Agents.installed
+            return (here, here.filter { k in Agents.path(k).map { k.signedIn($0) } ?? false },
+                    Self.tool("ffmpeg") != nil && Self.tool("ffprobe") != nil, Self.hasDevTools())
         }.value
-        if claude != .working { claude = path == nil ? .missing : .ok }
-        if signedIn != .working { signedIn = signed ? .ok : .missing }
+        Self.useSignedIn(ready)
+        let (pick, ok) = Self.readiness(here: here, ready: ready)
+        target = pick
+        if agent != .working { agent = here.isEmpty ? .missing : .ok }
+        if signedIn != .working { signedIn = ok ? .ok : .missing }
         if ffmpeg != .working { ffmpeg = hasFFmpeg ? .ok : .missing }
         if devTools != .working {
             // Tools that came since the last check: the agents get the takes server now.
@@ -68,42 +77,46 @@ final class Setup {
     /// `xcode-select -p` finds the Command Line Tools (or Xcode) and never opens a dialog.
     nonisolated static func hasDevTools() -> Bool { run("/usr/bin/xcode-select", ["-p"]).0 }
 
-    nonisolated static func isSignedIn(claude: String) -> Bool {
-        let (_, out) = run(claude, ["auth", "status"])
-        return signedIn(status: out)
+    /// The agent the chat will use (the picked one when it is here, else the first one here) and
+    /// whether it is signed in. Another agent being signed in does not count: the chat would fail.
+    static func readiness(here: [AgentKind], ready: [AgentKind],
+                          preferred: AgentKind = ChatAgent.current.kind) -> (AgentKind, Bool) {
+        let pick = Agents.pick(preferred: preferred, here: here) ?? .claude
+        return (pick, ready.contains(pick))
     }
 
-    /// `claude auth status` prints JSON with "loggedIn".
-    nonisolated static func signedIn(status: String) -> Bool {
-        guard let start = status.firstIndex(of: "{"),
-              let json = try? JSONSerialization.jsonObject(with: Data(status[start...].utf8)) as? [String: Any]
-        else { return false }
-        return json["loggedIn"] as? Bool ?? false
+    /// A Mac where nobody picked an agent yet, and Claude Code (the default) is not signed in but
+    /// another agent is: new conversations start on that one. A pick made in Settings › Agents stays.
+    static func useSignedIn(_ ready: [AgentKind], defaults: UserDefaults = .standard) {
+        guard defaults.string(forKey: "chatAgent") == nil, let first = ready.first, !ready.contains(.claude) else { return }
+        defaults.set(first.rawValue, forKey: "chatAgent")
     }
 
     // MARK: Fixes
 
-    func installClaude() {
-        claude = .working
+    /// Only on a Mac with no agent: Claude Code, with Anthropic's installer.
+    func installAgent() {
+        agent = .working
         Task {
             let (ok, out) = await Task.detached(priority: .userInitiated) {
-                Self.run("/bin/bash", ["-c", "curl -fsSL https://claude.ai/install.sh | bash"])
+                Self.run("/bin/bash", ["-c", Agents.claudeInstaller])
             }.value
-            claude = ok && Namer.claudePath != nil ? .ok : .failed(Self.lastLine(out) ?? "The install did not finish.")
-            if claude == .ok { AgentSetup.run() }
+            agent = ok && !Agents.installed.isEmpty ? .ok : .failed(Self.lastLine(out) ?? "The install did not finish.")
+            if agent == .ok { AgentSetup.run() }
             await check()
         }
     }
 
-    /// Opens Terminal on `claude auth login`. Takes checks again when it comes back to the front.
+    /// Opens Terminal on the agent's login. Takes checks again when it comes back to the front.
     func signIn() {
-        guard let claude = Namer.claudePath else { return }
+        guard let exe = Agents.path(target) else { return }
         let script = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "takes-sign-in.command")
+        let login = target.login
         let text = """
         #!/bin/bash
         clear
-        echo "Sign in to Claude Code for Takes. Your browser opens."
-        '\(claude)' auth login
+        echo "\(login.hint)"
+        '\(exe)'\(login.args.map { " " + $0 }.joined())
         echo
         echo "Done. You can close this window and go back to Takes."
         """
@@ -112,7 +125,7 @@ final class Setup {
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
             NSWorkspace.shared.openSoon(script)
         } catch {
-            signedIn = .failed("Could not open Terminal. Run claude auth login in Terminal.")
+            signedIn = .failed("Could not open Terminal. Sign in to \(target.name) in Terminal.")
         }
     }
 
@@ -270,11 +283,14 @@ struct SetupPanel: View {
             .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 12)
             Divider().overlay(Theme.border)
             VStack(alignment: .leading, spacing: 14) {
-                step("Install Claude Code", "The assistant behind Takes. Uses your Claude plan.",
-                     setup.claude, action: "Install", busy: "Installing…", setup.installClaude)
-                step("Sign in", "Opens Terminal and then your browser. Come back here when you are done.",
-                     setup.claude == .ok ? setup.signedIn : .missing, action: "Sign in", busy: "Waiting…",
-                     enabled: setup.claude == .ok, setup.signIn)
+                step(setup.agent == .ok ? "\(setup.target.name) is installed" : "Install Claude Code",
+                     "The assistant behind Takes. Codex or pi work too: install one of them instead, and Takes finds it.",
+                     setup.agent, action: "Install", busy: "Installing…", setup.installAgent)
+                step("Sign in to \(setup.target.name)", setup.target == .pi
+                     ? "Opens pi in Terminal: type /login and pick a provider. Come back here when you are done."
+                     : "Opens Terminal and then your browser. Come back here when you are done.",
+                     setup.agent == .ok ? setup.signedIn : .missing, action: "Sign in", busy: "Waiting…",
+                     enabled: setup.agent == .ok, setup.signIn)
                 step("Get ffmpeg", "Cuts and exports video. About 60 MB, into ~/.local/bin.",
                      setup.ffmpeg, action: "Download", busy: "Downloading…", setup.installFFmpeg)
                 step("Get Apple's developer tools", "Takes' link to your agents runs on them. Apple's own installer opens; it takes a few minutes.",
