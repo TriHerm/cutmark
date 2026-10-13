@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/gallery/1-main.webp" alt="Takes for Mac: record talking-head videos, Claude Code does the edit" width="100%"></p>
+<p align="center"><img src="docs/gallery/1-main.jpg" alt="Takes for Mac: record talking-head videos, Claude Code does the edit" width="100%"></p>
 
 <p align="center">
   Record on your Mac or iPhone. <a href="https://claude.com/claude-code">Claude Code</a> writes the script,<br>
@@ -40,22 +40,19 @@ It installs Takes, ffmpeg and Apple's developer tools, then opens Takes. Takes w
 2. **Record.** Read off a teleprompter that follows your voice. Camera and screen record as two synced files. Star the take you keep.
 3. **Post.** Ask *"cut my last take"* and *"write the posts"*. Review each draft as the platform shows it, leave comments on a frame or a line, and schedule it.
 
-<p align="center">
-  <img src="docs/gallery/3-storyboard.webp" alt="A marker sketch for every shot of the script" width="49%">
-  <img src="docs/gallery/2-record.webp" alt="A teleprompter that follows your voice, camera and screen in one take" width="49%">
-</p>
+<p align="center"><img src="docs/gallery/3-storyboard.jpg" alt="A marker sketch for every shot of the script" width="100%"></p>
 
-<p align="center">
-  <img src="docs/gallery/4-edit.webp" alt="No timeline: Claude Code cuts the take and makes the vertical version" width="49%">
-  <img src="docs/gallery/5-comment.webp" alt="Notes on the frame become a new version of the edit" width="49%">
-</p>
+<p align="center"><img src="docs/gallery/2-record.jpg" alt="A teleprompter that follows your voice, camera and screen in one take" width="100%"></p>
 
-<p align="center">
-  <img src="docs/gallery/6-styles.webp" alt="Caption and title styles for the edit" width="49%">
-  <img src="docs/gallery/7-posts.webp" alt="The posts for LinkedIn, X, YouTube and Shorts, previewed as the real post" width="49%">
-</p>
+<p align="center"><img src="docs/gallery/4-edit.jpg" alt="No timeline: Claude Code cuts the take and makes the vertical version" width="100%"></p>
 
-<p align="center"><img src="docs/gallery/8-rules.webp" alt="A note given once becomes a rule Claude reads before every edit" width="100%"></p>
+<p align="center"><img src="docs/gallery/5-comment.jpg" alt="Notes on the frame become a new version of the edit" width="100%"></p>
+
+<p align="center"><img src="docs/gallery/6-styles.jpg" alt="Caption and title styles for the edit" width="100%"></p>
+
+<p align="center"><img src="docs/gallery/7-posts.jpg" alt="The posts for LinkedIn, X, YouTube and Shorts, previewed as the real post" width="100%"></p>
+
+<p align="center"><img src="docs/gallery/8-rules.jpg" alt="A note given once becomes a rule Claude reads before every edit" width="100%"></p>
 
 ## On your iPhone
 
