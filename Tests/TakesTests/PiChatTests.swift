@@ -114,8 +114,10 @@ struct PiRunTests {
         chat.send("Again", title: "Test", onStage: nil)
         await until { !chat.running && chat.messages.count == 4 }
         let first = read("args-1.txt").components(separatedBy: "\n"), second = read("args-2.txt").components(separatedBy: "\n")
-        let id = first[first.firstIndex(of: "--session-id")! + 1]
-        #expect(second[second.firstIndex(of: "--session-id")! + 1] == id, "the second message goes on in the same pi session")
+        let firstID = try #require(first.firstIndex(of: "--session-id"))
+        let secondID = try #require(second.firstIndex(of: "--session-id"))
+        let id = first[firstID + 1]
+        #expect(second[secondID + 1] == id, "the second message goes on in the same pi session")
         #expect(read("chat-1.txt") == id && read("chat-2.txt") == id)
         #expect(chat.agent == .pi)
         chat.send("/compact", title: "Test", onStage: nil)
