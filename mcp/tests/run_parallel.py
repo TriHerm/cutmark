@@ -1,8 +1,8 @@
 """Runs every test in mcp/tests in parallel processes (2026-10-11). One by one the run took 280 s,
 most of it ffmpeg in a few classes, so test.sh took 10 minutes and twice that with the public copy.
 
-Each worker process runs a few tests of one class at a time, so setUpClass runs once per chunk and
-os.environ changes stay in that process. The slowest chunks of the last run go first
+Each worker process runs one chunk of a few tests from one class, so module globals and os.environ
+changes cannot leak into a later chunk. The slowest chunks of the last run go first
 (~/Library/Caches/takes-mcp-test-times.json), so no long chunk starts last.
 
     python3 mcp/tests/run_parallel.py [-j N]
@@ -70,8 +70,9 @@ def main():
     start = time.time()
     ran = skipped = 0
     bad, times = list(broken), {}
-    # spawn: a fresh interpreter per worker, as the one-by-one run had.
-    with mp.get_context("spawn").Pool(j) as pool:
+    # A fresh interpreter per chunk. Several test modules patch takes_mcp globals in setUp; reusing
+    # a worker for a later module made the result depend on chunk scheduling.
+    with mp.get_context("spawn").Pool(j, maxtasksperchild=1) as pool:
         for ids, n, s, b, took in pool.imap_unordered(run, todo):
             ran += n
             skipped += s
