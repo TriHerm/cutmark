@@ -15,7 +15,7 @@ import Testing
         return lib
     }
 
-    func cleanup(_ pack: URL) {
+    func cleanup(_ pack: URL?) {
         Demo.pack = pack
         UserDefaults.standard.removeObject(forKey: Demo.doneKey)
         try? FileManager.default.removeItem(at: root)
