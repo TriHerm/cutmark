@@ -1,7 +1,7 @@
 <p align="center"><img src="docs/gallery/1-main.jpg" alt="Takes for Mac: record talking-head videos, Claude Code does the edit" width="100%"></p>
 
 <p align="center">
-  Record on your Mac or iPhone. <a href="https://claude.com/claude-code">Claude Code</a> writes the script,<br>
+  Record on your Mac or iPhone. Your coding agent writes the script,<br>
   cuts the edit and drafts the posts.<br>
   <a href="https://gettakes.app"><b>gettakes.app</b></a>
 </p>
@@ -24,7 +24,7 @@ Paste this in Terminal:
 curl -fsSL https://gettakes.app/install | bash
 ```
 
-It installs Takes, ffmpeg and Apple's developer tools, then opens Takes. Takes works with Claude Code, Codex or pi: when one of them is on your Mac, the script uses it and helps you sign in. With none, it installs Claude Code. Run it again to update. You can [read the script](https://gettakes.app/install) first: it is 124 lines.
+It installs Takes, ffmpeg and Apple's developer tools, then opens Takes. Takes works with Claude Code, Codex, pi or opencode: when one of them is on your Mac, the script uses it and helps you sign in. pi can use any provider/model it supports, and opencode uses its configured providers. With none, the upstream installer installs Claude Code. Run it again to update. You can [read the script](https://gettakes.app/install) first: it is 124 lines.
 
 <details>
 <summary>Other ways to install</summary>
@@ -62,9 +62,11 @@ To install it you need Xcode and an Apple ID: `TAKES_TEAM=<team id> ios/install.
 
 ## How it works
 
-Your library is plain folders in `~/Movies/Takes`. The app records into them, your agent reads and writes them through the `takes` MCP server, and the app updates when a file changes. The chat panel in the app runs on Claude Code, Codex or pi, on your own plan: the line under "Takes" in the chat picks the agent and the model, and Settings › Agents shows which agents can open your library.
+Your library is plain folders in `~/Movies/Takes`. The app records into them, your agent reads and writes them through the `takes` MCP server, and the app updates when a file changes. The chat panel in the app runs on Claude Code, Codex, pi or opencode, using that agent's own provider/account: the line under "Takes" in the chat picks the agent and the model, and Settings › Agents shows which agents can open your library.
 
 The server works with any MCP agent. On its first launch Takes adds it to each one on your Mac: Claude Code, Codex, Cursor, Gemini CLI, opencode, pi (with pi-mcp-adapter) and Claude Desktop. It also adds two skills (`takes-storyboard`, `takes-video-edit`) to `~/.claude/skills` and `~/.agents/skills`. So you can ask from any of them too. Another agent, or one you installed later: Settings › Agents › Connect, or `python3 /Applications/Takes.app/Contents/Resources/takes_mcp.py --setup`.
+
+**ChatGPT can connect directly when custom MCP access is enabled for the account/workspace; Codex is not required.** For a private Mac, use OpenAI Secure MCP Tunnel with the existing stdio server. For MCP Inspector, gateways, or a remote deployment, this fork also exposes the same server over Streamable HTTP at `/mcp`: `python3 /Applications/Takes.app/Contents/Resources/takes_mcp.py --http`. See [ChatGPT direct MCP](docs/chatgpt-mcp.md).
 
 - Start a new agent session after the first launch: a session that was already open does not see the server.
 - **Cursor** gets a short list of 30 tools (script, takes, storyboard, edit, jobs, comments, posts, plan), because Cursor uses only about 40 tools across all its servers. For every tool, set `"env": {"TAKES_TOOLS": "all"}` in the `takes` entry of `~/.cursor/mcp.json`.
@@ -85,7 +87,7 @@ flowchart LR
 
 ## Good to know
 
-- **Needs:** a Mac with Apple silicon, macOS 15+ and a Claude plan.
+- **Needs:** a Mac with Apple silicon, macOS 15+ and one configured chat agent/provider (Claude Code, Codex, pi or opencode).
 - **Optional:** `whisper` for transcripts. A Gemini key for storyboard sketches, B-roll names and best cuts: Settings › Gemini says what it adds and saves it.
 - **Questions and ideas:** [Discussions](https://github.com/marvtub/takes-public/discussions). Takes does not take pull requests, so one person keeps it consistent. Forks are welcome.
 - The pictures are the real app on a made-up library.

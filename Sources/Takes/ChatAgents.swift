@@ -11,7 +11,7 @@ import SwiftUI
 // The model is one setting per agent and counts from the next message.
 
 enum ChatAgent: String, Codable, CaseIterable, Identifiable {
-    case claude, codex, pi
+    case claude, codex, pi, opencode
     var id: String { rawValue }
 
     var name: String {
@@ -19,6 +19,7 @@ enum ChatAgent: String, Codable, CaseIterable, Identifiable {
         case .claude: return "Claude Code"
         case .codex: return "Codex"
         case .pi: return "pi"
+        case .opencode: return "opencode"
         }
     }
 
@@ -33,6 +34,7 @@ enum ChatAgent: String, Codable, CaseIterable, Identifiable {
         case .claude: return ChatModel.claude
         case .codex: return CodexModels.list
         case .pi: return PiModels.list
+        case .opencode: return OpenCodeModels.list
         }
     }
 
@@ -49,6 +51,7 @@ enum ChatAgent: String, Codable, CaseIterable, Identifiable {
         case .claude: return .claude
         case .codex: return .codex
         case .pi: return .pi
+        case .opencode: return .opencode
         }
     }
 
@@ -58,6 +61,7 @@ enum ChatAgent: String, Codable, CaseIterable, Identifiable {
         case .claude: return ClaudeAdapter()
         case .codex: return CodexAdapter()
         case .pi: return PiAdapter()
+        case .opencode: return OpenCodeAdapter()
         }
     }
 
@@ -67,6 +71,7 @@ enum ChatAgent: String, Codable, CaseIterable, Identifiable {
         case .claude: return "Uses your Claude plan"
         case .codex: return "Uses your ChatGPT plan"
         case .pi: return "Uses the model set in pi"
+        case .opencode: return "Uses the provider set in opencode"
         }
     }
 
@@ -147,6 +152,11 @@ enum PiModels {
     }
 }
 
+/// opencode owns its provider/model selection. An empty id leaves that selection untouched.
+enum OpenCodeModels {
+    static let list = [ChatModel(id: "", name: "opencode's model", hint: "The provider and model set in opencode.")]
+}
+
 /// Runs a small CLI check with the login shell's PATH. Off the main thread only.
 enum AgentCheck {
     /// `errors`: read stderr too (`codex login status` prints there).
@@ -210,17 +220,19 @@ final class AgentsStatus {
         let server = server
         Task.detached(priority: .userInitiated) {
             // Finding the CLIs may start a login shell: off the main thread.
-            let paths = AgentKind.allCases.map(Agents.path)
-            let (claude, codex, pi) = (paths[0], paths[1], paths[2])
+            let paths = Dictionary(uniqueKeysWithValues: AgentKind.allCases.map { ($0, Agents.path($0)) })
+            let claude = paths[.claude] ?? nil, codex = paths[.codex] ?? nil, pi = paths[.pi] ?? nil
+            let opencode = paths[.opencode] ?? nil
             let claudeLine = claude.map { Self.claudeLine(AgentCheck.run($0, ["auth", "status"])) }
             let codexLine = codex.map { Self.codexLine(AgentCheck.run($0, ["login", "status"], errors: true)) }
             let piLine = pi.map { _ in AgentKind.piSignedIn() ? ChatAgent.pi.plan : "Not signed in: run pi in Terminal, then /login" }
+            let opencodeLine = opencode.map { _ in "Installed · uses your opencode providers" }
             let rows = server.flatMap { AgentCheck.run("/usr/bin/python3", [$0, "--agents"], seconds: 90) }.map(Self.parse) ?? []
             await MainActor.run {
                 let s = AgentsStatus.shared
                 // pi signs in per provider (pi auth check needs one): its line says whose model it uses.
-                s.signedIn = [.claude: claudeLine, .codex: codexLine, .pi: piLine]
-                s.installed = [.claude: claude != nil, .codex: codex != nil, .pi: pi != nil]
+                s.signedIn = [.claude: claudeLine, .codex: codexLine, .pi: piLine, .opencode: opencodeLine]
+                s.installed = [.claude: claude != nil, .codex: codex != nil, .pi: pi != nil, .opencode: opencode != nil]
                 if server != nil { s.library = rows }
                 s.checking = false
             }

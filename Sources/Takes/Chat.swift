@@ -768,14 +768,16 @@ final class ClaudeChat {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: claude)
         if !log.started { log.agent = agent.rawValue }
-        p.arguments = agent.adapter.chatArguments(ChatTurn(
+        let turn = ChatTurn(
             context: context, model: agent.model.id, conversation: log.conversation, thread: log.thread,
-            started: log.started, access: Self.access, board: session == nil ? boardName : nil))
+            started: log.started, access: Self.access, board: session == nil ? boardName : nil)
+        p.arguments = agent.adapter.chatArguments(turn)
         p.currentDirectoryURL = Self.folder
-        p.environment = Self.environment(board: session == nil ? boardName : nil)
+        var env = Self.environment(board: session == nil ? boardName : nil)
         // The takes server knows the chat by it (rules seen, jobs). Claude Code sets its own
         // CLAUDE_CODE_SESSION_ID, the same id; pi hands its environment to its MCP servers.
-        p.environment?["TAKES_CHAT_ID"] = log.conversation
+        env["TAKES_CHAT_ID"] = log.conversation
+        p.environment = agent.adapter.chatEnvironment(turn, base: env)
         let input = Pipe(), output = Pipe(), errors = Pipe()
         p.standardInput = input
         p.standardOutput = output
@@ -1090,6 +1092,9 @@ final class ClaudeChat {
             return
         }
         parser.closeOpen()
+        if !killed, status == 0, agent.adapter.finishesOnCleanExit {
+            parser.finished = true
+        }
         // SIGTERM ends the CLI either by the signal itself or by its handler (exit 143).
         let signal: Int32? = killed ? status : (status > 128 && status <= 128 + 31 ? status - 128 : nil)
         if steer != nil {

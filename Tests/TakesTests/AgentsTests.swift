@@ -35,6 +35,18 @@ struct AgentsTests {
         #expect(PiAdapter().arguments(read) == ["-p", "--mode", "json", "--no-session", "--tools", "read"])
     }
 
+    @Test func opencodeArgumentsAndPermissions() {
+        let a = OpenCodeAdapter().arguments(name)
+        #expect(a == ["run", "--format", "json"])
+        #expect(OpenCodeAdapter.permissions(tools: .none).contains(#""*":"deny""#))
+        var read = name; read.tools = .read
+        let env = OpenCodeAdapter().environment(read, base: ["KEEP": "yes"])
+        #expect(env["KEEP"] == "yes")
+        #expect(env["OPENCODE_PERMISSION"]?.contains(#""read":"allow""#) == true)
+        #expect(env["OPENCODE_PERMISSION"]?.contains(#""*":"deny""#) == true)
+        #expect(AgentKind.opencode.login.args == ["auth", "login"])
+    }
+
     @Test func claudeAnswer() {
         let ok = #"{"type": "result", "subtype": "success", "is_error": false, "result": "Teleprompter Script in MacBook Notch", "session_id": "186138df"}"#
         #expect(ClaudeAdapter().reply(out: ok, err: "", status: 0) == AgentReply(text: "Teleprompter Script in MacBook Notch"))
@@ -65,6 +77,17 @@ struct AgentsTests {
         let error = #"{"type":"agent_end","messages":[{"role":"assistant","content":[],"stopReason":"error","errorMessage":"No API key for provider"}]}"#
         #expect(PiAdapter().reply(out: error, err: "", status: 1) == .failed("No API key for provider"))
         #expect(PiAdapter().reply(out: "", err: "Error: Model \"x\" not found.\n", status: 1) == .failed("Error: Model \"x\" not found."))
+    }
+
+    @Test func opencodeAnswer() {
+        let out = #"{"type":"step_start","sessionID":"ses-1","part":{"type":"step-start"}}"# + "\n"
+            + #"{"type":"text","sessionID":"ses-1","part":{"type":"text","text":"Notch Prompter"}}"# + "\n"
+            + #"{"type":"step_finish","sessionID":"ses-1","part":{"type":"step-finish"}}"#
+        #expect(OpenCodeAdapter().reply(out: out, err: "", status: 0) == AgentReply(text: "Notch Prompter"))
+        let bad = #"{"type":"error","sessionID":"ses-1","error":{"message":"No provider configured"}}"#
+        #expect(OpenCodeAdapter().reply(out: bad, err: "", status: 1) == .failed("No provider configured"))
+        #expect(OpenCodeAdapter().reply(out: out, err: "provider failed after tool step\n", status: 7)
+            == .failed("provider failed after tool step"))
     }
 
     @Test func thePickedAgentWinsWhenItIsHere() {
@@ -131,7 +154,7 @@ struct AgentsTests {
     @Test func onlyAgentsNamesAnAgentCLI() throws {
         let src = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().appending(path: "Sources/Takes")
-        let pattern = try Regex(#"claudePath|Agents\.path\(\.claude\)|(tool|find)\("(claude|codex|pi)"\)|/bin/(claude|codex|pi)\b|claude\.ai/install|"--output-format"|\["exec"\]"#)
+        let pattern = try Regex(#"claudePath|Agents\.path\(\.claude\)|(tool|find)\("(claude|codex|pi|opencode)"\)|/bin/(claude|codex|pi|opencode)\b|claude\.ai/install|"--output-format"|\["exec"\]|\["run""#)
         var found: Set<String> = []
         let files = FileManager.default.enumerator(at: src, includingPropertiesForKeys: nil)!
         for case let f as URL in files where f.pathExtension == "swift" {

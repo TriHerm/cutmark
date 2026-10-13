@@ -1,7 +1,7 @@
 import Foundation
 
 // Finish setup takes any one signed-in agent (2026-10-12). Before, it asked every Mac for Claude Code,
-// so a Codex or pi user downloaded 240 MB they did not need. Now Takes installs Claude Code only
+// so a Codex, pi or opencode user downloaded 240 MB they did not need. Now Takes installs Claude Code only
 // when no agent is here; each agent says here how to check its sign-in and how to sign in.
 
 extension AgentKind {
@@ -11,6 +11,9 @@ extension AgentKind {
         case .claude: return Self.claudeSignedIn(AgentCheck.run(exe, ["auth", "status"]) ?? "")
         case .codex: return Self.codexSignedIn(AgentCheck.run(exe, ["login", "status"], errors: true))
         case .pi: return Self.piSignedIn()
+        // opencode can use stored credentials, environment credentials, or local providers. There is
+        // no universal login bit, so an installed CLI is ready and surfaces provider errors on use.
+        case .opencode: return true
         }
     }
 
@@ -50,6 +53,7 @@ extension AgentKind {
         case .claude: return (["auth", "login"], "Sign in to Claude Code for Takes. Your browser opens.")
         case .codex: return (["login"], "Sign in to Codex for Takes. Your browser opens.")
         case .pi: return ([], "Sign in to a model provider for pi: type /login, pick one, then type /quit.")
+        case .opencode: return (["auth", "login"], "Choose a provider for opencode, then return to Takes.")
         }
     }
 }

@@ -13,6 +13,7 @@ import array
 import concurrent.futures
 import glob
 import hashlib
+import http.server
 import json
 import math
 import os
@@ -13706,7 +13707,7 @@ def listed(name, desc, props, req):
     return out
 
 
-# ---------- JSON-RPC over stdio ----------
+# ---------- JSON-RPC transports ----------
 
 # Which tool for which step, at the end of the instructions: an agent finds the tool without a search.
 TOOL_INDEX = ("Tools by step. Start: get_session (takes, script, open comments, rules), list_sessions. Plan: "
@@ -13720,25 +13721,40 @@ IDEAS_NOTE = (" Ideas: when the user has an idea, in any chat, file it with add_
               "thumbnail_prompt) and say what you filed; list_ideas and update_idea for the rest.") if SOCIAL else ""
 
 
-def reply(id_, result=None, error=None):
+def response(id_, result=None, error=None):
     msg = {"jsonrpc": "2.0", "id": id_}
     if error:
         msg["error"] = error
     else:
         msg["result"] = result
+    return msg
+
+
+def reply(id_, result=None, error=None):
+    msg = response(id_, result, error)
     sys.stdout.write(json.dumps(msg) + "\n")
     sys.stdout.flush()
 
 
-def handle(msg):
+def dispatch(msg):
     method, id_ = msg.get("method"), msg.get("id")
+    # A client response to a server request. Takes never sends server requests today, but accepting
+    # one as a no-op keeps the JSON-RPC transport correct and future-proof.
+    if method is None and ("result" in msg or "error" in msg):
+        return None
     if id_ is None:
-        return  # notification
+        return None  # notification
     if method == "initialize":
-        v = (msg.get("params") or {}).get("protocolVersion") or PROTOCOL
-        reply(id_, {"protocolVersion": v, "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "takes", "version": "0.5"},
-                    "instructions": "Takes is the user's video recorder. Library = projects > sessions > takes. "
+        # A client without a Takes/Claude chat id may keep this MCP process alive across sessions
+        # (notably ChatGPT through a tunnel). A new MCP initialize is a safe conversation boundary:
+        # rules shown in an older client session must not disappear from the new one.
+        if not chat_id():
+            SEEN.pop(None, None)
+        proposed = (msg.get("params") or {}).get("protocolVersion") or PROTOCOL
+        v = proposed if proposed == PROTOCOL else PROTOCOL
+        return response(id_, {"protocolVersion": v, "capabilities": {"tools": {}},
+                              "serverInfo": {"name": "takes", "version": "0.5"},
+                              "instructions": "Takes is the user's video recorder. Library = projects > sessions > takes. "
                                     "Every tool takes a session's path or its id (get_session); an old path still "
                                     "works after a rename. Cut takes with rough_cut (a first draft: improve it freely) "
                                     "or cut_take by default: they fix the audio offset and frame rate. For what "
@@ -13810,15 +13826,14 @@ def handle(msg):
                                     + IDEAS_NOTE
                                     + (CORE_NOTE if core_only() else "")})
     elif method == "ping":
-        reply(id_, {})
+        return response(id_, {})
     elif method == "tools/list":
-        reply(id_, {"tools": [listed(n, d, props, req) for n, d, props, req, _ in TOOLS if shown_tool(n)]})
+        return response(id_, {"tools": [listed(n, d, props, req) for n, d, props, req, _ in TOOLS if shown_tool(n)]})
     elif method == "tools/call":
         p = msg.get("params") or {}
         tool = BY_NAME.get(p.get("name"))
         if not tool:
-            reply(id_, error={"code": -32602, "message": "Unknown tool %s" % p.get("name")})
-            return
+            return response(id_, error={"code": -32602, "message": "Unknown tool %s" % p.get("name")})
         try:
             RESOLVED.clear()
             out = tool[4](p.get("arguments") or {})
@@ -13830,11 +13845,176 @@ def handle(msg):
                     moved = "The session moved to %s. Use this path or the id from now on." % path
                     out = dict(out, resolved_from=ref,
                                note=moved + (" " + out["note"] if isinstance(out.get("note"), str) else ""))
-            reply(id_, {"content": [{"type": "text", "text": json.dumps(out, indent=2, ensure_ascii=False)}]})
+            return response(id_, {"content": [{"type": "text", "text": json.dumps(out, indent=2, ensure_ascii=False)}]})
         except Exception as e:
-            reply(id_, {"content": [{"type": "text", "text": "Error: %s" % e}], "isError": True})
+            return response(id_, {"content": [{"type": "text", "text": "Error: %s" % e}], "isError": True})
     else:
-        reply(id_, error={"code": -32601, "message": "Method not found: %s" % method})
+        return response(id_, error={"code": -32601, "message": "Method not found: %s" % method})
+
+
+def handle(msg):
+    out = dispatch(msg)
+    if out is None:
+        return
+    if "error" in out:
+        reply(out.get("id"), error=out["error"])
+    else:
+        reply(out.get("id"), result=out.get("result"))
+
+
+class MCPHTTPHandler(http.server.BaseHTTPRequestHandler):
+    """Stateless Streamable HTTP in JSON response mode. Takes has no server-to-client requests or
+    notifications, so one POST can carry one complete MCP request/response without an SSE session."""
+
+    server_version = "TakesMCP/0.5"
+
+    def log_message(self, format_, *args):
+        sys.stderr.write("takes-mcp: " + (format_ % args) + "\n")
+
+    def cors(self):
+        origin = self.headers.get("Origin")
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "content-type, accept, authorization, mcp-protocol-version")
+
+    def origin_ok(self):
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        try:
+            u = urllib.parse.urlparse(origin)
+            return u.scheme in ("http", "https") and u.hostname in ("127.0.0.1", "localhost", "::1")
+        except ValueError:
+            return False
+
+    def reject_origin(self):
+        if self.origin_ok():
+            return False
+        body = b"Forbidden origin\n"
+        self.send_response(403)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return True
+
+    def do_OPTIONS(self):
+        if self.path != "/mcp":
+            self.send_error(404)
+            return
+        if self.reject_origin():
+            return
+        self.send_response(204)
+        self.cors()
+        self.end_headers()
+
+    def do_GET(self):
+        if self.reject_origin():
+            return
+        if self.path == "/":
+            body = b"Takes MCP\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/mcp":
+            self.send_response(405)
+            self.send_header("Allow", "POST, OPTIONS")
+            self.end_headers()
+            return
+        self.send_error(404)
+
+    def do_DELETE(self):
+        if self.reject_origin():
+            return
+        if self.path == "/mcp":
+            self.send_response(405)
+            self.send_header("Allow", "POST, OPTIONS")
+            self.end_headers()
+            return
+        self.send_error(404)
+
+    def do_POST(self):
+        if self.path != "/mcp":
+            self.send_error(404)
+            return
+        if self.reject_origin():
+            return
+        media = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if media != "application/json":
+            self.send_error(415, "Content-Type must be application/json")
+            return
+        accept = {x.split(";", 1)[0].strip().lower() for x in self.headers.get("Accept", "").split(",") if x.strip()}
+        if not {"application/json", "text/event-stream"} <= accept:
+            self.send_error(406, "Accept must include application/json and text/event-stream")
+            return
+        token = getattr(self.server, "takes_token", None)
+        if token and not secrets.compare_digest(self.headers.get("Authorization", ""), "Bearer " + token):
+            body = json.dumps({"jsonrpc": "2.0", "id": None,
+                               "error": {"code": -32001, "message": "Unauthorized"}}).encode()
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("WWW-Authenticate", "Bearer")
+            self.cors()
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+            if size <= 0 or size > 8 * 1024 * 1024:
+                raise ValueError("invalid Content-Length")
+            msg = json.loads(self.rfile.read(size))
+            if not isinstance(msg, dict):
+                raise ValueError("one JSON-RPC object is required")
+            method = msg.get("method")
+            if method != "initialize" and self.headers.get("MCP-Protocol-Version") != PROTOCOL:
+                body = json.dumps(response(msg.get("id"), error={
+                    "code": -32600,
+                    "message": "MCP-Protocol-Version must be %s" % PROTOCOL,
+                })).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.cors()
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            out = dispatch(msg)
+        except (ValueError, json.JSONDecodeError) as e:
+            out = response(None, error={"code": -32700, "message": "Invalid request: %s" % e})
+            status = 400
+        except Exception as e:
+            out = response(None, error={"code": -32603, "message": "Internal error: %s" % e})
+            status = 500
+        else:
+            status = 202 if out is None else 200
+        body = b"" if out is None else json.dumps(out).encode()
+        self.send_response(status)
+        if body:
+            self.send_header("Content-Type", "application/json")
+        self.cors()
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+
+def http_main(host="127.0.0.1", port=8765, token=None):
+    """Serve the same MCP over stateless Streamable HTTP. Default loopback is for MCP Inspector or
+    OpenAI Secure MCP Tunnel. A non-loopback listener requires TAKES_MCP_TOKEN."""
+    if host not in ("127.0.0.1", "localhost", "::1") and not token:
+        raise ValueError("TAKES_MCP_TOKEN is required when --http listens beyond localhost")
+    # Several Takes tool helpers keep small process-global caches. Serialize HTTP requests until those
+    # caches become request-local so two clients cannot race through one library process.
+    server = http.server.HTTPServer((host, port), MCPHTTPHandler)
+    server.takes_token = token
+    address, actual_port = server.server_address[:2]
+    print("takes-mcp: http://%s:%s/mcp" % (address, actual_port), file=sys.stderr, flush=True)
+    server.serve_forever()
 
 
 # ---------- short tool list ----------
@@ -14060,6 +14240,10 @@ if __name__ == "__main__":
             print("%s: %s" % (agent, status))
     elif sys.argv[1:2] == ["--agents"]:
         print(json.dumps(agents_status()))
+    elif sys.argv[1:2] == ["--http"]:
+        host = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("TAKES_MCP_HOST", "127.0.0.1")
+        port = int(sys.argv[3]) if len(sys.argv) > 3 else int(os.environ.get("TAKES_MCP_PORT", "8765"))
+        http_main(host, port, os.environ.get("TAKES_MCP_TOKEN"))
     elif sys.argv[1:2] == ["--voice-run"]:
         voice_run(*sys.argv[2:5])
     elif sys.argv[1:2] == ["--take-cut"]:

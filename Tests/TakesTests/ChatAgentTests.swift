@@ -73,6 +73,126 @@ struct CodexParseTests {
     }
 }
 
+struct OpenCodeParseTests {
+    @Test func anOpenCodeTurnBecomesMessagesStepsAndAReusableSession() {
+        var p = ChatParser([], adapter: OpenCodeAdapter())
+        for line in [
+            #"{"type":"step_start","sessionID":"ses-77","part":{"type":"step-start"}}"#,
+            #"{"type":"tool_use","sessionID":"ses-77","part":{"type":"tool","callID":"call-1","tool":"read","state":{"status":"completed","input":{"file_path":"script.md"}}}}"#,
+            #"{"type":"text","sessionID":"ses-77","part":{"type":"text","text":"Done from opencode."}}"#,
+            #"{"type":"step_finish","sessionID":"ses-77","part":{"type":"step-finish","tokens":{"input":120,"output":20,"reasoning":3,"cache":{"read":10,"write":0}}}}"#,
+        ] { p.consume(line) }
+        #expect(p.started && !p.finished, "step_finish ends one model step, not the whole opencode process")
+        #expect(p.thread == "ses-77")
+        #expect(p.messages.map(\.text) == ["read · script.md", "Done from opencode."])
+        #expect(p.messages.allSatisfy { $0.done })
+        #expect(p.context?.used == 153)
+    }
+
+    @Test func anOpenCodeToolErrorAndProviderErrorStayVisible() {
+        var p = ChatParser([], adapter: OpenCodeAdapter())
+        p.consume(#"{"type":"tool_use","sessionID":"ses-1","part":{"type":"tool","callID":"call-1","tool":"bash","state":{"status":"error","input":{"command":"x"}}}}"#)
+        #expect(p.messages.last?.failed == true)
+        p.consume(#"{"type":"error","sessionID":"ses-1","error":{"message":"Provider unavailable"}}"#)
+        #expect(p.finished)
+        #expect(p.messages.last?.role == .error && p.messages.last?.text == "Provider unavailable")
+    }
+
+    @Test func opencodeChatArgumentsAndEnvironmentAreProcessLocal() {
+        let adapter = OpenCodeAdapter()
+        let fresh = ChatTurn(context: "Be short.", model: "", conversation: "c-1", thread: nil,
+                             started: false, access: "bypassPermissions", board: nil)
+        #expect(adapter.chatArguments(fresh) == ["run", "--format", "json", "--agent", "takes-chat"])
+        let resumed = ChatTurn(context: "Use Takes.", model: "", conversation: "c-1", thread: "ses-77",
+                               started: true, access: "acceptEdits", board: nil)
+        #expect(adapter.chatArguments(resumed).suffix(2) == ["--session", "ses-77"])
+        let env = adapter.chatEnvironment(resumed, base: ["TAKES_CHAT_ID": "c-1"])
+        #expect(env["TAKES_CHAT_ID"] == "c-1")
+        #expect(env["OPENCODE_CONFIG_CONTENT"]?.contains("takes-chat") == true)
+        #expect(env["OPENCODE_CONFIG_CONTENT"]?.contains("Use Takes.") == true)
+        #expect(env["OPENCODE_PERMISSION"]?.contains(#""bash":"deny""#) == true)
+    }
+}
+
+@MainActor
+@Suite(.serialized)
+struct OpenCodeRunTests {
+    let dir: URL
+    let session: URL
+
+    init() throws {
+        dir = FileManager.default.temporaryDirectory.appending(path: "fakeopencode-\(UUID().uuidString)")
+        session = dir.appending(path: "P/2026-10-13-test")
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        let script = dir.appending(path: "opencode")
+        try """
+        #!/bin/bash
+        n=$(( $(cat "\(dir.path)/n" 2>/dev/null || echo 0) + 1 )); echo $n > "\(dir.path)/n"
+        printf '%s\\n' "$@" > "\(dir.path)/args-$n.txt"
+        printf '%s' "$OPENCODE_CONFIG_CONTENT" > "\(dir.path)/config-$n.json"
+        printf '%s' "$OPENCODE_PERMISSION" > "\(dir.path)/permission-$n.json"
+        cat > "\(dir.path)/ask-$n.txt"
+        echo '{"type":"step_start","sessionID":"ses-77","part":{"type":"step-start"}}'
+        echo '{"type":"text","sessionID":"ses-77","part":{"type":"text","text":"Hi from opencode"}}'
+        echo '{"type":"step_finish","sessionID":"ses-77","part":{"type":"step-finish","tokens":{"input":10,"output":2}}}'
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        Agents.overrides[.opencode] = script.path
+    }
+
+    func args(_ n: Int) -> [String] {
+        ((try? String(contentsOf: dir.appending(path: "args-\(n).txt"), encoding: .utf8)) ?? "").components(separatedBy: "\n")
+    }
+
+    func until(_ ok: () -> Bool) async {
+        let end = Date().addingTimeInterval(15)
+        while !ok() && Date() < end { try? await Task.sleep(for: .milliseconds(50)) }
+    }
+
+    func cleanup() {
+        Agents.overrides[.opencode] = nil
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    @Test func anOpenCodeConversationPersistsAndResumesItsSession() async throws {
+        defer { cleanup() }
+        let chat = ClaudeChat(session: session)
+        chat.switchAgent(to: .opencode, remember: false)
+        chat.send("Cut it", title: "Test", onStage: nil)
+        await until { !chat.running && chat.messages.count == 2 }
+        #expect(chat.messages.map(\.text) == ["Cut it", "Hi from opencode"])
+        #expect(!args(1).contains("--session"))
+        chat.send("Again", title: "Test", onStage: nil)
+        await until { !chat.running && chat.messages.count == 4 }
+        #expect(args(2).contains("--session") && args(2).contains("ses-77"))
+        let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+        let log = try dec.decode(ChatLog.self, from: Data(contentsOf: ClaudeChat.file(session)))
+        #expect(log.agent == "opencode" && log.thread == "ses-77")
+        let config = try String(contentsOf: dir.appending(path: "config-1.json"), encoding: .utf8)
+        #expect(config.contains("takes-chat"))
+    }
+
+    @Test func aLaterProcessFailureIsNotHiddenByStepFinish() async throws {
+        defer { cleanup() }
+        let script = dir.appending(path: "opencode")
+        try """
+        #!/bin/bash
+        cat >/dev/null
+        echo '{"type":"step_start","sessionID":"ses-fail","part":{"type":"step-start"}}'
+        echo '{"type":"text","sessionID":"ses-fail","part":{"type":"text","text":"Partial"}}'
+        echo '{"type":"step_finish","sessionID":"ses-fail","part":{"type":"step-finish","tokens":{"input":5,"output":1}}}'
+        echo 'provider failed after tool step' >&2
+        exit 7
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        let chat = ClaudeChat(session: session)
+        chat.switchAgent(to: .opencode, remember: false)
+        chat.send("Try it", title: "Test", onStage: nil)
+        await until { !chat.running && chat.messages.count >= 3 }
+        #expect(chat.messages.contains { $0.role == .error && $0.text.contains("provider failed after tool step") })
+    }
+}
+
 /// A fake codex: saves its arguments and the ask, starts a thread, answers.
 @MainActor
 @Suite(.serialized)

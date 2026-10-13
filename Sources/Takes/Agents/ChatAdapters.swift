@@ -23,6 +23,8 @@ struct ChatTurn {
 
 protocol ChatAdapter: AgentAdapter {
     func chatArguments(_ t: ChatTurn) -> [String]
+    /// Provider-specific, process-only chat configuration.
+    func chatEnvironment(_ t: ChatTurn, base: [String: String]) -> [String: String]
     /// One output line, already read as JSON, into the parser.
     func consume(_ type: String, _ o: [String: Any], into p: inout ChatParser)
     /// Has Claude in Chrome: the chat gets the browser rules.
@@ -33,6 +35,13 @@ protocol ChatAdapter: AgentAdapter {
     func lost(_ stderr: String) -> Bool
     /// A turn that ends cleanly with no text is a failure. Claude Code: no (a /compact turn has none).
     var answersEveryTurn: Bool { get }
+    /// The CLI has no whole-turn terminal event; exit 0 is its terminal signal.
+    var finishesOnCleanExit: Bool { get }
+}
+
+extension ChatAdapter {
+    func chatEnvironment(_ t: ChatTurn, base: [String: String]) -> [String: String] { base }
+    var finishesOnCleanExit: Bool { false }
 }
 
 // MARK: Claude Code
@@ -365,5 +374,76 @@ extension PiAdapter: ChatAdapter {
             return "mcp"
         }
         return ChatParser.describe(names[name] ?? name, args)
+    }
+}
+
+// MARK: opencode
+
+/// opencode's JSON runner creates a session on the first message and resumes it with `--session`.
+/// Its system prompt and permissions are supplied only to this process, so Takes never rewrites the
+/// user's global opencode configuration.
+extension OpenCodeAdapter: ChatAdapter {
+    var browser: Bool { false }
+    var compacts: Bool { false }
+    var answersEveryTurn: Bool { true }
+    var finishesOnCleanExit: Bool { true }
+    func lost(_ stderr: String) -> Bool { false }
+
+    func chatArguments(_ t: ChatTurn) -> [String] {
+        ["run", "--format", "json", "--agent", "takes-chat"]
+            + ((t.started ? t.thread : nil).map { ["--session", $0] } ?? [])
+            + (t.model.isEmpty ? [] : ["--model", t.model])
+    }
+
+    func chatEnvironment(_ t: ChatTurn, base: [String: String]) -> [String: String] {
+        var env = base
+        let agent: [String: Any] = ["description": "Takes video assistant", "mode": "primary", "prompt": t.context]
+        let config: [String: Any] = ["agent": ["takes-chat": agent]]
+        if let d = try? JSONSerialization.data(withJSONObject: config, options: [.sortedKeys]) {
+            env["OPENCODE_CONFIG_CONTENT"] = String(decoding: d, as: UTF8.self)
+        }
+        let permissions = t.access == "acceptEdits"
+            ? ["*": "allow", "bash": "deny", "external_directory": "deny"]
+            : ["*": "allow", "external_directory": "allow", "doom_loop": "allow"]
+        if let d = try? JSONSerialization.data(withJSONObject: permissions, options: [.sortedKeys]) {
+            env["OPENCODE_PERMISSION"] = String(decoding: d, as: UTF8.self)
+        }
+        return env
+    }
+
+    func consume(_ type: String, _ o: [String: Any], into p: inout ChatParser) {
+        if let session = o["sessionID"] as? String, !session.isEmpty {
+            p.started = true
+            if p.thread == nil { p.thread = session }
+        }
+        switch type {
+        case "step_start":
+            p.started = true
+        case "text":
+            guard let part = o["part"] as? [String: Any], let text = part["text"] as? String else { return }
+            let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { p.messages.append(ChatMessage(role: .claude, text: t)) }
+        case "tool_use":
+            guard let part = o["part"] as? [String: Any] else { return }
+            let state = part["state"] as? [String: Any] ?? [:]
+            let id = part["callID"] as? String
+            let line = ChatParser.describe(part["tool"] as? String ?? "tool", state["input"] as? [String: Any] ?? [:])
+            let failed = state["status"] as? String == "error"
+            p.messages.append(ChatMessage(role: .tool, text: line, toolID: id, done: true))
+            if failed, let i = p.messages.indices.last { p.messages[i].failed = true }
+        case "step_finish":
+            if let part = o["part"] as? [String: Any], let u = part["tokens"] as? [String: Any] {
+                let cache = u["cache"] as? [String: Any] ?? [:]
+                let used = u["total"] as? Int ?? ["input", "output", "reasoning"].reduce(0) { $0 + (u[$1] as? Int ?? 0) }
+                    + (cache["read"] as? Int ?? 0) + (cache["write"] as? Int ?? 0)
+                if used > 0 { p.setUsed(used) }
+            }
+        case "error":
+            p.finished = true
+            p.closeOpen()
+            let e = Self.error(o["error"]) ?? o["message"] as? String ?? "opencode stopped."
+            p.messages.append(ChatMessage(role: .error, text: e))
+        default: break
+        }
     }
 }

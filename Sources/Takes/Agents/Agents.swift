@@ -6,16 +6,17 @@ import Foundation
 // output (AgentReply). Only the files in Agents/ name a CLI: AgentGuardTests fails on one anywhere else.
 //
 // Which agent: the one picked in Settings › Agents when it is on this Mac, else the first one here
-// (Claude Code, Codex, pi). Tests point `overrides` at fake CLIs.
+// (Claude Code, Codex, pi, opencode). Tests point `overrides` at fake CLIs.
 
 enum AgentKind: String, CaseIterable, Codable, Sendable {
-    case claude, codex, pi
+    case claude, codex, pi, opencode
 
     var name: String {
         switch self {
         case .claude: return "Claude Code"
         case .codex: return "Codex"
         case .pi: return "pi"
+        case .opencode: return "opencode"
         }
     }
 
@@ -24,6 +25,7 @@ enum AgentKind: String, CaseIterable, Codable, Sendable {
         case .claude: return ClaudeAdapter()
         case .codex: return CodexAdapter()
         case .pi: return PiAdapter()
+        case .opencode: return OpenCodeAdapter()
         }
     }
 }
@@ -61,11 +63,16 @@ struct AgentReply: Equatable, Sendable {
 protocol AgentAdapter: Sendable {
     var kind: AgentKind { get }
     func arguments(_ r: AgentRequest) -> [String]
+    /// A request-local environment. The default is Takes' normal agent environment; providers may
+    /// add process-only configuration without changing the user's global CLI config.
+    func environment(_ r: AgentRequest, base: [String: String]) -> [String: String]
     /// `out`: stdout. `err`: stderr, for when stdout has no answer.
     func reply(out: String, err: String, status: Int32) -> AgentReply
 }
 
 extension AgentAdapter {
+    func environment(_ r: AgentRequest, base: [String: String]) -> [String: String] { base }
+
     /// The last line a failed run printed, for the error.
     func lastLine(_ s: String) -> String? {
         s.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.last { !$0.isEmpty }
@@ -86,7 +93,7 @@ enum Agents {
         switch k {  // the chat's own test hooks (Chat.swift)
         case .claude: if let o = ClaudeChat.claudeOverride { return o }
         case .codex: if let o = ClaudeChat.codexOverride { return o }
-        case .pi: break
+        case .pi, .opencode: break
         }
         return AppModel.testing ? nil : find(k)
     }
@@ -116,6 +123,7 @@ enum Agents {
         case (.codex, .fast): return CodexModels.list.last?.id
         case (.codex, .smart): return ChatAgent.codex.model.id
         case (.pi, _): return nil  // pi's own pick (pi config): it can be any provider
+        case (.opencode, _): return nil  // opencode's provider/model config is its own
         }
     }
 
@@ -135,7 +143,7 @@ enum Agents {
         p.executableURL = URL(fileURLWithPath: exe)
         p.arguments = a.arguments(r)
         p.currentDirectoryURL = r.folder
-        p.environment = ClaudeChat.environment()
+        p.environment = a.environment(r, base: ClaudeChat.environment())
         let input = Pipe(), out = Pipe(), err = Pipe()
         p.standardInput = input
         p.standardOutput = out

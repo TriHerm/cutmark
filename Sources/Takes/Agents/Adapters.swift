@@ -1,6 +1,6 @@
 import Foundation
 
-// The three agent CLIs, each in print mode: the request on stdin, one answer, then exit (2026-10-12).
+// The agent CLIs, each in print mode: the request on stdin, one answer, then exit (2026-10-12).
 // Output shapes are from real runs on this Mac; AgentsTests keeps a sample of each.
 
 /// `claude -p --output-format json`: one object, `result` is the answer, `is_error` says it failed.
@@ -86,5 +86,63 @@ struct PiAdapter: AgentAdapter {
             return text.isEmpty ? noAnswer(out, err, status) : AgentReply(text: text)
         }
         return noAnswer(out, err, status)
+    }
+}
+
+/// `opencode run --format json`: one terminal JSON event per completed text/tool part. Takes supplies
+/// permissions in the process environment so these small feature asks never modify the user's opencode config.
+struct OpenCodeAdapter: AgentAdapter {
+    var kind: AgentKind { .opencode }
+
+    func arguments(_ r: AgentRequest) -> [String] {
+        ["run", "--format", "json"]
+    }
+
+    func environment(_ r: AgentRequest, base: [String: String]) -> [String: String] {
+        var env = base
+        env["OPENCODE_PERMISSION"] = Self.permissions(tools: r.tools)
+        return env
+    }
+
+    static func permissions(tools: AgentRequest.Tools) -> String {
+        let p: [String: String]
+        switch tools {
+        case .none:
+            p = ["*": "deny"]
+        case .read:
+            p = ["*": "deny", "read": "allow", "list": "allow", "glob": "allow", "grep": "allow"]
+        }
+        let d = try? JSONSerialization.data(withJSONObject: p, options: [.sortedKeys])
+        return d.map { String(decoding: $0, as: UTF8.self) } ?? #"{"*":"deny"}"#
+    }
+
+    func reply(out: String, err: String, status: Int32) -> AgentReply {
+        var texts: [String] = [], failure: String?
+        for line in out.split(whereSeparator: \.isNewline) {
+            guard let e = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
+            switch e["type"] as? String {
+            case "text":
+                if let p = e["part"] as? [String: Any], let t = p["text"] as? String, !t.isEmpty { texts.append(t) }
+            case "error":
+                failure = Self.error(e["error"]) ?? e["message"] as? String ?? "opencode stopped."
+            default: break
+            }
+        }
+        if let failure { return .failed(failure) }
+        if status != 0 {
+            return .failed(lastLine(err) ?? "opencode stopped with exit \(status).")
+        }
+        let text = texts.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? noAnswer(out, err, status) : AgentReply(text: text)
+    }
+
+    static func error(_ value: Any?) -> String? {
+        if let s = value as? String, !s.isEmpty { return s }
+        if let o = value as? [String: Any] {
+            for k in ["message", "name", "type"] {
+                if let s = o[k] as? String, !s.isEmpty { return s }
+            }
+        }
+        return nil
     }
 }

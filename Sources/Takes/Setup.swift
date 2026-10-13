@@ -4,7 +4,7 @@ import Observation
 import SwiftUI
 
 /// What a new Mac needs before Takes works (2026-10-05): an agent, signed in, and ffmpeg. Until
-/// 2026-10-12 the agent had to be Claude Code; now any one of Claude Code, Codex or pi will do, and
+/// 2026-10-12 the agent had to be Claude Code; now Claude Code, Codex, pi or opencode will do, and
 /// Takes installs Claude Code only on a Mac with none (Agents/SignIn.swift).
 /// Since 2026-10-10 also Apple's developer tools: the takes MCP server runs on /usr/bin/python3,
 /// which without them is only a stub, so no agent could use Takes. Their fix opens Apple's dialog.
@@ -284,10 +284,12 @@ struct SetupPanel: View {
             Divider().overlay(Theme.border)
             VStack(alignment: .leading, spacing: 14) {
                 step(setup.agent == .ok ? "\(setup.target.name) is installed" : "Install Claude Code",
-                     "The assistant behind Takes. Codex or pi work too: install one of them instead, and Takes finds it.",
+                     "The assistant behind Takes. Codex, pi or opencode work too: install one of them instead, and Takes finds it.",
                      setup.agent, action: "Install", busy: "Installing…", setup.installAgent)
                 step("Sign in to \(setup.target.name)", setup.target == .pi
                      ? "Opens pi in Terminal: type /login and pick a provider. Come back here when you are done."
+                     : setup.target == .opencode
+                     ? "Opens opencode provider sign-in in Terminal. Pick a provider and come back here when you are done."
                      : "Opens Terminal and then your browser. Come back here when you are done.",
                      setup.agent == .ok ? setup.signedIn : .missing, action: "Sign in", busy: "Waiting…",
                      enabled: setup.agent == .ok, setup.signIn)
