@@ -204,7 +204,7 @@ final class ArticlePageHost: NSObject, WKScriptMessageHandler, WKNavigationDeleg
 
     override init() {
         let config = WKWebViewConfiguration()
-        config.setURLSchemeHandler(files, forURLScheme: "takes")
+        config.setURLSchemeHandler(files, forURLScheme: "cutmark")
         web = WKWebView(frame: .zero, configuration: config)
         super.init()
         // The page holds a weak link back: WKUserContentController keeps its handlers strongly.
@@ -218,7 +218,7 @@ final class ArticlePageHost: NSObject, WKScriptMessageHandler, WKNavigationDeleg
 
     private func load() {
         ready = false
-        web.loadHTMLString(ArticlePage.html, baseURL: URL(string: "takes://session/"))
+        web.loadHTMLString(ArticlePage.html, baseURL: URL(string: "cutmark://session/"))
     }
 
     /// A new article view takes the page: it renders its own article at once, from the top.
@@ -250,7 +250,7 @@ final class ArticlePageHost: NSObject, WKScriptMessageHandler, WKNavigationDeleg
     func webView(_ web: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         if action.navigationType == .linkActivated, let u = action.request.url {
-            if u.scheme == "takes", let s = files.session {
+            if u.scheme == "cutmark", let s = files.session {
                 NSWorkspace.shared.openSoon(s.appending(path: String(u.path.dropFirst())))
             } else { NSWorkspace.shared.openSoon(u) }
             decisionHandler(.cancel); return
@@ -274,7 +274,7 @@ final class ArticlePageHost: NSObject, WKScriptMessageHandler, WKNavigationDeleg
     }
 }
 
-/// takes://session/<path> serves a file of the session; takes://font/<name> a font of the app.
+/// cutmark://session/<path> serves a file of the session; cutmark://font/<name> a font of the app.
 final class SessionFiles: NSObject, WKURLSchemeHandler {
     var session: URL?
 

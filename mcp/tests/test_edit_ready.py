@@ -321,8 +321,8 @@ class Prepare(Base):
         open(p, "w").write("{bad json")
         with self.assertRaises(t.PrepareError) as e:
             t.prepare_take(self.s, 1)
-        self.assertEqual(str(e.exception), "Takes cannot read take-01-camera.words.json. Takes did not change it. "
-                                           "Move it out of the session folder, then try again: Takes finds the words "
+        self.assertEqual(str(e.exception), "Cutmark cannot read take-01-camera.words.json. Cutmark did not change it. "
+                                           "Move it out of the session folder, then try again: Cutmark finds the words "
                                            "again.")
         self.assertEqual(open(p).read(), "{bad json")
 
@@ -333,7 +333,7 @@ class Prepare(Base):
                                                                 "startedAt": "2026-10-11T00:00:00Z"}]))
         with self.assertRaises(t.PrepareError) as e:
             t.prepare_take(self.s, 1)
-        self.assertEqual(str(e.exception), "Take 1 has no sound. Takes cannot find words in it.")
+        self.assertEqual(str(e.exception), "Take 1 has no sound. Cutmark cannot find words in it.")
 
     def test_prepare_follows_take_rename(self):
         self.add_take()
@@ -476,8 +476,8 @@ class Prepare(Base):
         os.environ["TAKES_TEST_CODE"] = "3"
         with self.assertRaises(t.PrepareError) as e:
             t.prepare_take(self.s, 1)
-        self.assertEqual(str(e.exception), "Takes could not download the speech model. Connect to the internet. "
-                                           "Takes tries again at the next cut.")
+        self.assertEqual(str(e.exception), "Cutmark could not download the speech model. Connect to the internet. "
+                                           "Cutmark tries again at the next cut.")
         self.assertTrue(os.path.exists(os.path.join(self.root, ".prepare-offline")))
 
     def test_prepare_job_progress_and_reason(self):

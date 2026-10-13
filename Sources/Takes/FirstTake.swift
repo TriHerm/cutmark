@@ -2,10 +2,10 @@ import AVFoundation
 import AppKit
 import SwiftUI
 
-/// The first take (2026-10-08, from the "Takes First Take Moment" prototype). After the first take
+/// The first take (2026-10-08, from the "Cutmark First Take Moment" prototype). After the first take
 /// someone ever records, a card over the window: 1, a small party (the take shrinks into a tile,
 /// the mascot jumps, confetti, a chime, the numbers count up); 2, the next step: ask Takes for the
-/// edit. "Ask Takes to edit" sends that ask with the take to the session's chat, opens Assets
+/// edit. "Ask Cutmark to edit" sends that ask with the take to the session's chat, opens Assets
 /// (where the edit lands) with the chat beside it, and puts "Your first video" in the sidebar:
 /// Record, Ask for the edit, Post it. Each step ticks off by itself; the guide goes after the
 /// first post. Shown once. Help › Show First Take Again shows it for the open session.
@@ -196,7 +196,7 @@ private struct FirstTakeCard: View {
                 Button("Back") { flow.go(0) }.buttonStyle(AccentButtonStyle(kind: .quiet))
                 if flow.canEdit {
                     Button { flow.askForEdit(app: app) } label: {
-                        HStack(spacing: 6) { Image(systemName: "sparkles").font(.system(size: 11, weight: .bold)); Text("Ask Takes to edit") }
+                        HStack(spacing: 6) { Image(systemName: "sparkles").font(.system(size: 11, weight: .bold)); Text("Ask Cutmark to edit") }
                     }
                     .buttonStyle(AccentButtonStyle(kind: .accent))
                     .keyboardShortcut(.defaultAction)
@@ -510,8 +510,8 @@ private struct NextScene: View {
     @State private var stage = 0
 
     var body: some View {
-        PageFrame(title: "Now ask Takes for the edit.",
-                  text: "Say what you want in plain words. Takes cuts the pauses, adds captions and puts the video on Assets. Then it writes the post.",
+        PageFrame(title: "Now ask Cutmark for the edit.",
+                  text: "Say what you want in plain words. Cutmark cuts the pauses, adds captions and puts the video on Assets. Then it writes the post.",
                   note: FirstTake.shared.canEdit ? nil : "First, finish setup: two minutes, once.",
                   after: 3) {
             VStack(spacing: 16) {
@@ -649,11 +649,11 @@ struct FirstVideoGuide: View {
                     .animation(Theme.spring, value: posted)
                 row(1, "Record", state: .done, detail: nil) {}
                 row(2, "Ask for the edit", state: edited ? .done : .now,
-                    detail: edited ? nil : chat?.running == true ? "Takes is editing…" : "Takes cuts it for you") {
+                    detail: edited ? nil : chat?.running == true ? "Cutmark is editing…" : "Cutmark cuts it for you") {
                     open(session, .assets, chat: true)
                 }
                 row(3, "Post it", state: posted ? .done : edited ? .now : .later,
-                    detail: edited && !posted ? "Takes writes the post" : nil) {
+                    detail: edited && !posted ? "Cutmark writes the post" : nil) {
                     open(session, .post, chat: false)
                 }
             }

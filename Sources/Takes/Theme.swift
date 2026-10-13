@@ -7,7 +7,7 @@ import SwiftUI
 /// Source: the Takes brand kit (2026-10-02). Cloud White, Deep Navy #102A56, Clear Blue #3B82F6,
 /// Mist Gray #E7ECF4, Fresh Mint #DFF7E9. Nunito for headings, Inter for everything else.
 /// Calm and friendly: navy ink on white, one blue accent for meaning, mint for "it went out".
-/// That is the "Takes" palette; Settings › Appearance offers others (Look.swift).
+/// That is the "Cutmark" palette; Settings › Appearance offers others (Look.swift).
 enum Theme {
     // MARK: Colors
     // From the picked palette and accent (Look, Settings › Appearance). Each follows light and dark.

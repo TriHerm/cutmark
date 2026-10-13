@@ -724,7 +724,7 @@ struct ReviewPlayer: View {
         guard !text.isEmpty else { return }
         let c = store.add(media: url, start: d.start, end: d.end, rect: d.rect, text: text)
         withAnimation(Theme.motion) { draft = nil }
-        if let c { app.show(toast: "Comment \(c.id) saved for Takes") }
+        if let c { app.show(toast: "Comment \(c.id) saved for Cutmark") }
     }
 
     private func cancel() {
@@ -1199,7 +1199,7 @@ struct CommentCard: View {
                 .help("Click to edit")
             ForEach(Array((comment.replies ?? []).enumerated()), id: \.offset) { _, r in
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(r.by == "user" ? "you" : r.by == "claude" ? "Takes" : r.by).font(Theme.mono(10, .medium))
+                    Text(r.by == "user" ? "you" : r.by == "claude" ? "Cutmark" : r.by).font(Theme.mono(10, .medium))
                         .foregroundStyle(r.by == "user" ? .white.opacity(0.45) : Theme.accent)
                     VStack(alignment: .leading, spacing: 3) {
                         if !r.text.isEmpty {
@@ -1335,7 +1335,7 @@ struct StillReview: View {
         guard !text.isEmpty else { return }
         let c = store.add(media: url, rect: d.rect, text: text)
         withAnimation(Theme.motion) { draft = nil }
-        if let c { app.show(toast: "Comment \(c.id) saved for Takes") }
+        if let c { app.show(toast: "Comment \(c.id) saved for Cutmark") }
     }
 
     private var bar: some View {
@@ -1383,7 +1383,7 @@ struct StillReview: View {
 struct GlassPlayer: View {
     let url: URL
     var autoplay = true
-    /// Shows an "open in Takes" button on the bar.
+    /// Shows an "open in Cutmark" button on the bar.
     var onOpen: (() -> Void)?
     @StateObject private var clock: PlayerClock
     @State private var chrome = true
@@ -1456,7 +1456,7 @@ struct GlassPlayer: View {
                     Image(systemName: "arrow.up.right").font(.system(size: 12, weight: .semibold))
                         .frame(width: 26, height: 26).contentShape(Circle())
                 }
-                .buttonStyle(BarIconStyle()).help("Open it in Takes")
+                .buttonStyle(BarIconStyle()).help("Open it in Cutmark")
             }
         }
         .padding(.leading, 5).padding(.trailing, 6).padding(.vertical, 5)

@@ -29,7 +29,7 @@ final class Dictation: ObservableObject {
         guard !active else { return }
         problem = nil
         guard await AVCaptureDevice.requestAccess(for: .audio) else {
-            problem = "Takes needs the microphone: System Settings › Privacy & Security › Microphone."
+            problem = "Cutmark needs the microphone: System Settings › Privacy & Security › Microphone."
             return
         }
         let input = engine.inputNode
@@ -42,7 +42,7 @@ final class Dictation: ObservableObject {
             guard let self, self.run == mine else { return }
             if let words { self.text = words }
             if let failure, self.text.isEmpty {
-                self.problem = "Takes couldn't hear words: \(failure)"
+                self.problem = "Cutmark couldn't hear words: \(failure)"
                 self.cancel()
             }
         }
@@ -249,7 +249,7 @@ final class RecognizerListener: Listener {
             SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0 == .authorized) }
         }
         guard allowed else {
-            problem("Takes needs speech recognition: System Settings › Privacy & Security.")
+            problem("Cutmark needs speech recognition: System Settings › Privacy & Security.")
             return nil
         }
         guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable else {

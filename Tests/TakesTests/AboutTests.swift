@@ -5,10 +5,9 @@ import Testing
 
 @MainActor
 struct AboutTests {
-    @Test func linksPointAtTheRepoAndPayPal() {
-        #expect(About.repo.absoluteString == "https://github.com/marvtub/takes-public")
-        #expect(About.coffee.host == "paypal.me")
-        #expect(BrandMark.image("paypal") != nil)
+    @Test func linksPointAtCutmarkAndItsFoundation() {
+        #expect(About.repo.absoluteString == "https://github.com/TriHerm/cutmark")
+        #expect(About.upstream.absoluteString == "https://github.com/marvtub/takes-public")
         #expect(BrandMark.image("github") != nil)
     }
 

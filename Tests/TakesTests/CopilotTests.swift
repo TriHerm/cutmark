@@ -189,10 +189,10 @@ struct CopilotTests {
     }
 
     @Test func fileEventsThatMatter() {
-        let root = URL(fileURLWithPath: "/m/Takes")
-        #expect(CopilotStore.matters(["/m/Takes/_library/comments/suggestions"], root: root))
-        #expect(!CopilotStore.matters(["/m/Takes/_library/comments/runs"], root: root))
-        #expect(!CopilotStore.matters(["/m/Takes/Proj/2026-10-02-x"], root: root))
+        let root = URL(fileURLWithPath: "/m/Cutmark")
+        #expect(CopilotStore.matters(["/m/Cutmark/_library/comments/suggestions"], root: root))
+        #expect(!CopilotStore.matters(["/m/Cutmark/_library/comments/runs"], root: root))
+        #expect(!CopilotStore.matters(["/m/Cutmark/Proj/2026-10-02-x"], root: root))
     }
 
     /// Posted counts per day, the running total, the streak, and 48h numbers only from measured comments.

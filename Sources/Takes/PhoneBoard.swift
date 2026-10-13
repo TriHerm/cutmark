@@ -89,7 +89,7 @@ extension PhoneServer {
                 guard let p = c.past().first(where: { $0.file.lastPathComponent == b["file"] }) else { return .error(404, "No such conversation") }
                 switch b["action"] {
                 case "resume":
-                    if c.running { return .error(409, "Takes is still replying. Try again when it is done.") }
+                    if c.running { return .error(409, "Cutmark is still replying. Try again when it is done.") }
                     c.resume(p)
                 case "forget": c.forget(p)
                 default: return .error(400, "Resume or forget?")
@@ -227,7 +227,7 @@ extension PhoneServer {
 
     /// Use on the phone asks the session's chat, as on the Mac: Takes never plays sound over a video.
     @MainActor private func soundChange(_ b: [String: String], in s: URL) -> PhoneResponse {
-        guard b["action"] == "use" else { return .error(400, "Use? Update the Takes app on the phone.") }
+        guard b["action"] == "use" else { return .error(400, "Use? Update the Cutmark app on the phone.") }
         let lib = SoundLib.dir(root: libraryRoot)
         guard let rel = b["file"], !rel.contains(".."), FileManager.default.fileExists(atPath: lib.appending(path: rel).path),
               let sound = SoundLib.scan(lib).first(where: { $0.rel == rel }) else { return .error(404, "No such sound") }

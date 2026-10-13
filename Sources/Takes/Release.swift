@@ -152,20 +152,20 @@ final class Releaser {
     /// A ready ask for an agent in the Takes repo: where it stopped, why and where the log is.
     var agentAsk: String {
         guard let r = run else { return "" }
-        var s = "The Takes public release stopped at \"\(r.failedStep?.title ?? "the start")\"."
+        var s = "The Cutmark public release stopped at \"\(r.failedStep?.title ?? "the start")\"."
         let why = r.failure
         if !why.items.isEmpty { s += " \(why.title):\n" + why.items.map { "- \($0)" }.joined(separator: "\n") }
         if let log = r.log { s += "\n\nFull log: \(log)" }
-        s += "\n\nFind the cause on main in \(Self.repo ?? "the Takes repo"), fix it, run ./test.sh, push to main, "
-            + "then run Takes > Release to GitHub again. The export swaps personal values for neutral ones "
+        s += "\n\nFind the cause on main in \(Self.repo ?? "the Cutmark repo"), fix it, run ./test.sh, push to main, "
+            + "then run Cutmark > Release to GitHub again. The export swaps personal values for neutral ones "
             + "(scripts/public/export.py), so a test can pass here and fail in the public copy."
         return s
     }
 
-    /// One line for the chat agents, so "release Takes" works from any chat.
+    /// One line for the chat agents, so "release Cutmark" works from any chat.
     nonisolated static var agentNote: String? {
         guard available, let repo else { return nil }
-        return "To release Takes to its public GitHub repo (only when asked), run in bash: \(command(repo)). It copies "
+        return "To release Cutmark to its public GitHub repo (only when asked), run in bash: \(command(repo)). It copies "
             + "origin/main without personal data, tests the copy and pushes it, then prints the result. "
             + "Never edit or build the public copy by hand."
     }
@@ -364,8 +364,8 @@ private extension Int {
 struct ReleaseAsk: View {
     @Bindable var releaser = Releaser.shared
     var body: some View {
-        TakesConfirm(title: "Release Takes to GitHub?",
-                     message: "Takes copies main without your personal data, builds and tests the copy, "
+        TakesConfirm(title: "Release Cutmark to GitHub?",
+                     message: "Cutmark copies main without your personal data, builds and tests the copy, "
                         + "and pushes it to the public repo. It runs in the background and takes a few minutes: "
                         + "the sidebar shows how far it is.",
                      confirm: "Release",

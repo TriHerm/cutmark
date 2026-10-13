@@ -164,8 +164,8 @@ extension CodexAdapter: ChatAdapter {
               "-c", "approval_policy=\"never\"",
               "-c", "developer_instructions=" + toml(context)]
         if takesInCodex {
-            a += ["-c", "mcp_servers.takes.env.TAKES_CHAT=\"1\"", "-c", "mcp_servers.takes.env.TAKES_CHAT_ID=" + toml(chat)]
-            if let board { a += ["-c", "mcp_servers.takes.env.TAKES_BOARD=" + toml(board)] }
+            a += ["-c", "mcp_servers.cutmark.env.TAKES_CHAT=\"1\"", "-c", "mcp_servers.cutmark.env.TAKES_CHAT_ID=" + toml(chat)]
+            if let board { a += ["-c", "mcp_servers.cutmark.env.TAKES_BOARD=" + toml(board)] }
         }
         if let thread { a.append(thread) }
         a.append("-")
@@ -189,13 +189,13 @@ extension CodexAdapter: ChatAdapter {
         return out + "\""
     }
 
-    /// Codex has the takes server in its config (AgentSetup adds it). Without it, -c on its env
+    /// Codex has the Cutmark server in its config (AgentSetup adds it). Without it, -c on its env
     /// would make a server with no command, and Codex would not start.
     static var hasTakes: Bool {
         let home = ProcessInfo.processInfo.environment["CODEX_HOME"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: ".codex")
         let text = (try? String(contentsOf: home.appending(path: "config.toml"), encoding: .utf8)) ?? ""
-        return text.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces).hasPrefix("[mcp_servers.takes") }
+        return text.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces).hasPrefix("[mcp_servers.cutmark") }
     }
 
     /// thread.started, item.started / item.completed (agent_message, mcp_tool_call, command_execution,
@@ -397,7 +397,7 @@ extension OpenCodeAdapter: ChatAdapter {
 
     func chatEnvironment(_ t: ChatTurn, base: [String: String]) -> [String: String] {
         var env = base
-        let agent: [String: Any] = ["description": "Takes video assistant", "mode": "primary", "prompt": t.context]
+        let agent: [String: Any] = ["description": "Cutmark video assistant", "mode": "primary", "prompt": t.context]
         let config: [String: Any] = ["agent": ["takes-chat": agent]]
         if let d = try? JSONSerialization.data(withJSONObject: config, options: [.sortedKeys]) {
             env["OPENCODE_CONFIG_CONTENT"] = String(decoding: d, as: UTF8.self)

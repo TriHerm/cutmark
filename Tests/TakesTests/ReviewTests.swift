@@ -96,18 +96,18 @@ struct IdleTests {
     }
 
     @Test func fileChangesMatchTheirFolder() {
-        let session = URL(fileURLWithPath: "/Movies/Takes/p/2026-09-27-x")
-        #expect(FileWatch.touches(["/Movies/Takes/p/2026-09-27-x"], session))
-        #expect(FileWatch.touches(["/Movies/Takes/p/2026-09-27-x/edits"], session))
-        #expect(!FileWatch.touches(["/Movies/Takes/p/2026-09-27-xy"], session))
-        #expect(!FileWatch.touches(["/Movies/Takes/p"], session))
+        let session = URL(fileURLWithPath: "/Movies/Cutmark/p/2026-09-27-x")
+        #expect(FileWatch.touches(["/Movies/Cutmark/p/2026-09-27-x"], session))
+        #expect(FileWatch.touches(["/Movies/Cutmark/p/2026-09-27-x/edits"], session))
+        #expect(!FileWatch.touches(["/Movies/Cutmark/p/2026-09-27-xy"], session))
+        #expect(!FileWatch.touches(["/Movies/Cutmark/p"], session))
     }
 
     @Test func chatSavesAreNotChanges() {
-        let s = "/Movies/Takes/p/2026-09-27-x"
+        let s = "/Movies/Cutmark/p/2026-09-27-x"
         #expect(FileWatch.folders([s + "/.claude-chat.json", s + "/.claude-chat.json.sb-aa06c7e4-H7mIXC"]).isEmpty)
         #expect(FileWatch.folders([s + "/script.md", s + "/edits/cut-v2.mp4"]) == [s, s + "/edits"])
-        #expect(FileWatch.folders([s]) == ["/Movies/Takes/p"])  // a new session folder: its project changed
+        #expect(FileWatch.folders([s]) == ["/Movies/Cutmark/p"])  // a new session folder: its project changed
     }
 
     @Test func watcherSeesAWrite() async throws {

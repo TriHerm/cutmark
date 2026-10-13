@@ -1,11 +1,12 @@
-# The `takes` MCP server: notes for agents
+# The `cutmark` MCP server: notes for agents
 
 Read the root `AGENTS.md` first. This file adds what is true only in `mcp/`.
 
 ## The file
 
-`takes_mcp.py` is the whole server: one Python file, standard library only, no packages. Keep it
-that way: the app ships it as is and runs it with `/usr/bin/python3` (`AgentSetup.swift`).
+`takes_mcp.py` is the source of the whole server: one Python file, standard library only, no
+packages. Keep it that way: the app packages it as `cutmark_mcp.py` and runs it with
+`/usr/bin/python3` (`AgentSetup.swift`).
 `clean_voice.py` and `prepare_take.py` (word times with faster-whisper) are separate because they
 need packages: they run through `uv`, with ffmpeg.
 
@@ -18,11 +19,11 @@ description, schema and function) and `handle`, the JSON-RPC loop, with the serv
 1. Write a `t_<name>(a)` function in the section it belongs to.
 2. Add its entry to `TOOLS`: name, description, input schema, required fields, function.
 3. Add a test in `mcp/tests/` (below).
-4. Try it by hand on a scratch library: `TAKES_ROOT=/tmp/lib python3 mcp/takes_mcp.py`.
+4. Try it by hand on a scratch library: `CUTMARK_ROOT=/tmp/lib python3 mcp/takes_mcp.py`.
 5. When the workflow changes, update the skills in `skills/`.
 
 Write each description for the agent that calls the tool: what it does, when to use it, and what
-to call next. A rule for one tool goes in its description. A rule for all of Takes goes in the
+to call next. A rule for one tool goes in its description. A rule for all of Cutmark goes in the
 server `instructions`. Each description goes into every chat's context, so keep it short.
 
 ## Rules that hold everywhere
@@ -42,8 +43,9 @@ server `instructions`. Each description goes into every chat's context, so keep 
   when the chat compacts or a run ends early. A tool that writes a file into `edits/` or
   `thumbnails/` returns `with_rules(out, step…)`, and keeps the `rules` key of a `t_next_path` it
   calls. Tests: call `t.forget_seen()` and set or pop `CLAUDE_CODE_SESSION_ID` in `setUp`.
-- **Tools that load at the start.** In a Takes chat (`TAKES_CHAT=1`) the tools in `ALWAYS_LOAD`
-  load with the chat, not behind ToolSearch. Keep the set small: every Takes chat pays for it.
+- **Tools that load at the start.** In a Cutmark chat (`TAKES_CHAT=1`, retained as an internal
+  compatibility variable) the tools in `ALWAYS_LOAD` load with the chat, not behind ToolSearch.
+  Keep the set small: every Cutmark chat pays for it.
 - **Long work runs as a job.** `start_job` runs a command detached: it survives the chat, and the
   app shows it in the session's Jobs row (`Sources/Takes/Jobs.swift`, same files). A tool that takes
   over about 30 s returns a job id instead of blocking. Every detached runner starts through
@@ -79,7 +81,8 @@ server `instructions`. Each description goes into every chat's context, so keep 
 ## Tests
 
 - One file per area: `mcp/tests/test_<area>.py`, with `unittest`.
-- `setUp` makes a temp folder, sets `os.environ["TAKES_ROOT"]` to it and clears global state such
+- `setUp` makes a temp folder, sets `os.environ["CUTMARK_ROOT"]` or the legacy test-compatible
+  `TAKES_ROOT` to it and clears global state such
   with `t.forget_seen()`. `tearDown` removes the folder and the variable. `test_lessons.py` is a good
   model.
 - Call the tool functions directly (`t.t_set_post({...})`) and check the files on disk, not only

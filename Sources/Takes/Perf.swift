@@ -8,7 +8,7 @@ import QuartzCore
 // - how long a click takes until its new screen is drawn (`Perf.mark("tab assets")`),
 // - every stall of the main thread of 100 ms or more, with the last click before it.
 //
-// Every 10 s with something to tell, it writes a line block to ~/Library/Logs/Takes/perf.txt
+// Every 10 s with something to tell, it writes a line block to ~/Library/Logs/Cutmark/perf.txt
 // (2026-10-02). Read it to find the next thing to fix.
 @MainActor
 enum Perf {

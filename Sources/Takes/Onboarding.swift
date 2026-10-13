@@ -16,7 +16,7 @@ final class Onboarding {
     /// The creator in the camera on page 2: Sam, one of the made-up creators of the public
     /// pictures (scripts/public/demo-media). Without the file, a plain figure stands in.
     static var creator: NSImage? = Bundle.main.resourceURL
-        .flatMap { NSImage(contentsOf: $0.appending(path: "Onboarding/creator.jpg")) }
+        .flatMap { NSImage(contentsOf: $0.appending(path: "Onboarding/cutmark-intro.jpg")) }
 
     var shown = false
     var page = 0
@@ -223,12 +223,12 @@ private struct WelcomePage: View {
     @State private var active = -1
 
     var body: some View {
-        PageFrame(title: "You talk. Takes does the rest.",
-                  text: "Tell Takes your idea and it writes the script. You read it on camera. Takes cuts the video and writes the posts.",
+        PageFrame(title: "You talk. Cutmark does the rest.",
+                  text: "Tell Cutmark your idea and it writes the script. You read it on camera. Cutmark cuts the video and writes the posts.",
                   after: 5) {
             HStack(alignment: .top, spacing: 14) {
                 side("You", icon: nil, first: 0, steps: [("video.fill", "Record", "Read it on camera")])
-                side("Takes", icon: NSApp.applicationIconImage, first: 1, steps: [("text.alignleft", "Script", "From your idea"), ("scissors", "Edit", "Cuts and captions"), ("paperplane.fill", "Post", "Every platform")])
+                side("Cutmark", icon: NSApp.applicationIconImage, first: 1, steps: [("text.alignleft", "Script", "From your idea"), ("scissors", "Edit", "Cuts and captions"), ("paperplane.fill", "Post", "Every platform")])
             }
             .padding(.top, 30)
         }
@@ -297,7 +297,7 @@ private struct WelcomePage: View {
 private struct HowPage: View {
     var body: some View {
         PageFrame(title: "Record, then just ask.",
-                  text: "Your script scrolls next to the camera. Then tell Takes what you want.",
+                  text: "Your script scrolls next to the camera. Then tell Cutmark what you want.",
                   after: 2) {
             VStack(spacing: 14) {
                 stage.arrive(0)
@@ -343,8 +343,8 @@ private struct HowPage: View {
 private struct ScrollingScript: View {
     @Environment(\.accessibilityReduceMotion) var still
     /// The creator reads what Takes does, so the picture explains the app while it moves.
-    static let lines = ["Hi, this is Takes.", "Tell it your idea.", "It writes your script.",
-                        "You read it right here.", "Takes cuts the video", "and writes the posts."]
+    static let lines = ["Hi, this is Cutmark.", "Tell it your idea.", "It writes your script.",
+                        "You read it right here.", "Cutmark cuts the video", "and writes the posts."]
     /// The read line, in three copies of the script: the middle copy is on screen, so a line
     /// always sits above and below, and the jump back to the start is not seen.
     @State private var at = lines.count
@@ -458,7 +458,7 @@ private struct StartPage: View {
             Spacer(minLength: 24)
             VStack(spacing: 8) {
                 Text("Make your first video.").font(Theme.display(36))
-                Text("Tell Takes your idea. It writes the script into a new session, and you read it on camera.")
+                Text("Tell Cutmark your idea. It writes the script into a new session, and you read it on camera.")
                     .font(Theme.sans(14.5)).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
                     .frame(maxWidth: 580)
                 Text(Onboarding.sessionLine)
@@ -525,7 +525,7 @@ private struct StartPage: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 number(1, done: Onboarding.canWrite)
-                Text("Connect Takes to your agent").font(Theme.sans(13.5, .semibold))
+                Text("Connect Cutmark to your agent").font(Theme.sans(13.5, .semibold))
                 Spacer()
                 Text("About 2 minutes").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
             }
@@ -572,7 +572,7 @@ private struct StartPage: View {
             if setup.needed {
                 HStack(spacing: 8) {
                     number(2)
-                    Text("Tell Takes your idea").font(Theme.sans(13.5, .semibold))
+                    Text("Tell Cutmark your idea").font(Theme.sans(13.5, .semibold))
                 }
             }
             HStack(spacing: 10) {

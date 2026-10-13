@@ -137,8 +137,8 @@ let firstTakeMedia = ProcessInfo.processInfo.environment["TAKES_FIRSTTAKE_MEDIA"
         let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../..")
         for f in (try? FileManager.default.contentsOfDirectory(at: repo.appending(path: "assets/fonts"), includingPropertiesForKeys: nil)) ?? []
         where f.pathExtension == "ttf" { CTFontManagerRegisterFontsForURL(f as CFURL, .process, nil) }
-        NSApp.applicationIconImage = NSImage(contentsOf: repo.appending(path: "assets/Takes.icns"))
-        MascotView.bodyImage = NSImage(contentsOf: repo.appending(path: "assets/brand/mascot-body-512.png"))?
+        NSApp.applicationIconImage = NSImage(contentsOf: repo.appending(path: "assets/Cutmark.icns"))
+        MascotView.bodyImage = NSImage(contentsOf: repo.appending(path: "assets/brand/cutmark-mascot-body-512.png"))?
             .cgImage(forProposedRect: nil, context: nil, hints: nil)
         let setup = Setup.shared
         let was = (setup.agent, setup.signedIn, setup.ffmpeg)
@@ -176,7 +176,7 @@ let firstTakeMedia = ProcessInfo.processInfo.environment["TAKES_FIRSTTAKE_MEDIA"
             }
         }
 
-        // "Ask Takes to edit": a fake claude makes the edit, as the real one does with ffmpeg.
+        // "Ask Cutmark to edit": a fake claude makes the edit, as the real one does with ffmpeg.
         let fake = root.appending(path: "claude")
         let session = try #require(app.library.current).url
         try #"""

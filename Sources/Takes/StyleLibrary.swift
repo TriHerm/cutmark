@@ -458,7 +458,7 @@ struct StylesBoard: View {
             Spacer()
             Button { asking = true } label: { Label("New style", systemImage: "plus") }
                 .buttonStyle(AccentButtonStyle(kind: .quiet))
-                .help("Takes makes a new style from your example: a link, a video, an image, or words")
+                .help("Cutmark makes a new style from your example: a link, a video, an image, or words")
                 .sheet(isPresented: $asking) {
                     NewStyleSheet(example: $example, busy: makingSince > 0, steps: Self.steps,
                                   make: make, cancel: { asking = false })
@@ -515,8 +515,8 @@ struct StylesBoard: View {
         if m != making { making = m }
     }
 
-    static let steps = ["Takes studies the example", "Takes writes the style guide, the colours and the fonts",
-                        "Takes builds a title card and captions, then makes a preview on a sample clip"]
+    static let steps = ["Cutmark studies the example", "Cutmark writes the style guide, the colours and the fonts",
+                        "Cutmark builds a title card and captions, then makes a preview on a sample clip"]
 
     private func makingCard(_ m: Making) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -526,7 +526,7 @@ struct StylesBoard: View {
                 VStack(alignment: .leading, spacing: 12) {
                     if m.stopped {
                         Image(systemName: "pause.circle").font(.system(size: 22)).foregroundStyle(Theme.faint)
-                        Text("Takes stopped before the preview.").font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.ink)
+                        Text("Cutmark stopped before the preview.").font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.ink)
                         HStack(spacing: 8) {
                             Button("Open the chat") { app.chats.open = true }.buttonStyle(AccentButtonStyle(kind: .quiet))
                             Button("Close") { makingSince = 0; checkMaking() }.buttonStyle(BracketButtonStyle(active: false))
@@ -553,7 +553,7 @@ struct StylesBoard: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { app.chats.open = true }
-        .help("Takes makes this style in the Styles chat. Click to open the chat.")
+        .help("Cutmark makes this style in the Styles chat. Click to open the chat.")
     }
 
     /// A style: its preview, its name, and the videos that use it. The rest is in the tooltip.
@@ -572,7 +572,7 @@ struct StylesBoard: View {
                         Image(systemName: "film").font(.system(size: 22)).foregroundStyle(Theme.faint)
                         Button("Make a preview") { ask(Self.previewAsk(c.name)) }
                             .buttonStyle(AccentButtonStyle(kind: .quiet))
-                            .help("Takes renders the shared sample clip in this style")
+                            .help("Cutmark renders the shared sample clip in this style")
                     }
                     .frame(maxWidth: .infinity).aspectRatio(4.0 / 5.0, contentMode: .fit)
                     .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -742,7 +742,7 @@ struct StyleChip: View {
                 Text("none yet").font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
             } else {
                 let own = own, projectStyle = projectStyle, names = names
-                TakesMenuButton(help: "The style Takes edits this video in") {
+                TakesMenuButton(help: "The style Cutmark edits this video in") {
                     // Our own label: the system button drew dark text on the dark theme (2026-10-06).
                     HStack(spacing: 4) {
                         Text(own ?? projectStyle ?? "none").font(Theme.sans(12.5, .semibold))
@@ -830,7 +830,7 @@ struct LibrarySection: View {
 
     private var empty: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Empty. Ask Takes to build it, or to copy from another library.")
+            Text("Empty. Ask Cutmark to build it, or to copy from another library.")
                 .font(Theme.sans(12.5)).foregroundStyle(Theme.ink)
             Text("README.md style guide · tokens.json colours and type · assets/<Group>/ logos, icons, motion")
                 .font(Theme.mono(10.5)).foregroundStyle(Theme.muted)
@@ -1016,7 +1016,7 @@ struct LibrarySection: View {
                     .padding(.horizontal, 5).padding(.vertical, 2)
                     .background(Theme.accent, in: RoundedRectangle(cornerRadius: 3))
                     .foregroundStyle(.white)
-                    .help("\(n) open comment\(n == 1 ? "" : "s") for Takes")
+                    .help("\(n) open comment\(n == 1 ? "" : "s") for Cutmark")
             }
         }
     }
@@ -1049,7 +1049,7 @@ struct LibrarySection: View {
     private func copy(_ url: URL, _ rel: String, to lib: URL, name: String) {
         let target = lib.appending(path: rel)
         if FileManager.default.fileExists(atPath: target.path) {
-            app.show(toast: rel == "tokens.json" ? "\(name) has tokens. Ask Takes to merge them."
+            app.show(toast: rel == "tokens.json" ? "\(name) has tokens. Ask Cutmark to merge them."
                                                  : "\(name) already has \(url.lastPathComponent)")
             return
         }
@@ -1119,7 +1119,7 @@ struct DocReview: View {
                      onSend: {
                          let t = (draft?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                          guard !t.isEmpty, let q = draft?.quote else { return }
-                         if let c = store.add(script: file, quote: q, text: t) { app.show(toast: "Comment \(c.id) saved for Takes") }
+                         if let c = store.add(script: file, quote: q, text: t) { app.show(toast: "Comment \(c.id) saved for Cutmark") }
                          withAnimation(Theme.motion) { draft = nil }
                      },
                      onCancel: { withAnimation(Theme.motion) { draft = nil } },
@@ -1152,7 +1152,7 @@ struct DocReview: View {
             }
             .buttonStyle(.plain)
             .disabled(selection.isEmpty)
-            .help("Select text, then comment on it for Takes")
+            .help("Select text, then comment on it for Cutmark")
             Button { app.preview = nil } label: {
                 Image(systemName: "xmark").font(.system(size: 13)).frame(width: 20, height: 20)
             }
@@ -1330,7 +1330,7 @@ struct NewStyleSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("New style").font(Theme.display(22)).foregroundStyle(Theme.ink)
-                Text("Show Takes a look you like. Takes turns it into a style that every video can use.")
+                Text("Show Cutmark a look you like. Cutmark turns it into a style that every video can use.")
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1370,7 +1370,7 @@ struct NewStyleSheet: View {
                             Text(step).font(Theme.sans(12)).foregroundStyle(Theme.muted)
                         }
                     }
-                    Text("This runs in the Styles chat. You can keep working while it runs. Then comment on the preview and Takes changes the style.")
+                    Text("This runs in the Styles chat. You can keep working while it runs. Then comment on the preview and Cutmark changes the style.")
                         .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -1388,7 +1388,7 @@ struct NewStyleSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Make it", action: submit).buttonStyle(AccentButtonStyle(kind: .accent))
                     .disabled(example.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || busy)
-                    .help(busy ? "Takes is making a style. Wait until it is ready." : "")
+                    .help(busy ? "Cutmark is making a style. Wait until it is ready." : "")
             }
         }
         .padding(22)

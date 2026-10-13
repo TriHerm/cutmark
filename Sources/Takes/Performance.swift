@@ -138,7 +138,7 @@ struct PerformanceRow: View {
 struct PerformanceView: View {
     @ObservedObject var board: PerfBoard
     let root: URL
-    /// Opens a takes:// link: it leaves the board for that session.
+    /// Opens a cutmark:// link: it leaves the board for that session.
     let handle: (URL) -> Void
     @AppStorage("perfPlatform") private var platform = ""
     @AppStorage("perfSort") private var sort = "newest"
@@ -169,7 +169,7 @@ struct PerformanceView: View {
                         SignalPage(data: social, platform: platform) { takes }
                     } else {
                         VStack(alignment: .leading, spacing: 18) {
-                            Text("No social dashboard yet. Ask Takes to run generate_dashboard.py; it writes _library/social.json for this board.")
+                            Text("No social dashboard yet. Ask Cutmark to run generate_dashboard.py; it writes _library/social.json for this board.")
                                 .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                             takes
                         }
@@ -187,9 +187,9 @@ struct PerformanceView: View {
 
     /// The posts from Takes sessions, with the numbers Claude saved.
     @ViewBuilder private var takes: some View {
-        SignalSection(label: "posts from takes", title: "Your sessions' posts, with the numbers Takes saves") {
+        SignalSection(label: "posts from takes", title: "Your sessions' posts, with the numbers Cutmark saves") {
             if board.items.isEmpty {
-                Text("Nothing published yet. Mark a session published, or let Takes do it when a post goes live.")
+                Text("Nothing published yet. Mark a session published, or let Cutmark do it when a post goes live.")
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
             } else if shown.isEmpty {
                 Text("No \(platform) posts from your sessions yet.")
@@ -248,7 +248,7 @@ struct PerformanceView: View {
                 }
             }
             .font(Theme.mono(10.5)).foregroundStyle(Theme.muted)
-            .help("Ask Takes \"update my post stats\". It reads each post's numbers and saves them here.")
+            .help("Ask Cutmark \"update my post stats\". It reads each post's numbers and saves them here.")
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
         .background(Theme.surface)
@@ -328,7 +328,7 @@ struct PerformanceView: View {
 
     private func open(_ i: PerfItem) {
         var c = URLComponents()
-        c.scheme = "takes"; c.host = "open"
+        c.scheme = "cutmark"; c.host = "open"
         c.queryItems = [URLQueryItem(name: "path", value: i.session.path)]
         if let u = c.url { handle(u) }
     }

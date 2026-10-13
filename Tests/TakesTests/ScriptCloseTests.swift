@@ -30,8 +30,8 @@ import Testing
     @Test func closingWritesAnEditMadeHere() throws {
         let dir = try session()
         let doc = SessionDoc(url: dir)
-        doc.script = "typed in Takes"
+        doc.script = "typed in Cutmark"
         doc.close()
-        #expect(try String(contentsOf: dir.appending(path: "script.md"), encoding: .utf8) == "typed in Takes")
+        #expect(try String(contentsOf: dir.appending(path: "script.md"), encoding: .utf8) == "typed in Cutmark")
     }
 }

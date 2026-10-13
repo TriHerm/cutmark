@@ -1,8 +1,9 @@
 #!/bin/bash
-# Prints "VERSION BUILD" for this checkout, so nobody bumps a version by hand (2026-10-04).
-# VERSION is the date of the newest commit (2026.10.4): it tells at a glance how old a build is.
-# BUILD is the number of commits on main up to HEAD: it only grows, as macOS and iOS expect.
-# Outside a git checkout (the phone's refresh mirror) it prints nothing, and the defaults stay.
+# Prints "VERSION BUILD" for Cutmark. Release tags are vMAJOR.MINOR.PATCH; source builds use the
+# current base version until a new release tag is cut. BUILD is the commit count and only grows.
 cd "$(dirname "$0")/.." || exit 0
 git rev-parse --git-dir >/dev/null 2>&1 || exit 0
-echo "$(TZ=America/Los_Angeles git log -1 --date=format-local:'%Y.%-m.%-d' --format=%cd) $(git rev-list --count HEAD)"
+release="${CUTMARK_RELEASE:-$(git tag --points-at HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -1)}"
+version="${release#v}"
+if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then version="0.1.0"; fi
+echo "$version $(git rev-list --count HEAD)"

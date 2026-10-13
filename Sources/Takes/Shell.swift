@@ -24,7 +24,7 @@ enum SessionMode: String, CaseIterable, Identifiable {
     var help: String {
         switch self {
         case .storyboard: return "The idea as sketches on a timeline, with the script under each shot (⌘5)"
-        case .write: return "The script, with Takes beside it to write it (⌘7)"
+        case .write: return "The script, with Cutmark beside it to write it (⌘7)"
         case .record: return "Camera, prompter and takes (⌘1)"
         case .assets: return "This video's files, your b-roll library, and its sound (⌘2; ⌘6 for b-roll, ⌘3 for sound)"
         case .sounds: return "Music and sound effects under the video (⌘3)"
@@ -237,7 +237,7 @@ struct BrandMenu: View {
                 // The logo is back beside the name (2026-10-11).
                 Image(nsImage: NSApp.applicationIconImage).resizable().interpolation(.high)
                     .frame(width: 22, height: 22)
-                Text("Takes").font(Theme.sans(17, .semibold)).foregroundStyle(Theme.ink)
+                Text("Cutmark").font(Theme.sans(17, .semibold)).foregroundStyle(Theme.ink)
                 // Beside the name, as in Codex (2026-10-11).
                 Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
                     .foregroundStyle(Theme.faint)
@@ -262,7 +262,7 @@ struct BrandMenu: View {
                     .padding(.leading, 33).padding(.trailing, 8).padding(.bottom, 4)
             }
             MenuDivider()
-            MenuButton("About Takes", icon: "info.circle") { openWindow(id: "about") }
+            MenuButton("About Cutmark", icon: "info.circle") { openWindow(id: "about") }
         }
         .frame(maxWidth: .infinity)
         .onHover { hover = $0 }
@@ -582,7 +582,7 @@ enum SessionMenu {
             MenuButton("Copy folder path", icon: "doc.on.doc") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(doc.url.path, forType: .string)
-                app.show(toast: "Path copied. Paste it to Takes.")
+                app.show(toast: "Path copied. Paste it to Cutmark.")
             }
             if doc.isPublished && library.current === doc {
                 MenuButton("Clean up…", icon: "checklist") { app.cleaningUp = true }

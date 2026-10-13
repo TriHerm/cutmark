@@ -1,22 +1,22 @@
 import AppKit
 import SwiftUI
 
-/// The Gemini key (2026-10-08, after a demo where a new user asked "do I need Gemini?"). Takes
+/// The Gemini key (2026-10-08, after a demo where a new user asked "do I need Gemini?"). Cutmark
 /// works without it; a few features use it. Settings › Gemini says which ones, and saves a pasted
-/// key as GEMINI_API_KEY in ~/.claude/.env, where the app (`Keys`) and the takes MCP both read it.
+/// key as GEMINI_API_KEY in ~/.config/cutmark/.env, where the app (`Keys`) and the Cutmark MCP both read it.
 enum GeminiKey {
     static let names = ["GEMINI_API_KEY", "GOOGLE_AI_API_KEY"]
     static let getKey = URL(string: "https://aistudio.google.com/apikey")!
 
-    static var envFile: URL { FileManager.default.homeDirectoryForCurrentUser.appending(path: ".claude/.env") }
+    static var envFile: URL { FileManager.default.homeDirectoryForCurrentUser.appending(path: ".config/cutmark/.env") }
 
     static var found: Bool { let k = Keys.load(); return names.contains { k[$0] != nil } }
 
     /// What uses the key, and what happens without it.
     static let uses: [(icon: String, title: String, without: String)] = [
         ("pencil.and.scribble", "Storyboard sketches", "Without it, GPT Image draws them with an OpenAI key, or Nano Banana with a Replicate token. Else the chat can draw them itself."),
-        ("film.stack", "B-roll names and descriptions", "Gemini watches each clip you save, so Takes can find it later. Without it, a clip keeps its file name."),
-        ("scissors", "Best cut of a storyboard take", "Gemini finds the clean part of each take. Without it, Takes finds it when it edits."),
+        ("film.stack", "B-roll names and descriptions", "Gemini watches each clip you save, so Cutmark can find it later. Without it, a clip keeps its file name."),
+        ("scissors", "Best cut of a storyboard take", "Gemini finds the clean part of each take. Without it, Cutmark finds it when it edits."),
         ("textformat", "Session names", "Faster names for new sessions. Without it, your agent names them."),
     ]
 
@@ -67,7 +67,7 @@ struct GeminiPage: View {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Gemini").font(Theme.display(26)).foregroundStyle(Theme.ink)
-                    Text("Takes records, writes, edits and posts without Gemini. A Google Gemini key adds the parts below. Google bills its use to your Google account.")
+                    Text("Cutmark records, writes, edits and posts without Gemini. A Google Gemini key adds the parts below. Google bills its use to your Google account.")
                         .font(Theme.sans(12.5)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
                 }
                 card { account }
@@ -95,7 +95,7 @@ struct GeminiPage: View {
                 Image(systemName: "checkmark.circle.fill").font(.system(size: 15)).foregroundStyle(Theme.accent)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Connected").font(Theme.sans(13, .medium)).foregroundStyle(Theme.ink)
-                    Text("Takes found a Gemini key.").font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                    Text("Cutmark found a Gemini key.").font(Theme.sans(12)).foregroundStyle(Theme.muted)
                 }
                 Spacer(minLength: 8)
                 Button("Change Key") { changing = true }
@@ -104,7 +104,7 @@ struct GeminiPage: View {
             VStack(alignment: .leading, spacing: 10) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(changing ? "Change the key" : "Add a Gemini key").font(Theme.sans(13, .medium)).foregroundStyle(Theme.ink)
-                    Text(problem ?? "Paste a key from Google AI Studio. Takes keeps it in ~/.claude/.env, where Claude Code finds it too.")
+                    Text(problem ?? "Paste a key from Google AI Studio. It is saved in ~/.config/cutmark/.env for the app and its MCP server.")
                         .font(Theme.sans(12)).foregroundStyle(problem == nil ? Theme.muted : .red)
                         .fixedSize(horizontal: false, vertical: true)
                 }

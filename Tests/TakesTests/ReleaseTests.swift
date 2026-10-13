@@ -104,12 +104,12 @@ struct ReleaseTests {
         let now = Date()
         func at(_ s: Double) -> Date { now.addingTimeInterval(-s) }
         var running = ReleaseRun(media: false, started: at(160))
-        running.read("@log /Users/you/Library/Logs/Takes/release.log", at: at(160))
+        running.read("@log /Users/you/Library/Logs/Cutmark/release.log", at: at(160))
         running.read("▸ Getting the latest main", at: at(160))
         running.read("▸ Removing personal data", at: at(154))
         running.read("▸ Testing the copy", at: at(140))
         running.read("· tests 126", at: at(1))
-        var failed = feed(["@log /Users/you/Library/Logs/Takes/release.log", "▸ Getting the latest main", "▸ Removing personal data", "▸ Testing the copy",
+        var failed = feed(["@log /Users/you/Library/Logs/Cutmark/release.log", "▸ Getting the latest main", "▸ Removing personal data", "▸ Testing the copy",
                            "FAIL: test_a_voice_is_found_by_the_start_of_its_name_and_becomes_the_default (x)",
                            "ValueError: No voice 'Zed' in the ElevenLabs account.",
                            "FAIL: test_voiceover_reads_the_script_into_a_versioned_wav_with_the_voice_noted (x)",

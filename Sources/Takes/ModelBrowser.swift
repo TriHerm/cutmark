@@ -313,7 +313,7 @@ struct ModelSheet: View {
             ForEach(d.prices, id: \.self) { r in row(r.name, r.value) }
             if let n = d.priceNote { note(n) }
             if d.prices.isEmpty && d.priceNote == nil {
-                note(card.page == nil ? "Ask Takes for the price of a clip." : "See the price on replicate.com.")
+                note(card.page == nil ? "Ask Cutmark for the price of a clip." : "See the price on replicate.com.")
             }
         }
         section("Speed", index: 1) {

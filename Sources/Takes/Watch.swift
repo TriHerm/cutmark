@@ -8,7 +8,7 @@ import SwiftUI
 
 extension Notification.Name {
     /// `object` is the changed folders as [String] paths.
-    static let takesFilesChanged = Notification.Name("de.marvinaziz.takes.filesChanged")
+    static let takesFilesChanged = Notification.Name("com.triherm.cutmark.filesChanged")
 }
 
 final class FileWatch {
@@ -162,7 +162,7 @@ private struct FilesChanged: ViewModifier {
     }
 }
 
-/// Saves a `sample` of every thread to ~/Library/Logs/Takes/hang-<time>.txt, once per freeze, so
+/// Saves a `sample` of every thread to ~/Library/Logs/Cutmark/hang-<time>.txt, once per freeze, so
 /// the next freeze names its own cause, even when nobody was watching. Stall's thread notices the
 /// freeze: a second thread that woke every second to ask the same question was merged into it
 /// (2026-10-11).
@@ -171,7 +171,7 @@ enum HangWatch {
     static let limit = 6
 
     static var folder: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Logs/Takes")
+        FileManager.default.homeDirectoryForCurrentUser.appending(path: Product.logs)
     }
 
     private static let sampling = NSLock()

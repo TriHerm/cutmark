@@ -89,14 +89,14 @@ enum Namer {
     }
 }
 
-/// API keys, later sources win: your notes repo/.env, ~/.claude/.env, the process environment. Never logged.
+/// API keys, later sources win: legacy ~/.claude/.env, Cutmark's config, the process environment. Never logged.
 enum Keys {
-    static let files = [".config/takes/.env", ".claude/.env"]
+    static let files = [".claude/.env", ".config/cutmark/.env"]
 
-    static func load() -> [String: String] {
+    static func load(home: URL = FileManager.default.homeDirectoryForCurrentUser,
+                     environment: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
         var out: [String: String] = [:]
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let text = files.filter { Plugins.own || !$0.hasPrefix("Documents/") }.compactMap { try? String(contentsOf: home.appending(path: $0), encoding: .utf8) }.joined(separator: "\n")
+        let text = files.compactMap { try? String(contentsOf: home.appending(path: $0), encoding: .utf8) }.joined(separator: "\n")
         for line in text.split(whereSeparator: \.isNewline) {
             var l = line.trimmingCharacters(in: .whitespaces)
             if l.hasPrefix("#") { continue }
@@ -105,7 +105,7 @@ enum Keys {
             let v = l[l.index(after: eq)...].trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
             if !v.isEmpty { out[String(l[..<eq])] = v }
         }
-        for (k, v) in ProcessInfo.processInfo.environment where k.hasSuffix("_API_KEY") && !v.isEmpty { out[k] = v }
+        for (k, v) in environment where k.hasSuffix("_API_KEY") && !v.isEmpty { out[k] = v }
         return out
     }
 }

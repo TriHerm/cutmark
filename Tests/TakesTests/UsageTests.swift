@@ -4,7 +4,7 @@ import SwiftUI
 import Testing
 @testable import Takes
 
-/// The opt-in usage counts and the counted update check (2026-10-10).
+/// The opt-in usage counts.
 @MainActor
 struct UsageTests {
     @Test func theReportHoldsOnlyCountsAndNoText() throws {
@@ -46,28 +46,6 @@ struct UsageTests {
         fresh.seen = now.addingTimeInterval(-2 * 86_400)
         try JSONEncoder.iso.encode([old, fresh]).write(to: file)
         #expect(PhoneServer.usedRecently(file: file, now: now))
-    }
-
-    @Test func theUpdateCheckSaysTheVersionAndThePhone() throws {
-        let url = Updater.checkURL(own: "v2026.10.10", phone: true)
-        let c = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
-        #expect(c.host == "gettakes.app" && c.path == "/latest")
-        let q = Dictionary(uniqueKeysWithValues: (c.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-        #expect(q["v"] == "v2026.10.10" && q["phone"] == "1" && !(q["os"] ?? "").isEmpty)
-        #expect(Set(q.keys) == ["v", "os", "phone"])
-    }
-
-    @Test func theFirstCheckOfAVersionSaysWhereItCameFrom() throws {
-        let d = try #require(UserDefaults(suiteName: "usage-\(UUID().uuidString)"))
-        #expect(Updater.checkFrom(own: "v2026.10.10", defaults: d) == "new")
-        d.set(true, forKey: Onboarding.doneKey)
-        #expect(Updater.checkFrom(own: "v2026.10.10", defaults: d) == nil)
-        d.set("v2026.10.9", forKey: Updater.checkedKey)
-        #expect(Updater.checkFrom(own: "v2026.10.10", defaults: d) == "v2026.10.9")
-        d.set("v2026.10.10", forKey: Updater.checkedKey)
-        #expect(Updater.checkFrom(own: "v2026.10.10", defaults: d) == nil)
-        let q = URLComponents(url: Updater.checkURL(own: "v2026.10.10", phone: false, from: "new"), resolvingAgainstBaseURL: false)?.queryItems
-        #expect(q?.first { $0.name == "from" }?.value == "new")
     }
 
     @Test func theNeverPanelNamesTheChats() {

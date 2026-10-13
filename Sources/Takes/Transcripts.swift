@@ -230,7 +230,7 @@ final class Transcripts {
             try Transcript.write(words, source: "apple \(locale.identifier)", for: video)
             return true
         } catch {
-            NSLog("Takes transcript failed for \(video.lastPathComponent): \(error.localizedDescription)")
+            NSLog("Cutmark transcript failed for \(video.lastPathComponent): \(error.localizedDescription)")
             return false
         }
     }

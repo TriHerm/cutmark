@@ -29,7 +29,7 @@ struct EditCheck: Decodable, Hashable {
     var title: String {
         label ?? text.map { "Rule: " + ($0.count <= 30 ? $0 : $0.prefix(29).trimmingCharacters(in: .whitespaces) + "…") } ?? "Problem"
     }
-    var help: String { (say ?? text ?? title) + " Ask Takes in the chat to fix it." }
+    var help: String { (say ?? text ?? title) + " Ask Cutmark in the chat to fix it." }
     /// Why it did not run.
     var reason: String { skip ?? error ?? "No reason given." }
 }
@@ -89,9 +89,9 @@ enum EditChecks {
         case .passed(let skipped):
             return skipped.isEmpty ? "All checks pass." : "All checks pass. \(skipped.count) did not run."
         case .problems(let p): return p.count == 1 ? "1 problem:" : "\(p.count) problems:"
-        case .nothingRan: return "Takes could not check this edit. Ask Takes in the chat why."
-        case .stale: return "Changed since the last check. Ask Takes to check it again."
-        case .unchecked: return "Not checked yet. Ask Takes to check this edit."
+        case .nothingRan: return "Cutmark could not check this edit. Ask Cutmark in the chat why."
+        case .stale: return "Changed since the last check. Ask Cutmark to check it again."
+        case .unchecked: return "Not checked yet. Ask Cutmark to check this edit."
         }
     }
 

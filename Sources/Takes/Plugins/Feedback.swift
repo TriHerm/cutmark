@@ -16,7 +16,7 @@ import SwiftUI
 enum Feedback {
     static let plugin = TakesPlugin(
         id: "feedback", title: "Feedback", icon: "graduationcap", key: "e",
-        help: "What Takes learned from your comments: the rules it follows, and fewer comments per video over time (⇧⌘E)",
+        help: "What Cutmark learned from your comments: the rules it follows, and fewer comments per video over time (⇧⌘E)",
         badge: { _ in AnyView(EmptyView()) },
         board: { app in
             ClaudeChat.boardContexts["feedback"] = { context }
@@ -24,8 +24,8 @@ enum Feedback {
         })
 
     static let context = """
-    The user is talking to you from the Feedback board inside the Takes app. It shows the rules you \
-    learned from the user's review comments (get_rules area=all; one file per step in _library/rules/ in the Takes \
+    The user is talking to you from the Feedback board inside the Cutmark app. It shows the rules you \
+    learned from the user's review comments (get_rules area=all; one file per step in _library/rules/ in the Cutmark \
     folder, with comments.md for the comment copilot's lessons), how many comments the user leaves per video and how often the same mistake comes back. \
     Change rules as the user asks with set_rule. A rule the user wrote, changed or turned off belongs to the user. Keep the \
     set small: one short sentence per rule, at most 10 per area; merge or sharpen before you add. \
@@ -444,7 +444,7 @@ struct FeedbackPage: View {
         HStack(spacing: 14) {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Feedback").font(Theme.sans(16, .bold)).foregroundStyle(Theme.ink)
-                Text("What Takes learned from your comments, and whether it needs fewer of them")
+                Text("What Cutmark learned from your comments, and whether it needs fewer of them")
                     .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
             }
             Spacer(minLength: 12)
@@ -734,7 +734,7 @@ struct RulesCard: View {
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Rules").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
-                    Text("Takes reads these before every edit.").font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                    Text("Cutmark reads these before every edit.").font(Theme.sans(12)).foregroundStyle(Theme.muted)
                 }
                 Spacer()
                 if store.stats.unlabeled > 0 {
@@ -743,7 +743,7 @@ struct RulesCard: View {
                 }
                 if waiting > 0 {
                     MetaTag(text: "\(waiting) merge\(waiting == 1 ? "" : "s") to check", icon: "arrow.triangle.merge", tint: Theme.accentInk)
-                        .help("Takes wants to merge rules in a full area. Find the box under the rule.")
+                        .help("Cutmark wants to merge rules in a full area. Find the box under the rule.")
                 }
                 if !adding && !rules.isEmpty {
                     Button { withAnimation(.page) { adding = true } } label: {
@@ -805,7 +805,7 @@ struct RulesCard: View {
                 .frame(width: 38, height: 38).background(Circle().fill(Theme.accentSoft))
             VStack(alignment: .leading, spacing: 3) {
                 Text("No rules yet").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
-                Text("Comment on an edit. When a fix holds for your next videos too, Takes writes it down here.")
+                Text("Comment on an edit. When a fix holds for your next videos too, Cutmark writes it down here.")
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
@@ -1040,11 +1040,11 @@ private struct RuleRow: View {
                 HStack(spacing: 6) {
                     if rule.yours {
                         MetaTag(text: "Yours", icon: "person.fill", tint: Theme.accentInk)
-                            .help("You wrote or changed this rule. Takes will not change it back.")
+                            .help("You wrote or changed this rule. Cutmark will not change it back.")
                     }
                     if let c = rule.check {
                         MetaTag(text: c.label, icon: "checkmark.seal.fill", tint: Theme.live)
-                            .help("Takes measures this on every new edit, before you see it.")
+                            .help("Cutmark measures this on every new edit, before you see it.")
                     }
                     if let n = rule.repeats?.count, n > 0 {
                         MetaTag(text: "Came back \(n)×", icon: "arrow.uturn.backward", tint: Theme.warn)
@@ -1071,7 +1071,7 @@ private struct RuleRow: View {
                 store.change(root) { Lessons.edit(root, id) { $0.on = v } }
             }
             .padding(.top, 4)
-            .help(rule.isOn ? "On: Takes follows it" : "Off: kept, not followed")
+            .help(rule.isOn ? "On: Cutmark follows it" : "Off: kept, not followed")
         }
         .padding(.horizontal, 10).padding(.vertical, 10)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(hover && !editing ? Theme.hover.opacity(0.6) : .clear))
@@ -1117,7 +1117,7 @@ private struct MergeSuggestion: View {
         let fits = Lessons.mergeTarget(rule, in: store.rules) != nil
         let after = store.rules.filter { $0.area == rule.area && $0.counts }.count + 1
         VStack(alignment: .leading, spacing: 6) {
-            Text("Takes wants to merge this rule with another one.")
+            Text("Cutmark wants to merge this rule with another one.")
                 .font(Theme.sans(12, .semibold)).foregroundStyle(Theme.ink)
                 .fixedSize(horizontal: false, vertical: true)
             if fits, let other, let merge {
@@ -1127,7 +1127,7 @@ private struct MergeSuggestion: View {
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 Text(other == nil || other?.isOn == false || other?.mergedInto != nil
-                     ? "The other rule is gone or off." : "The other rule changed since. Ask Takes for a new merge.")
+                     ? "The other rule is gone or off." : "The other rule changed since. Ask Cutmark for a new merge.")
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted)
             }
             HStack(spacing: 4) {

@@ -62,7 +62,7 @@ struct PhoneStyleGroup: Codable, Hashable {
 }
 
 struct PhoneStyleDetail: Codable {
-    /// The library folder inside the Takes root: the "session" id for its comments.
+    /// The library folder inside the Cutmark root: the "session" id for its comments.
     var id: String
     var name: String
     var folder: String

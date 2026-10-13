@@ -193,7 +193,7 @@ enum StepWords {
     }
 }
 
-/// A run of tool calls as a timeline. While Takes adds to it: "Working 12s" with a shimmer, every
+/// A run of tool calls as a timeline. While Cutmark adds to it: "Working 12s" with a shimmer, every
 /// step shown. Once done: "Worked for 12s · 5 steps". It stays open until the user writes again,
 /// then folds to that one line; a click opens or shuts it.
 struct StepTimeline: View {

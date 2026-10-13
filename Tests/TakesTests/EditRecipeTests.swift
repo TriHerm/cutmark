@@ -151,8 +151,8 @@ struct EditRecipeTests {
         j.progress = 0.5
         #expect(JobBoard.line(j, now: now) == "Mixing the sound · 50%")
         j.status = .done
-        j.stage = "Ready. Takes checks it before it saves it."
-        #expect(JobBoard.line(j, now: now) == "Ready. Takes checks it before it saves it.")
+        j.stage = "Ready. Cutmark checks it before it saves it."
+        #expect(JobBoard.line(j, now: now) == "Ready. Cutmark checks it before it saves it.")
         #expect(JobBoard.note(for: [j]).contains("publish_edit render=job-1"))
         let raw = Data(#"{"id": "job-1", "status": "running", "stage": "Cutting the takes"}"#.utf8)
         #expect(Job.decode(raw, folder: URL(fileURLWithPath: "/tmp/s/.jobs"), generate: false)?.stage == "Cutting the takes")

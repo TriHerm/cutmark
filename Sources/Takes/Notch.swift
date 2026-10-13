@@ -324,7 +324,7 @@ struct NotchView: View {
                     } else if introOn {
                         introCard
                     } else if app.promptText.isEmpty {
-                        Text("Write a script in Takes, and it shows here.")
+                        Text("Write a script in Cutmark, and it shows here.")
                             .font(Theme.sans(13)).foregroundStyle(.white.opacity(0.55))
                     }
                 }

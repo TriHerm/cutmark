@@ -182,7 +182,7 @@ struct SoundsPane: View {
                     }
                 }
                 .padding(.bottom, 4)
-                Text("Takes mixes music and effects into the video file. Click Use and the chat makes a new version with it.")
+                Text("Cutmark mixes music and effects into the video file. Click Use and the chat makes a new version with it.")
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.bottom, wide ? 24 : 18)
@@ -288,7 +288,7 @@ struct SoundsPane: View {
         VStack(alignment: .leading, spacing: 10) {
             Mascot(size: 56)
             Text("No music yet").font(Theme.display(24))
-            Text("Pick the folder you download music into (Epidemic Sound, Artlist, …). Takes copies it to _library/audio/ and keeps it up to date.")
+            Text("Pick the folder you download music into (Epidemic Sound, Artlist, …). Cutmark copies it to _library/audio/ and keeps it up to date.")
                 .font(Theme.sans(13)).foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
             Button("Choose Source Folder…") { chooseSource() }.buttonStyle(AccentButtonStyle(kind: .solid))

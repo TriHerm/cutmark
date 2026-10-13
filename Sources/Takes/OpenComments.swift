@@ -1,7 +1,7 @@
 import SwiftUI
 
 // The open-comments chip above the chat's message box (2026-10-04). It says where the comments
-// are ("v17"), and a click lists them: each one can be opened at its moment, sent to Takes alone,
+// are ("v17"), and a click lists them: each one can be opened at its moment, sent to Cutmark alone,
 // or resolved. Before, the chip only sent them all, and a comment on an older version of an edit
 // stayed out of sight while the user watched the newest one.
 
@@ -61,7 +61,7 @@ struct OpenCommentsChip: View {
             .background(Theme.accentSoft, in: Capsule())
         }
         .buttonStyle(PressStyle())
-        .help("See your open comments: open one, send it to Takes or resolve it")
+        .help("See your open comments: open one, send it to Cutmark or resolve it")
         .takesPopover(isPresented: $shown) { list }
         .onAppear(perform: load)
         .onChange(of: count) { _, _ in load() }
@@ -85,7 +85,7 @@ struct OpenCommentsChip: View {
                         .background(Theme.accent, in: Capsule())
                 }
                 .buttonStyle(PressStyle())
-                .help("Takes reads all your open comments, fixes them and replies to each one")
+                .help("Cutmark reads all your open comments, fixes them and replies to each one")
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
             Divider()
@@ -113,7 +113,7 @@ struct OpenCommentsChip: View {
                 if canJump(c) {
                     icon("arrow.up.forward.square", "Open \(c.place)") { jump(c) }
                 }
-                icon("paperplane", "Send this comment to Takes") { shown = false; send(c.ask) }
+                icon("paperplane", "Send this comment to Cutmark") { shown = false; send(c.ask) }
                 icon("checkmark.circle", "Resolve") { resolve(c) }
             }
         }
@@ -178,7 +178,7 @@ struct PendingFeedbackChip: View {
                     .background(Theme.accentSoft, in: Capsule())
                 }
                 .buttonStyle(PressStyle())
-                .help("See your notes: send them to Takes or drop one")
+                .help("See your notes: send them to Cutmark or drop one")
                 .takesPopover(isPresented: $shown) { list(pending) }
                 Button { store.sendFeedback(pending) } label: {
                     Text("Send").font(Theme.sans(11.5, .semibold)).foregroundStyle(.white)
@@ -186,7 +186,7 @@ struct PendingFeedbackChip: View {
                         .background(Theme.accent, in: Capsule())
                 }
                 .buttonStyle(PressStyle())
-                .help("Takes writes a new draft for each note")
+                .help("Cutmark writes a new draft for each note")
             }
             .transition(.opacity.combined(with: .offset(y: 4)))
         }
@@ -230,7 +230,7 @@ struct PendingFeedbackChip: View {
             }
             Spacer(minLength: 4)
             HStack(spacing: 2) {
-                icon("paperplane", "Send this note to Takes") { store.sendFeedback([s]) }
+                icon("paperplane", "Send this note to Cutmark") { store.sendFeedback([s]) }
                 icon("xmark", "Drop the note: the draft goes back to Review") { store.dropFeedback(s) }
             }
         }

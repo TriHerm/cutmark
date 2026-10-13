@@ -250,7 +250,7 @@ struct CommentsView: View {
                             .buttonStyle(BracketButtonStyle())
                         Button("Send now") { store.sendFeedback(store.pendingFeedback) }
                             .buttonStyle(BracketButtonStyle())
-                            .help("Takes writes a new draft for each note")
+                            .help("Cutmark writes a new draft for each note")
                     }
                 }
                 if !store.redrafting.isEmpty {
@@ -303,7 +303,7 @@ struct ReviewEmpty: View {
     var body: some View {
         VStack(spacing: 0) {
             cards.padding(.bottom, 28)
-            Text(finding ? "Takes is reading LinkedIn" : "No drafts to review")
+            Text(finding ? "Cutmark is reading LinkedIn" : "No drafts to review")
                 .font(Theme.display(24)).foregroundStyle(Theme.ink)
                 .contentTransition(.opacity)
             Text(finding
@@ -1338,7 +1338,7 @@ private struct CopilotDocView: View {
             Button(action: start) { Label("Comment", systemImage: "text.bubble") }
                 .buttonStyle(BracketButtonStyle())
                 .disabled(selection.isEmpty)
-                .help("Select text, then comment on it for Takes")
+                .help("Select text, then comment on it for Cutmark")
             if !reading || text != saved {
                 Button("Save", action: save)
                     .buttonStyle(AccentButtonStyle(kind: .solid))
@@ -1361,7 +1361,7 @@ private struct CopilotDocView: View {
                      onSend: {
                          let t = (draft?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                          guard !t.isEmpty, let q = draft?.quote else { return }
-                         if let c = store.add(script: file, quote: q, text: t) { app.show(toast: "Comment \(c.id) saved for Takes") }
+                         if let c = store.add(script: file, quote: q, text: t) { app.show(toast: "Comment \(c.id) saved for Cutmark") }
                          withAnimation(Theme.motion) { draft = nil }
                      },
                      onCancel: { withAnimation(Theme.motion) { draft = nil } },

@@ -484,7 +484,7 @@ final class SessionDoc {
             }.joined(separator: ", ") + "\n"
         }
         s += "\n"
-        s += "## Takes\n\n"
+        s += "## Cutmark\n\n"
         if meta.takes.isEmpty {
             s += "_No takes yet._\n"
         } else {
@@ -563,7 +563,7 @@ final class Library {
     init() {
         let saved = UserDefaults.standard.string(forKey: "root")
         root = saved.map { URL(fileURLWithPath: $0) }
-            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes")
+            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: Product.defaultLibrary)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         reload()
         if let last = UserDefaults.standard.string(forKey: "project"),

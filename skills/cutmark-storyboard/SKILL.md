@@ -1,9 +1,9 @@
 ---
-name: takes-storyboard
-description: Turn a video idea into a Takes session with a script and a sketch storyboard, so the user sees how to film it before they start. Use when the user brainstorms or rambles about a video idea, says "storyboard this", "plan this video", "how would I film this", or presses "Storyboard this video" on the Storyboard tab in Takes. Writes script.md, then calls set_storyboard (takes MCP), which draws one marker sketch per shot in the background and shows them on a timeline with the script lines under each shot.
+name: cutmark-storyboard
+description: Turn a video idea into a Cutmark session with a script and a sketch storyboard, so the user sees how to film it before they start. Use when the user brainstorms or rambles about a video idea, says "storyboard this", "plan this video", "how would I film this", or presses "Storyboard this video" on the Storyboard tab in Cutmark. Writes script.md, then calls set_storyboard (Cutmark MCP), which draws one marker sketch per shot in the background and shows them on a timeline with the script lines under each shot.
 ---
 
-# Takes storyboard
+# Cutmark storyboard
 
 The storyboard helps the user plan a shoot. The sketches are low fidelity on purpose. They show
 who is in the frame, where the camera is, and what moves. They are not the final look.
@@ -12,20 +12,20 @@ who is in the frame, where the camera is, and what moves. They are not the final
 
 - The sketches use Nano Banana 2.1 (`GEMINI_API_KEY` or `GOOGLE_AI_API_KEY`), then GPT Image 2.5
   Flare (`OPENAI_API_KEY`), then Nano Banana on Replicate (the Replicate plugin's token), from the
-  environment, `~/.claude/.env` or the Keychain.
+  environment, `~/.config/cutmark/.env`, the legacy read-only `~/.claude/.env` fallback, or the Keychain.
 - **No image key:** `set_storyboard` still saves the shots, draws nothing, and its answer has
   `no_sketches` and a note. Then do one of these:
   - If you can make images yourself, draw each sketch (the marker style below) and call
     `set_storyboard` again with each shot's `image` set to your PNG or JPG.
-  - Else ask the user for a Gemini key (Takes › Settings › Gemini, from aistudio.google.com/apikey)
+  - Else ask the user for a Gemini key (Cutmark › Settings › Gemini, from aistudio.google.com/apikey)
     or an OpenAI key. When they have added it, call `set_storyboard` again, or tell them to click
     **Draw** on the Storyboard tab.
   Do not look for keys or logins anywhere else on the Mac.
-- All work goes through the `takes` MCP. Never write `session.json` or `storyboard/` by hand.
+- All work goes through the `cutmark` MCP. Never write `session.json` or `storyboard/` by hand.
 
 ## Steps
 
-1. **Session.** In a Takes chat, the session is given. From a terminal, call `create_session`
+1. **Session.** In a Cutmark chat, the session is given. From a terminal, call `create_session`
    with `project`, `title` and `script`. If the project is unclear, ask. Do not storyboard into a
    session that already has takes, unless the user asks.
 2. **Script first.** Write `script.md` with `create_session` or `update_session` (give a short
@@ -48,7 +48,7 @@ who is in the frame, where the camera is, and what moves. They are not the final
 
 | Field | What to write |
 |---|---|
-| `id` | Leave it out for a new shot. When you change a shot, pass its id from `get_session` (`storyboard`). Takes and comments point at it. |
+| `id` | Leave it out for a new shot. When you change a shot, pass its id from `get_session` (`storyboard`). Cutmark and comments point at it. |
 | `section` | `hook`, `main` or `end`. Default `main`. |
 | `kind` | `DESK` (seated, to lens), `WALK` (standing or outside), `B-ROLL` (footage, hands, objects), `SCREEN` (screen recording), `MG` (motion graphic), `END`. |
 | `say` | The script lines this shot covers, **word for word** from `script.md`. |
@@ -57,7 +57,7 @@ who is in the frame, where the camera is, and what moves. They are not the final
 | `video` | Optional. A real clip shown instead of a drawing: a file from `list_broll` (the MCP adds it to the session's `broll/`), or a path in the session such as `edits/x.mp4`. |
 | `seconds` | Leave it out. The app counts from the words in `say`. Give it only for a shot with no words. |
 | `redraw` | `true` draws the same sketch text again (for a bad drawing). |
-| `image` | Optional. A sketch you made yourself (PNG or JPG path), used instead of a drawing. For when Takes has no image key. |
+| `image` | Optional. A sketch you made yourself (PNG or JPG path), used instead of a drawing. For when Cutmark has no image key. |
 
 For a `B-ROLL` shot, look for footage first: `search_media` with what the shot shows ("hands
 typing, close-up", kinds `["video"]`) searches every clip by its picture, and `list_broll` lists the
@@ -83,7 +83,7 @@ round-head figures, no text. Write only what is in the frame:
 - Keep the cast small. Assume the user films alone (phone or Mac camera, a desk, a room, a walk)
   unless the idea needs someone else.
 
-## Takes and comments per shot
+## Cutmark and comments per shot
 
 The user records a take per shot with the Record button under a shot. In `get_session`, the
 take's `shot` field holds the shot id. A storyboard take may also carry a `best_cut` suggestion

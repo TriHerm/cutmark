@@ -189,11 +189,11 @@ struct PublishTests {
 
 struct PerfWatchTests {
     @Test func folderEventsThatChangeTheBoard() {
-        let root = URL(fileURLWithPath: "/m/Takes")
-        #expect(PerfBoard.matters(["/m/Takes/_library"], root: root))           // social.json
-        #expect(PerfBoard.matters(["/m/Takes/Acme/2026-10-01-a"], root: root)) // a session.json
-        #expect(PerfBoard.matters(["/m/Takes"], root: root))
-        #expect(!PerfBoard.matters(["/m/Takes/Acme/2026-10-01-a/edits"], root: root))
+        let root = URL(fileURLWithPath: "/m/Cutmark")
+        #expect(PerfBoard.matters(["/m/Cutmark/_library"], root: root))           // social.json
+        #expect(PerfBoard.matters(["/m/Cutmark/Acme/2026-10-01-a"], root: root)) // a session.json
+        #expect(PerfBoard.matters(["/m/Cutmark"], root: root))
+        #expect(!PerfBoard.matters(["/m/Cutmark/Acme/2026-10-01-a/edits"], root: root))
         #expect(!PerfBoard.matters(["/other/_library"], root: root))
     }
 }

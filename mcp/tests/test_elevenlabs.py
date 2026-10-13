@@ -171,7 +171,7 @@ class ElevenLabs(unittest.TestCase):
         t.eleven_http = self.real
         old = os.environ.pop("ELEVENLABS_API_KEY", None)
         home = os.environ.get("HOME")
-        os.environ["HOME"] = self.root  # no ~/.claude/.env
+        os.environ["HOME"] = self.root  # no auxiliary env files
         try:
             with self.assertRaisesRegex(ValueError, "Plugins › Voices"):
                 t.t_voices({"set_default": "x"})

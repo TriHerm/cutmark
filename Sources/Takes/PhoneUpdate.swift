@@ -1,13 +1,13 @@
 import Foundation
 
 /// Tap-to-update for the iPhone app (2026-10-03). `ios/install.sh` no longer installs: it stages
-/// the build in ~/Library/Application Support/Takes/phone-update with an update.json. The phone
+/// the build in ~/Library/Application Support/Cutmark/phone-update with an update.json. The phone
 /// asks GET /api/update and shows Update; a tap (POST /api/update/install) makes this Mac install
 /// it with devicectl, which ends the app on the phone, and open it again. `install.sh --now`
 /// still installs at once (refresh.sh keeps the 7-day profile alive with it).
 final class PhoneUpdate: @unchecked Sendable {
     static let shared = PhoneUpdate()
-    static let bundleID = "de.marvinaziz.takes.phone"
+    static let bundleID = "com.triherm.cutmark.phone"
 
     /// What install.sh writes next to the staged app.
     struct Staged: Codable, Equatable {
@@ -39,11 +39,11 @@ final class PhoneUpdate: @unchecked Sendable {
     private var lastError: String?
 
     init(dir: URL = FileManager.default.homeDirectoryForCurrentUser
-        .appending(path: "Library/Application Support/Takes/phone-update")) {
+        .appending(path: Product.appSupport + "/phone-update")) {
         self.dir = dir
     }
 
-    var app: URL { dir.appending(path: "Takes.app") }
+    var app: URL { dir.appending(path: "Cutmark.app") }
     var manifest: URL { dir.appending(path: "update.json") }
 
     /// The staged build, if both its app and its update.json are there.

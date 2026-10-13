@@ -79,7 +79,7 @@ enum ThemePalette: String, CaseIterable, Identifiable {
 
     var name: String {
         switch self {
-        case .takes: "Takes"
+        case .takes: "Cutmark"
         case .graphite: "Graphite"
         case .sand: "Sand"
         case .forest: "Forest"

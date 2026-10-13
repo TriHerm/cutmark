@@ -1,9 +1,7 @@
 import AppKit
 import SwiftUI
 
-// About Takes (2026-10-04): its own window in place of the plain system panel. The mascot, the
-// version and the build, what the library holds, a note asking for a star or a coffee (2026-10-12,
-// in place of "What Takes does"), and where to find Marvin.
+// About Cutmark: product identity, build information, library stats and upstream attribution.
 
 struct AboutView: View {
     @Environment(AppModel.self) var app
@@ -27,8 +25,8 @@ struct AboutView: View {
     private var hero: some View {
         VStack(spacing: 10) {
             FloatingIcon().padding(.top, 40)
-            Text("Takes").font(Theme.display(34))
-            Text("Write it, record it, post it. Takes helps with every step.")
+            Text(Product.name).font(Theme.display(34))
+            Text("Local-first video production for people and agents.")
                 .font(Theme.sans(13)).foregroundStyle(Theme.muted)
                 .multilineTextAlignment(.center)
             version.padding(.top, 4)
@@ -57,7 +55,7 @@ struct AboutView: View {
         .background(Theme.hover, in: Capsule())
         .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 0.5))
         .textSelection(.enabled)
-        .help("The build Takes runs now")
+        .help("The build Cutmark runs now")
     }
 
     // MARK: Library
@@ -92,14 +90,14 @@ struct AboutView: View {
         VStack(spacing: 12) {
             Rectangle().fill(Theme.border).frame(height: 0.5)
             HStack(spacing: 4) {
-                Text("Made by").foregroundStyle(Theme.muted)
-                Text("Marvin Aziz").fontWeight(.semibold)
+                Text("A project by").foregroundStyle(Theme.muted)
+                Text(Product.organization).fontWeight(.semibold)
             }
             .font(Theme.sans(12.5))
             HStack(spacing: 8) {
                 ForEach(About.links, id: \.name) { l in SocialLink(link: l) }
             }
-            Text("© \(Calendar.current.component(.year, from: Date()).formatted(.number.grouping(.never))) Marvin Aziz")
+            Text("© \(Calendar.current.component(.year, from: Date()).formatted(.number.grouping(.never))) TriHerm Labs")
                 .font(Theme.sans(10.5)).foregroundStyle(Theme.faint)
         }
     }
@@ -110,13 +108,12 @@ enum About {
     struct Link { let name: String; let handle: String; let mark: String; let url: URL }
 
     static let links: [Link] = [
-        Link(name: "GitHub", handle: "marvtub", mark: "github", url: URL(string: "https://github.com/marvtub")!),
-        Link(name: "X", handle: "@marvinaziz", mark: "x", url: URL(string: "https://x.com/marvinaziz")!),
-        Link(name: "LinkedIn", handle: "marvin-aziz", mark: "linkedin", url: URL(string: "https://www.linkedin.com/in/marvin-aziz")!),
+        Link(name: "GitHub", handle: "TriHerm/cutmark", mark: "github", url: Product.repositoryURL),
+        Link(name: "Foundation", handle: "marvtub/takes-public", mark: "github", url: Product.upstreamURL),
     ]
 
-    static let repo = URL(string: "https://github.com/marvtub/takes-public")!
-    static let coffee = URL(string: "https://paypal.me/webtotheflow")!
+    static let repo = Product.repositoryURL
+    static let upstream = Product.upstreamURL
 
     static var version: String {
         let i = Bundle.main.infoDictionary
@@ -143,7 +140,7 @@ private struct FloatingIcon: View {
             .shadow(color: Color(red: 0.15, green: 0.6, blue: 1).opacity(up ? 0.30 : 0.42), radius: up ? 26 : 18, y: up ? 18 : 10)
             .offset(y: up ? -5 : 0)
             .onAppear { withAnimation(.easeInOut(duration: 2.6).repeatForever(autoreverses: true)) { up = true } }
-            .help("Takes")
+            .help(Product.name)
     }
 }
 
@@ -176,11 +173,9 @@ private struct SocialLink: View {
     }
 }
 
-/// Marvin's note: who builds Takes, and two ways to thank him. Paper-warm card, handwritten
-/// greeting and sign-off, a star button (with the live count) and a coffee button.
+/// Cutmark's provenance stays visible in the product. The original Takes copyright and MIT license
+/// remain in LICENSE; this card links users to both codebases.
 struct SupportNote: View {
-    @AppStorage("about.stars") private var stars = 0
-
     private static let card = Theme.dynamic(0xFBF6EC, 0x29282A)
     private static let edge = Theme.dynamic(0xEADFC8, 0x3A3833)
     private static let hand = Theme.dynamic(0x5A4A2E, 0xF3E7CF)
@@ -190,50 +185,32 @@ struct SupportNote: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                Text("MA").font(Theme.sans(12, .bold)).foregroundStyle(.white)
+                Text("TH").font(Theme.sans(12, .bold)).foregroundStyle(.white)
                     .frame(width: 34, height: 34)
                     .background(Theme.accent, in: Circle())
                     .overlay(Circle().strokeBorder(Self.edge, lineWidth: 1).padding(-3))
-                Text("Hey, it's Marvin.").font(Theme.hand(25)).foregroundStyle(Self.hand)
+                Text("Cutmark by TriHerm Labs").font(Theme.hand(23)).foregroundStyle(Self.hand)
             }
-            Text("I build Takes on my own, in the open, and give it away for free. If it saved you an evening, here are two ways to say thanks.")
+            Text("Cutmark is built on the MIT-licensed Takes foundation by Marvin Aziz. We keep that attribution with the source while evolving the product as an independent TriHerm Labs project.")
                 .font(Theme.sans(13)).foregroundStyle(Self.text).lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
             VStack(spacing: 8) {
-                SupportButton(url: About.repo, mark: "github", title: "Give it a star on GitHub",
-                              detail: "Free · helps others find it", fill: Theme.ink, ink: Theme.paper) {
-                    if stars > 0 {
-                        HStack(spacing: 4) {
-                            Image(systemName: "star.fill").font(.system(size: 10)).foregroundStyle(Color(red: 0.89, green: 0.63, blue: 0.03))
-                            Text(stars.formatted()).font(Theme.mono(11.5, .semibold))
-                        }
-                        .foregroundStyle(Theme.paper)
-                        .padding(.horizontal, 8).padding(.vertical, 4)
-                        .background(Theme.paper.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    }
+                SupportButton(url: About.repo, mark: "github", title: "Cutmark on GitHub",
+                              detail: "Source, releases and issues", fill: Theme.ink, ink: Theme.paper) {
+                    Image(systemName: "arrow.up.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.paper)
                 }
-                SupportButton(url: About.coffee, mark: "paypal", title: "Buy me a coffee",
-                              detail: "Any amount · PayPal", fill: Theme.accent, ink: .white) {
-                    Image(systemName: "cup.and.saucer").font(.system(size: 15, weight: .medium)).foregroundStyle(.white)
+                SupportButton(url: About.upstream, mark: "github", title: "Takes foundation",
+                              detail: "Original MIT-licensed project by Marvin Aziz", fill: Theme.accent, ink: .white) {
+                    Image(systemName: "arrow.up.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
                 }
             }
             .padding(.top, 2)
-            Text("Thank you! Marvin").font(Theme.hand(21)).foregroundStyle(Self.sign)
+            Text("TriHerm Labs").font(Theme.hand(21)).foregroundStyle(Self.sign)
                 .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 14)
         .background(Self.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Self.edge, lineWidth: 0.5))
-        .task { await loadStars() }
-    }
-
-    /// The repo's star count from GitHub's public API; kept so the next open shows it at once.
-    private func loadStars() async {
-        guard let url = URL(string: "https://api.github.com/repos/marvtub/takes-public"),
-              let (data, _) = try? await URLSession.shared.data(from: url),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let n = json["stargazers_count"] as? Int else { return }
-        stars = n
     }
 }
 
@@ -275,8 +252,8 @@ private struct SupportButton<Trailing: View>: View {
     }
 }
 
-/// "About Takes" in the app menu and in the sidebar's Takes menu.
+/// "About Cutmark" in the app menu and sidebar menu.
 struct AboutButton: View {
     @Environment(\.openWindow) private var openWindow
-    var body: some View { Button("About Takes") { openWindow(id: "about") } }
+    var body: some View { Button("About Cutmark") { openWindow(id: "about") } }
 }

@@ -3,6 +3,10 @@
 /// them off (scripts/public/export.py sets this to false). The iPhone has the same switch in Look.swift.
 enum Features {
     static let socialBoards = false
+    /// Cutmark v0.1.0 is a macOS release. The inherited iOS companion remains in the source tree for
+    /// future porting, but the Mac app does not expose or start the phone bridge until it is rebranded
+    /// and released as a Cutmark companion.
+    static let phone = false
     /// The blog article (2026-10-05): the Article side of the post tab, shown as the user's own
     /// blog shows it. Private too; the public copy hides it (export.py sets this to false).
     static let blog = false

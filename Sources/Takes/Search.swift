@@ -7,7 +7,7 @@ import SwiftUI
 
 /// Search by meaning (2026-10-06): ⌘K finds clips by what they show ("hands typing", "walking
 /// outside"), stills, and the words in transcripts and scripts. EmbeddingGemma 2 runs on this Mac
-/// in the takes-embed helper (embed/, inside Takes.app); nothing goes to a server.
+/// in the takes-embed helper (embed/, inside Cutmark.app); nothing goes to a server.
 ///
 /// The model (~510 MB) is not in the app. After launch Takes downloads it in the background,
 /// resumes where it stopped, waits while Low Data Mode is on, and checks each file's SHA-256.
@@ -68,7 +68,7 @@ final class MediaSearch {
         var title: String {
             switch self {
             case .all: return "All"
-            case .takes: return "Takes"
+            case .takes: return "Cutmark"
             case .edits: return "Edits"
             case .broll: return "B-roll"
             case .stills: return "Stills"
@@ -129,7 +129,7 @@ final class MediaSearch {
     nonisolated static var totalBytes: Int64 { files.reduce(0) { $0 + $1.bytes } }
 
     nonisolated static var modelsDir: URL {
-        URL.applicationSupportDirectory.appending(path: "Takes/Models/embeddinggemma-2-q8")
+        URL.applicationSupportDirectory.appending(path: "Cutmark/Models/embeddinggemma-2-q8")
     }
     nonisolated static var helper: URL? {
         Bundle.main.url(forAuxiliaryExecutable: "takes-embed").flatMap { FileManager.default.isExecutableFile(atPath: $0.path) ? $0 : nil }
@@ -255,7 +255,7 @@ final class MediaSearch {
         let size = (try? fm.attributesOfItem(atPath: part.path)[.size] as? Int64) ?? 0
         guard size == f.bytes, try await Self.sha256(part) == f.sha else {
             try? fm.removeItem(at: part)
-            throw NSError(domain: "Takes", code: 1, userInfo: [NSLocalizedDescriptionKey: "\(f.path) did not match its checksum. Try again."])
+            throw NSError(domain: "Cutmark", code: 1, userInfo: [NSLocalizedDescriptionKey: "\(f.path) did not match its checksum. Try again."])
         }
         try? fm.removeItem(at: dest)
         try fm.moveItem(at: part, to: dest)
@@ -283,12 +283,12 @@ final class MediaSearch {
     @ObservationIgnored private var helperRoot: URL?
     @ObservationIgnored private var timer: Timer?
 
-    /// The library folder. Like Library.init: with no saved choice it is ~/Movies/Takes. Before
+    /// The library folder. Like Library.init: with no saved choice it is ~/Movies/Cutmark. Before
     /// (2026-10-06) only a saved choice counted, so on the default folder the helper never started
     /// and ⌘K found nothing.
     private var root: URL? {
         UserDefaults.standard.string(forKey: "root").map { URL(fileURLWithPath: $0) }
-            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes")
+            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: Product.defaultLibrary)
     }
 
     func startHelper() {
@@ -511,7 +511,7 @@ final class Fetcher: NSObject, URLSessionDataDelegate, @unchecked Sendable {
         }
         guard code == 200 || code == 206 else {
             completionHandler(.cancel)
-            finish(NSError(domain: "Takes", code: code, userInfo: [NSLocalizedDescriptionKey: "Hugging Face answered \(code)."]))
+            finish(NSError(domain: "Cutmark", code: code, userInfo: [NSLocalizedDescriptionKey: "Hugging Face answered \(code)."]))
             return
         }
         completionHandler(.allow)
@@ -846,7 +846,7 @@ struct SearchPage: View {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Search").font(Theme.display(26)).foregroundStyle(Theme.ink)
-                    Text("Press ⌘K and describe what you look for: \"hands typing\", \"walking outside\", \"where I talk about pricing\". Takes finds clips by what they show, stills, and the words in transcripts and scripts. It runs on this Mac. Nothing leaves it.")
+                    Text("Press ⌘K and describe what you look for: \"hands typing\", \"walking outside\", \"where I talk about pricing\". Cutmark finds clips by what they show, stills, and the words in transcripts and scripts. It runs on this Mac. Nothing leaves it.")
                         .font(Theme.sans(12.5)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
                 }
                 VStack(alignment: .leading, spacing: 12) {
@@ -869,7 +869,7 @@ struct SearchPage: View {
                 .overlay(RoundedRectangle(cornerRadius: Theme.radius).stroke(Theme.border))
                 VStack(alignment: .leading, spacing: 8) {
                     Text("About the model").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
-                    Text("EmbeddingGemma 2 by Google DeepMind (Apache 2.0), about 510 MB. Takes downloads it once in the background, never over Low Data Mode, and checks every file. The index of your library is a few MB in _library/search.")
+                    Text("EmbeddingGemma 2 by Google DeepMind (Apache 2.0), about 510 MB. Cutmark downloads it once in the background, never over Low Data Mode, and checks every file. The index of your library is a few MB in _library/search.")
                         .font(Theme.sans(12)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
                 }
             }

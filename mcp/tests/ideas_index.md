@@ -1,6 +1,6 @@
 # Ideas
 
-Takes writes this list from the idea files. Change an idea in its own file.
+Cutmark writes this list from the idea files. Change an idea in its own file.
 
 ## New (2)
 

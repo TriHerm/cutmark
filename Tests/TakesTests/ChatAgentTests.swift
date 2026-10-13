@@ -62,14 +62,14 @@ struct CodexParseTests {
         #expect(new.first == "exec" && !new.contains("resume") && new.last == "-")
         #expect(new.contains("sandbox_mode=\"danger-full-access\""))
         #expect(new.contains("developer_instructions=\"Be short.\""))
-        #expect(new.contains("mcp_servers.takes.env.TAKES_CHAT_ID=\"c-1\""))
+        #expect(new.contains("mcp_servers.cutmark.env.TAKES_CHAT_ID=\"c-1\""))
         #expect(new[new.firstIndex(of: "-m")! + 1] == "gpt-6-astra")
         let resumed = CodexAdapter.chatArguments(context: "x", model: "gpt-6-luna", thread: "t-9", chat: "c-1", board: "board",
                                                 access: "acceptEdits", takesInCodex: false)
         #expect(Array(resumed.prefix(2)) == ["exec", "resume"])
         #expect(Array(resumed.suffix(2)) == ["t-9", "-"])
         #expect(resumed.contains("sandbox_mode=\"workspace-write\""))
-        #expect(!resumed.contains { $0.hasPrefix("mcp_servers.takes") }, "no takes server in Codex: no -c for it")
+        #expect(!resumed.contains { $0.hasPrefix("mcp_servers.cutmark") }, "no Cutmark server in Codex: no -c for it")
     }
 }
 
@@ -103,13 +103,13 @@ struct OpenCodeParseTests {
         let fresh = ChatTurn(context: "Be short.", model: "", conversation: "c-1", thread: nil,
                              started: false, access: "bypassPermissions", board: nil)
         #expect(adapter.chatArguments(fresh) == ["run", "--format", "json", "--agent", "takes-chat"])
-        let resumed = ChatTurn(context: "Use Takes.", model: "", conversation: "c-1", thread: "ses-77",
+        let resumed = ChatTurn(context: "Use Cutmark.", model: "", conversation: "c-1", thread: "ses-77",
                                started: true, access: "acceptEdits", board: nil)
         #expect(adapter.chatArguments(resumed).suffix(2) == ["--session", "ses-77"])
         let env = adapter.chatEnvironment(resumed, base: ["TAKES_CHAT_ID": "c-1"])
         #expect(env["TAKES_CHAT_ID"] == "c-1")
         #expect(env["OPENCODE_CONFIG_CONTENT"]?.contains("takes-chat") == true)
-        #expect(env["OPENCODE_CONFIG_CONTENT"]?.contains("Use Takes.") == true)
+        #expect(env["OPENCODE_CONFIG_CONTENT"]?.contains("Use Cutmark.") == true)
         #expect(env["OPENCODE_PERMISSION"]?.contains(#""bash":"deny""#) == true)
     }
 }

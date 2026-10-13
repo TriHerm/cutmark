@@ -39,7 +39,7 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
     /// The Sound page: the library only, Use asks the chat (2026-10-09).
     @Test(.enabled(if: snapDir != nil)) func sounds() {
         let app = AppModel()
-        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes"))
+        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Cutmark"))
         guard let s = app.library.sessions.first else { return }
         let doc = SessionDoc(url: s.url)
         shoot("sounds-wide-dark", SoundsPane(doc: doc, wide: true).environment(app), size: CGSize(width: 1000, height: 700), dark: true)
@@ -48,7 +48,7 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
 
     @Test(.enabled(if: snapDir != nil)) func sidebar() {
         let app = AppModel()
-        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes"))
+        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Cutmark"))
         if let s = app.library.sessions.first(where: { $0.title.contains("Bookkeeping") }) { app.library.select(s.url) }
         shoot("sidebar", frame(app), size: CGSize(width: 290, height: 900))
         shoot("sidebar-dark", frame(app), size: CGSize(width: 290, height: 900), dark: true)
@@ -72,7 +72,7 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
         shoot("settings", SettingsView(library: app.library).environment(app), size: CGSize(width: 760, height: 560))
         UserDefaults.standard.set("appearance", forKey: "settingsPage")
         shoot("sidebar-archived", frame(app), size: CGSize(width: 290, height: 500))
-        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes"))
+        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Cutmark"))
     }
 
     /// The article as the blog shows it (the web view's own snapshot), where the user also writes.
@@ -95,13 +95,13 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
         let config = WKWebViewConfiguration()
         let files = SessionFiles()
         files.session = session
-        config.setURLSchemeHandler(files, forURLScheme: "takes")
+        config.setURLSchemeHandler(files, forURLScheme: "cutmark")
         let web = WKWebView(frame: NSRect(origin: .zero, size: size), configuration: config)
         let window = NSWindow(contentRect: NSRect(x: -6000, y: -6000, width: size.width, height: size.height),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = web
         window.orderFrontRegardless()
-        web.loadHTMLString(ArticlePage.html.replacingOccurrences(of: "post('ready', '');", with: ""), baseURL: URL(string: "takes://session/"))
+        web.loadHTMLString(ArticlePage.html.replacingOccurrences(of: "post('ready', '');", with: ""), baseURL: URL(string: "cutmark://session/"))
         for _ in 0..<20 where web.isLoading { try await Task.sleep(for: .milliseconds(150)) }
         let head = ArticleHead(c)
         _ = try? await web.evaluateJavaScript("takes.render(\(ArticleView.Coordinator.blocks(md)), \(head.json)); "
@@ -117,7 +117,7 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
     /// The Record tab as you open it: the whole window, camera paused.
     @Test(.enabled(if: snapDir != nil)) func record() {
         let app = AppModel()
-        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes"))
+        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Cutmark"))
         if let s = app.library.sessions.first(where: { $0.title.contains("Pay For AI") }) { app.library.select(s.url) }
         UserDefaults.standard.set("script", forKey: "rightTab")
         let window = ContentView(library: app.library).environment(app).tint(Theme.accent).font(Theme.body)
@@ -132,7 +132,7 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
     /// The storyboard strip's time ruler, under stand-in cards (the real strip loads too late).
     @Test(.enabled(if: snapDir != nil)) func about() {
         let app = AppModel()
-        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes"))
+        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Cutmark"))
         let v = AboutView().environment(app)
         shoot("about", v, size: CGSize(width: 440, height: 700))
         shoot("about-dark", v, size: CGSize(width: 440, height: 700), dark: true)
@@ -182,7 +182,7 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
 
     @Test(.enabled(if: snapDir != nil)) func vertical() {
         let video = FileManager.default.homeDirectoryForCurrentUser
-            .appending(path: "Movies/Takes/Demo/2026-01-01-sample/edits/sample-v1.mp4")
+            .appending(path: "Movies/Cutmark/Demo/2026-01-01-sample/edits/sample-v1.mp4")
         func card(_ media: URL?) -> some View {
             VerticalCard(text: .constant("Start with the hook: the feeds show one or two lines."), title: "", saveTitle: { _ in },
                          places: VerticalPlace.allCases, setPlaces: { _ in }, media: media, phoneHeight: 600,
@@ -201,7 +201,7 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
         let saved = (look.mode, look.palette, look.accent)
         defer { look.mode = saved.0; look.palette = saved.1; look.accent = saved.2 }
         let app = AppModel()
-        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes"))
+        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Cutmark"))
         UserDefaults.standard.set("appearance", forKey: "settingsPage")
         look.mode = .system; look.palette = .takes; look.accent = nil
         let settings = SettingsView(library: app.library).environment(app).font(Theme.body)
@@ -217,7 +217,7 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
     /// Takes, dark, with the chat open: the chat sits one step lighter than the page.
     @Test(.enabled(if: snapDir != nil)) func chatRaised() {
         let app = AppModel()
-        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes"))
+        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Cutmark"))
         app.chats.open = true
         let window = ContentView(library: app.library).environment(app).tint(Theme.accent).font(Theme.body)
         shoot("chat-dark", window, size: CGSize(width: 1440, height: 860), dark: true)
@@ -230,12 +230,12 @@ let snapDir = ProcessInfo.processInfo.environment["TAKES_SNAP"]
     /// library's newest session with takes. Look at these before changing the phone's version.
     @Test(.enabled(if: snapDir != nil)) func phoneRefs() {
         let app = AppModel()
-        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes"))
+        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Cutmark"))
         guard let s = app.library.sessions.first(where: { $0.takeCount > 0 }) else { return }
         app.library.select(s.url)
         guard let doc = app.library.current else { return }
         func paper(_ v: some View) -> some View { v.background(Theme.paper).environment(app).font(Theme.body).tint(Theme.accent) }
-        // The More menu is a Takes menu since 2026-10-11 (SessionMenu); one shot with "Move to project" open.
+        // The More menu is a Cutmark menu since 2026-10-11 (SessionMenu); one shot with "Move to project" open.
         func more(open group: String? = nil) -> some View {
             let st = MenuState()
             if let group { st.open.insert(group) }

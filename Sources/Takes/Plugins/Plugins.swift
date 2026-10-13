@@ -279,7 +279,7 @@ struct PluginsBoard: View {
                     }
                 }
                 if !on {
-                    Text("Off: Takes hides it. Its files and sign-ins stay.")
+                    Text("Off: Cutmark hides it. Its files and sign-ins stay.")
                         .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                 } else if let settings = p.settings {
                     settings(app)

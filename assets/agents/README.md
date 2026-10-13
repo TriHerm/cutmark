@@ -1,7 +1,7 @@
 # Agent marks
 
-The real marks of the agents Takes can run or connect, shown on Settings › Agents and in the
-chat's agent card. Each mark belongs to its owner; Takes shows it only to name that agent.
+The real marks of the agents Cutmark can run or connect, shown on Settings › Agents and in the
+chat's agent card. Each mark belongs to its owner; Cutmark shows it only to name that agent.
 
 | File | Agent | Source |
 |---|---|---|

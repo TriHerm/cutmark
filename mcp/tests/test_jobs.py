@@ -306,7 +306,7 @@ class Jobs(unittest.TestCase):
         self.assertNotIn("sends you a note", r["note"])
         self.assertIn("check later with get_job id=%s" % r["job"], r["note"])
         os.environ["TAKES_CHAT"] = "1"
-        self.assertIn("Takes sends you a note when it ends", self.run_job("true")["note"])
+        self.assertIn("Cutmark sends you a note when it ends", self.run_job("true")["note"])
         os.environ["TAKES_BOARD"] = "styles"
         self.assertNotIn("sends you a note", self.run_job("true")["note"])
 

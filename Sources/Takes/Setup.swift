@@ -4,14 +4,14 @@ import Observation
 import SwiftUI
 
 /// What a new Mac needs before Takes works (2026-10-05): an agent, signed in, and ffmpeg. Until
-/// 2026-10-12 the agent had to be Claude Code; now Claude Code, Codex, pi or opencode will do, and
-/// Takes installs Claude Code only on a Mac with none (Agents/SignIn.swift).
+/// 2026-10-12 the agent had to be Claude Code; now Claude Code, Codex, pi or opencode will do. A Mac
+/// with none asks which one to install instead of silently choosing Claude (Agents/SignIn.swift).
 /// Since 2026-10-10 also Apple's developer tools: the takes MCP server runs on /usr/bin/python3,
 /// which without them is only a stub, so no agent could use Takes. Their fix opens Apple's dialog.
 /// A downloaded Takes checks this at launch and each time it comes to the front. While a step is
 /// missing, the sidebar shows Finish setup; its panel fixes each step with one click. The app
-/// installs Claude Code with Anthropic's installer and ffmpeg as a static build in ~/.local/bin
-/// (no Homebrew needed). Sign-in opens Terminal, because each agent's login needs a terminal.
+/// opens the chosen agent's explicit installer in Terminal and downloads ffmpeg as a static build in
+/// ~/.local/bin (no Homebrew needed). Sign-in opens Terminal, because each agent's login needs a terminal.
 @MainActor @Observable
 final class Setup {
     static let shared = Setup()
@@ -23,8 +23,10 @@ final class Setup {
     var agent: Status = .unknown
     /// One of the agents here is signed in.
     var signedIn: Status = .unknown
-    /// The agent the steps name: the one Takes uses, or Claude Code while none is here.
+    /// The agent the steps name when one is installed.
     var target: AgentKind = .claude
+    /// First-run choice only. Nil means the user has not picked a provider yet.
+    var installChoice: AgentKind?
     var ffmpeg: Status = .unknown
     var devTools: Status = .unknown
     private var checking = false
@@ -63,7 +65,12 @@ final class Setup {
         }.value
         Self.useSignedIn(ready)
         let (pick, ok) = Self.readiness(here: here, ready: ready)
-        target = pick
+        if here.isEmpty {
+            if let installChoice { target = installChoice }
+        } else {
+            target = pick
+            installChoice = nil
+        }
         if agent != .working { agent = here.isEmpty ? .missing : .ok }
         if signedIn != .working { signedIn = ok ? .ok : .missing }
         if ffmpeg != .working { ffmpeg = hasFFmpeg ? .ok : .missing }
@@ -94,23 +101,35 @@ final class Setup {
 
     // MARK: Fixes
 
-    /// Only on a Mac with no agent: Claude Code, with Anthropic's installer.
+    /// First-run provider choice. Existing-agent setup never calls this path.
+    func chooseAgent(_ kind: AgentKind) {
+        guard agent != .ok else { return }
+        installChoice = kind
+        target = kind
+        if case .failed = agent { agent = .missing }
+    }
+
+    /// Opens the explicitly chosen provider's supported installer in Terminal. The app does not run
+    /// an installer until the user chooses a provider and presses Install.
     func installAgent() {
-        agent = .working
-        Task {
-            let (ok, out) = await Task.detached(priority: .userInitiated) {
-                Self.run("/bin/bash", ["-c", Agents.claudeInstaller])
-            }.value
-            agent = ok && !Agents.installed.isEmpty ? .ok : .failed(Self.lastLine(out) ?? "The install did not finish.")
-            if agent == .ok { AgentSetup.run() }
-            await check()
+        guard agent != .ok, let kind = installChoice else { return }
+        let install = kind.installation
+        let text = """
+        #!/bin/bash
+        clear
+        echo "\(install.hint)"
+        \(install.command)
+        echo
+        echo "Done. You can close this window and go back to Cutmark."
+        """
+        if !Self.openTerminal(text, name: "cutmark-install-agent.command") {
+            agent = .failed("Could not open Terminal. Install \(kind.name) in Terminal, then come back to Cutmark.")
         }
     }
 
     /// Opens Terminal on the agent's login. Takes checks again when it comes back to the front.
     func signIn() {
         guard let exe = Agents.path(target) else { return }
-        let script = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "takes-sign-in.command")
         let login = target.login
         let text = """
         #!/bin/bash
@@ -118,14 +137,23 @@ final class Setup {
         echo "\(login.hint)"
         '\(exe)'\(login.args.map { " " + $0 }.joined())
         echo
-        echo "Done. You can close this window and go back to Takes."
+        echo "Done. You can close this window and go back to Cutmark."
         """
+        if !Self.openTerminal(text, name: "cutmark-sign-in.command") {
+            signedIn = .failed("Could not open Terminal. Sign in to \(target.name) in Terminal.")
+        }
+    }
+
+    @discardableResult
+    private static func openTerminal(_ text: String, name: String) -> Bool {
+        let script = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: name)
         do {
             try text.write(to: script, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
             NSWorkspace.shared.openSoon(script)
+            return true
         } catch {
-            signedIn = .failed("Could not open Terminal. Sign in to \(target.name) in Terminal.")
+            return false
         }
     }
 
@@ -187,10 +215,6 @@ final class Setup {
             try fm.moveItem(at: dir.appending(path: name), to: URL(fileURLWithPath: dest))
             try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dest)
         }
-    }
-
-    nonisolated private static func lastLine(_ s: String) -> String? {
-        s.split(separator: "\n").last.map { String($0).trimmingCharacters(in: .whitespaces) }
     }
 
     nonisolated static func run(_ exe: String, _ args: [String]) -> (Bool, String) {
@@ -273,29 +297,63 @@ struct SetupPanel: View {
         }
     }
 
+    private var agentChoice: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "person.crop.circle.badge.questionmark")
+                .font(.system(size: 15)).foregroundStyle(Theme.faint).frame(width: 15).padding(.top, 1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Choose an AI agent").font(Theme.sans(13, .medium)).foregroundStyle(Theme.ink)
+                Text("Pick the provider you want Cutmark to use. Nothing is installed until you press Install.")
+                    .font(Theme.sans(12)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            TakesMenuButton(help: "Choose the agent Cutmark should install") {
+                HStack(spacing: 4) {
+                    Text(setup.installChoice?.name ?? "Choose")
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+                }
+                .font(Theme.sans(12.5, .medium)).foregroundStyle(Theme.ink)
+            } content: {
+                for kind in AgentKind.allCases {
+                    MenuButton(kind.name, checked: setup.installChoice == kind) { setup.chooseAgent(kind) }
+                }
+            }
+            .fixedSize()
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Finish setup").font(Theme.display(17))
-                Text("Takes records on its own. These steps let Takes storyboard, edit and write posts for you.")
+                Text("Cutmark records on its own. These steps let Cutmark storyboard, edit and write posts for you.")
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 12)
             Divider().overlay(Theme.border)
             VStack(alignment: .leading, spacing: 14) {
-                step(setup.agent == .ok ? "\(setup.target.name) is installed" : "Install Claude Code",
-                     "The assistant behind Takes. Codex, pi or opencode work too: install one of them instead, and Takes finds it.",
-                     setup.agent, action: "Install", busy: "Installing…", setup.installAgent)
-                step("Sign in to \(setup.target.name)", setup.target == .pi
+                if setup.agent == .ok {
+                    step("\(setup.target.name) is installed", "", setup.agent,
+                         action: "Install", busy: "Installing…", setup.installAgent)
+                } else {
+                    agentChoice
+                    if let choice = setup.installChoice {
+                        step("Install \(choice.name)", choice.installation.detail, setup.agent,
+                             action: "Install", busy: "Installing…", setup.installAgent)
+                    }
+                }
+                let signInAgent = setup.agent == .ok ? setup.target : setup.installChoice
+                step(signInAgent.map { "Sign in to \($0.name)" } ?? "Sign in to your agent",
+                     signInAgent == .pi
                      ? "Opens pi in Terminal: type /login and pick a provider. Come back here when you are done."
-                     : setup.target == .opencode
+                     : signInAgent == .opencode
                      ? "Opens opencode provider sign-in in Terminal. Pick a provider and come back here when you are done."
                      : "Opens Terminal and then your browser. Come back here when you are done.",
                      setup.agent == .ok ? setup.signedIn : .missing, action: "Sign in", busy: "Waiting…",
                      enabled: setup.agent == .ok, setup.signIn)
                 step("Get ffmpeg", "Cuts and exports video. About 60 MB, into ~/.local/bin.",
                      setup.ffmpeg, action: "Download", busy: "Downloading…", setup.installFFmpeg)
-                step("Get Apple's developer tools", "Takes' link to your agents runs on them. Apple's own installer opens; it takes a few minutes.",
+                step("Get Apple's developer tools", "Cutmark's link to your agents runs on them. Apple's own installer opens; it takes a few minutes.",
                      setup.devTools, action: "Install", busy: "Installing…", setup.installDevTools)
             }
             .padding(18)

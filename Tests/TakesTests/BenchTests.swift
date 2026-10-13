@@ -10,7 +10,7 @@ let bench = ProcessInfo.processInfo.environment["TAKES_BENCH"] != nil
 @MainActor
 @Suite struct ZBench {
     @Test(.enabled(if: bench)) func sessionOpenCosts() {
-        let root = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes")
+        let root = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Cutmark")
         let fm = FileManager.default
         var rows: [(Double, String)] = []
         for p in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? [] where !p.lastPathComponent.hasPrefix("_") {
@@ -41,7 +41,7 @@ import SwiftUI
 @MainActor
 @Suite struct ZBenchViews {
     @Test(.enabled(if: bench)) func chatLayoutCost() {
-        let root = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes")
+        let root = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Cutmark")
         let fm = FileManager.default
         var best: (Int, URL)? = nil
         for p in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? [] {
@@ -89,7 +89,7 @@ import SwiftUI
 
     @Test(.enabled(if: bench)) func paneCosts() {
         let app = AppModel()
-        let s = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes/Acme").path
+        let s = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Cutmark/Acme").path
         let session = (try? FileManager.default.contentsOfDirectory(atPath: s))?.first { $0.contains("how-i-make-my-videos") }
         let doc = SessionDoc(url: URL(fileURLWithPath: s).appending(path: session ?? ""))
         time("warmup", app, Text("x"))
@@ -106,7 +106,7 @@ import SwiftUI
 @MainActor
 @Suite struct ZBenchScroll {
     @Test(.enabled(if: bench)) func performanceScroll() {
-        let root = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes")
+        let root = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Cutmark")
         guard let social = SocialData.read(root) else { print("BENCH no social.json"); return }
         let view = ScrollView { SignalPage(data: social, platform: "") { Text("takes") }.padding(18) }
             .frame(width: 1100, height: 800).background(Theme.paper)
@@ -169,7 +169,7 @@ import SwiftUI
 @Suite struct ZBenchPost {
     /// What one file change costs the post tab: the reload that runs on each change in the session.
     @Test(.enabled(if: bench)) func postReloadCost() {
-        let root = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes")
+        let root = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Cutmark")
         let fm = FileManager.default
         var sessions: [URL] = []
         for p in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)) ?? [] where !p.lastPathComponent.hasPrefix("_") {
@@ -213,7 +213,7 @@ import SwiftUI
     /// The time to show the Post tab and to go back to it, in the whole window, on a real session.
     @Test(.enabled(if: bench)) func tabSwitchCost() {
         let app = AppModel()
-        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes"))
+        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Cutmark"))
         let name = ProcessInfo.processInfo.environment["TAKES_BENCH_SESSION"] ?? "claude-ran-a-shop"
         guard let s = app.library.sessions.first(where: { $0.url.lastPathComponent.contains(name) }) else { return }
         app.library.select(s.url)
@@ -273,7 +273,7 @@ import WebKit
     /// and shows this session's article.
     @Test(.enabled(if: bench)) func articleSwitchReusesThePage() async {
         let app = AppModel()
-        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes"))
+        app.library.setRoot(FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Cutmark"))
         guard let s = app.library.sessions.first(where: { FileManager.default.fileExists(atPath: $0.url.appending(path: "posts/article.md").path) }) else { return }
         app.library.select(s.url)
         UserDefaults.standard.set("post", forKey: "rightTab")
@@ -341,7 +341,7 @@ import WebKit
     @Test(.enabled(if: bench)) func streamCost() async throws {
         let fm = FileManager.default
         let name = ProcessInfo.processInfo.environment["TAKES_BENCH_SESSION"] ?? "claude-ran-a-shop"
-        let real = fm.homeDirectoryForCurrentUser.appending(path: "Movies/Takes")
+        let real = fm.homeDirectoryForCurrentUser.appending(path: "Movies/Cutmark")
         guard let src = (fm.subpaths(atPath: real.path) ?? []).first(where: { $0.hasSuffix(name) && !$0.contains("/.") })
             .map({ real.appending(path: $0) }) else { return }
         let root = fm.temporaryDirectory.appending(path: "takes-stream-\(UUID().uuidString)")

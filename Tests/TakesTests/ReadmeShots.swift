@@ -142,7 +142,7 @@ let demoRoot = ProcessInfo.processInfo.environment["TAKES_DEMO"]
         d.set(true, forKey: "chatOpen")
         d.set(true, forKey: "chatDocked")
         NSApp.applicationIconImage = NSImage(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .appending(path: "../../assets/Takes.icns"))
+            .appending(path: "../../assets/Cutmark.icns"))
         // The made-up creator demo.py picked for this library (2026-10-05): each site picture shows another one.
         let creator = (try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: demoRoot!)
             .appending(path: ".creator.json")))) as? [String: String] ?? [:]

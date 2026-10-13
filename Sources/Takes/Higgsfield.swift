@@ -189,9 +189,9 @@ struct HiggsfieldPage: View {
                 if hf.ready { models }
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Where to use it").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
-                    use("sparkles", "Storyboard", "Press ✦ on a shot. Takes writes the prompt from the shot and its sketch, and the clip plays on the shot.")
+                    use("sparkles", "Storyboard", "Press ✦ on a shot. Cutmark writes the prompt from the shot and its sketch, and the clip plays on the shot.")
                     use("photo.on.rectangle", "Assets", "Right-click a video › Change with Higgsfield…, then say what to change.")
-                    use("bubble.left", "Chat", "Ask Takes, for example: \"Make a 5 s clip of my desk at sunrise\" or \"Make this edit vertical\".")
+                    use("bubble.left", "Chat", "Ask Cutmark, for example: \"Make a 5 s clip of my desk at sunrise\" or \"Make this edit vertical\".")
                     Text("New files land in the session's generated folder.")
                         .font(Theme.sans(12)).foregroundStyle(Theme.faint)
                 }

@@ -181,7 +181,7 @@ struct XThreadCard: View {
 
     private func actions(_ i: Int) -> some View {
         HStack(spacing: 0) {
-            stat("bubble.left", i == 0 ? "12" : "3", help: "Comment for Takes", perform: onComment)
+            stat("bubble.left", i == 0 ? "12" : "3", help: "Comment for Cutmark", perform: onComment)
             stat("arrow.2.squarepath", i == 0 ? "8" : "")
             stat("heart", i == 0 ? "96" : "14")
             stat("chart.bar.xaxis", i == 0 ? "4.2K" : "1.1K")

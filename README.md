@@ -1,102 +1,119 @@
-<p align="center"><img src="docs/gallery/1-main.jpg" alt="Takes for Mac: record talking-head videos, Claude Code does the edit" width="100%"></p>
+# Cutmark
 
-<p align="center">
-  Record on your Mac or iPhone. Your coding agent writes the script,<br>
-  cuts the edit and drafts the posts.<br>
-  <a href="https://gettakes.app"><b>gettakes.app</b></a>
-</p>
+**Cutmark is a local-first video production workspace for people and AI agents, built by TriHerm Labs.**
 
-<p align="center">
-  <img alt="macOS 15+" src="https://img.shields.io/badge/macOS-15%2B-0b1530">
-  <img alt="iOS 18+" src="https://img.shields.io/badge/iPhone-iOS%2018%2B-0b1530">
-  <img alt="Swift" src="https://img.shields.io/badge/Swift-SwiftUI-3b82f6">
-  <img alt="MCP" src="https://img.shields.io/badge/Claude%20Code-MCP%20server-d97757">
-  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-22c55e">
-</p>
+Record a talking-head video, keep the source files on your Mac, and let the agent you already use help with scripts, storyboards, edits, review notes, thumbnails, and post drafts. Cutmark can run its in-app chat through Claude Code, Codex, pi, or opencode, and its MCP server can also be used from compatible external clients.
 
-Takes shows each post the way LinkedIn, X, YouTube or Shorts will show it, so you review the real thing. No coding needed, no account, no usage data: your videos stay in folders on your Mac.
+Cutmark is derived from the MIT-licensed [Takes](https://github.com/marvtub/takes-public) project by Marvin Aziz. The original copyright and license are preserved in [`LICENSE`](LICENSE); see [`NOTICE.md`](NOTICE.md) for provenance.
 
-## Install
+## What is different
 
-Paste this in Terminal:
+- **Provider choice at first run.** Cutmark does not silently install or require Claude Code. Choose Claude Code, Codex, pi, or opencode.
+- **Multi-provider chat.** Claude and Codex work directly; pi and opencode can use their own provider/model configuration.
+- **Direct MCP access.** The same local library can be exposed to compatible MCP clients without routing through Codex. ChatGPT can use the private Secure MCP Tunnel path when custom MCP access is available for the account or workspace.
+- **Independent product state.** Cutmark uses its own bundle identifier, library folder, configuration, update channel, and GitHub releases. It can coexist with Takes on the same Mac.
+- **Local-first storage.** The default library is `~/Movies/Cutmark`. Cutmark currently ships with usage reporting disabled and no analytics endpoint configured.
+
+## Requirements
+
+- Apple silicon Mac
+- macOS 15 or newer
+- Apple's Command Line Tools
+- `ffmpeg` and `ffprobe`
+- At least one configured chat runner: Claude Code, Codex, pi, or opencode
+
+The first-run setup can guide you through the missing pieces. No AI provider is installed until you choose one and press **Install**.
+
+## Install a release
+
+Download `Cutmark.dmg` from the latest GitHub release, open it, and copy `Cutmark.app` to Applications.
+
+The current open-source release pipeline uses ad-hoc signing and is not notarized. On first launch, macOS may require **System Settings → Privacy & Security → Open Anyway**. Notarization can be added later without changing the app's data format.
+
+## Build from source
 
 ```sh
-curl -fsSL https://gettakes.app/install | bash
+git clone https://github.com/TriHerm/cutmark.git
+cd cutmark
+./test.sh
+./build.sh
 ```
 
-It installs Takes, ffmpeg and Apple's developer tools, then opens Takes. Takes works with Claude Code, Codex, pi or opencode: when one of them is on your Mac, the script uses it and helps you sign in. pi can use any provider/model it supports, and opencode uses its configured providers. With none, the upstream installer installs Claude Code. Run it again to update. You can [read the script](https://gettakes.app/install) first: it is 124 lines.
+The app is written in Swift/SwiftUI. The source target is still named `Takes` internally for compatibility with the upstream codebase, while the distributed application is `Cutmark.app` with bundle identifier `com.triherm.cutmark`.
 
-<details>
-<summary>Other ways to install</summary>
+To package the already-built app as the release artifact:
 
-- **Download:** get `Takes.dmg` from [Releases](https://github.com/marvtub/takes-public/releases/latest) and drag Takes to Applications. Takes is not notarized yet, so open System Settings > Privacy & Security and click **Open Anyway** once ([pictures of each step](https://gettakes.app/download)). Then click **Finish setup** in the sidebar.
-- **From source:** clone this repo, `brew install ffmpeg`, then `./build.sh install`.
-
-</details>
-
-## How a video goes
-
-1. **Storyboard.** Ask *"storyboard my next video"*. Claude writes the script and sketches each shot.
-2. **Record.** Read off a teleprompter that follows your voice. Camera and screen record as two synced files. Star the take you keep.
-3. **Post.** Ask *"cut my last take"* and *"write the posts"*. Review each draft as the platform shows it, leave comments on a frame or a line, and schedule it.
-
-<p align="center"><img src="docs/gallery/3-storyboard.jpg" alt="A marker sketch for every shot of the script" width="100%"></p>
-
-<p align="center"><img src="docs/gallery/2-record.jpg" alt="A teleprompter that follows your voice, camera and screen in one take" width="100%"></p>
-
-<p align="center"><img src="docs/gallery/4-edit.jpg" alt="No timeline: Claude Code cuts the take and makes the vertical version" width="100%"></p>
-
-<p align="center"><img src="docs/gallery/5-comment.jpg" alt="Notes on the frame become a new version of the edit" width="100%"></p>
-
-<p align="center"><img src="docs/gallery/6-styles.jpg" alt="Caption and title styles for the edit" width="100%"></p>
-
-<p align="center"><img src="docs/gallery/7-posts.jpg" alt="The posts for LinkedIn, X, YouTube and Shorts, previewed as the real post" width="100%"></p>
-
-<p align="center"><img src="docs/gallery/8-rules.jpg" alt="A note given once becomes a rule Claude reads before every edit" width="100%"></p>
-
-## On your iPhone
-
-Your videos, takes, storyboards and posts, from anywhere. Ask Takes from the phone too. Record a take on the phone and it lands in the session on your Mac. The phone reaches your Mac over [Tailscale](https://tailscale.com); nothing goes through a server of ours.
-
-To install it you need Xcode and an Apple ID: `TAKES_TEAM=<team id> ios/install.sh`. With a free Apple ID, install it again every 7 days.
-
-## How it works
-
-Your library is plain folders in `~/Movies/Takes`. The app records into them, your agent reads and writes them through the `takes` MCP server, and the app updates when a file changes. The chat panel in the app runs on Claude Code, Codex, pi or opencode, using that agent's own provider/account: the line under "Takes" in the chat picks the agent and the model, and Settings › Agents shows which agents can open your library.
-
-The server works with any MCP agent. On its first launch Takes adds it to each one on your Mac: Claude Code, Codex, Cursor, Gemini CLI, opencode, pi (with pi-mcp-adapter) and Claude Desktop. It also adds two skills (`takes-storyboard`, `takes-video-edit`) to `~/.claude/skills` and `~/.agents/skills`. So you can ask from any of them too. Another agent, or one you installed later: Settings › Agents › Connect, or `python3 /Applications/Takes.app/Contents/Resources/takes_mcp.py --setup`.
-
-**ChatGPT can connect directly when custom MCP access is enabled for the account/workspace; Codex is not required.** For a private Mac, use OpenAI Secure MCP Tunnel with the existing stdio server. For MCP Inspector, gateways, or a remote deployment, this fork also exposes the same server over Streamable HTTP at `/mcp`: `python3 /Applications/Takes.app/Contents/Resources/takes_mcp.py --http`. See [ChatGPT direct MCP](docs/chatgpt-mcp.md).
-
-- Start a new agent session after the first launch: a session that was already open does not see the server.
-- **Cursor** gets a short list of 30 tools (script, takes, storyboard, edit, jobs, comments, posts, plan), because Cursor uses only about 40 tools across all its servers. For every tool, set `"env": {"TAKES_TOOLS": "all"}` in the `takes` entry of `~/.cursor/mcp.json`.
-- **Gemini CLI** turns MCP servers off in folders you have not trusted. Trust the folder once when Gemini asks.
-- The server runs on the Python in Apple's developer tools. Without them, Takes' Finish setup has an Install button.
-
-```mermaid
-flowchart LR
-    app["<b>Takes.app</b><br/>record · review"]
-    lib[("<b>~/Movies/Takes</b><br/>scripts · takes · posts")]
-    claude["<b>Your agent</b><br/>chat panel, Claude Code,<br/>Codex, Cursor, …"]
-    phone["<b>iPhone</b>"]
-    app <--> lib
-    claude -- "takes MCP" --> lib
-    app -- "starts" --> claude
-    phone -- "Tailscale" --> app
+```sh
+./scripts/package-dmg.sh
 ```
 
-## Good to know
+This creates `build.noindex/Cutmark.dmg`.
 
-- **Needs:** a Mac with Apple silicon, macOS 15+ and one configured chat agent/provider (Claude Code, Codex, pi or opencode).
-- **Optional:** `whisper` for transcripts. A Gemini key for storyboard sketches, B-roll names and best cuts: Settings › Gemini says what it adds and saves it.
-- **Questions and ideas:** [Discussions](https://github.com/marvtub/takes-public/discussions). Takes does not take pull requests, so one person keeps it consistent. Forks are welcome.
-- The pictures are the real app on a made-up library.
+## Library
 
-## Support
+The default library is a set of ordinary folders under:
 
-Takes is free. If it saves you time, you can buy me a coffee:
+```text
+~/Movies/Cutmark
+```
 
-<p>
-  <a href="https://paypal.me/webtotheflow"><img alt="Donate with PayPal" src="https://img.shields.io/badge/PayPal-Buy%20me%20a%20coffee-003087?style=for-the-badge&logo=paypal&logoColor=white"></a>
-  <a href="https://venmo.com/u/MarvinAziz"><img alt="Donate with Venmo" src="https://img.shields.io/badge/Venmo-Buy%20me%20a%20coffee-008CFF?style=for-the-badge&logo=venmo&logoColor=white"></a>
-</p>
+Projects contain sessions. Sessions contain scripts, recordings, edits, storyboards, thumbnails, post files, and metadata. You can change the library folder from the app. Cutmark does not need a hosted project database for this workflow.
+
+## AI runners
+
+The in-app chat can run through:
+
+| Runner | Account/provider behavior |
+| --- | --- |
+| Claude Code | Uses the Claude Code account or API configuration already available to the CLI. |
+| Codex | Uses the Codex/ChatGPT account or API configuration available to the CLI. |
+| pi | Uses the provider and model configured in pi. |
+| opencode | Uses the providers and model configured in opencode. |
+
+Cutmark keeps provider-specific command construction inside its agent adapters. The rest of the app asks for an agent capability rather than directly invoking a specific provider.
+
+## MCP
+
+Cutmark includes the inherited Python MCP implementation and extends it with both stdio and Streamable HTTP transports. The packaged server is local-first and can be connected to agent clients on the same Mac.
+
+For ChatGPT, Codex is **not** a required bridge. A private Mac can use OpenAI's Secure MCP Tunnel to launch the local stdio server. See [`docs/chatgpt-mcp.md`](docs/chatgpt-mcp.md).
+
+The HTTP transport listens on loopback by default:
+
+```sh
+python3 /Applications/Cutmark.app/Contents/Resources/cutmark_mcp.py --http
+# http://127.0.0.1:8765/mcp
+```
+
+Do not expose the loopback server directly to the public internet. A public deployment needs a stable HTTPS endpoint and proper authentication/authorization.
+
+## Configuration and secrets
+
+Cutmark's auxiliary environment file is:
+
+```text
+~/.config/cutmark/.env
+```
+
+For migration only, Cutmark can still read legacy values from `~/.claude/.env` when a value is not present in the Cutmark file. New writes go to Cutmark's own config. Provider CLIs continue to own their own login and model configuration.
+
+## Privacy
+
+- Video, scripts, chats, and project metadata stay in the library on your Mac unless a selected provider or explicit publishing/generation action sends data to an external service.
+- Cutmark does not configure a usage analytics endpoint in the current release.
+- API/provider calls still follow the privacy and billing terms of the service you choose.
+- The MCP HTTP listener binds to loopback by default.
+
+## Development and releases
+
+CI runs the Python MCP suite and Swift tests on macOS. Tags matching `v*` run the release workflow, build `Cutmark.app`, package `Cutmark.dmg`, verify the artifact, and create a GitHub Release.
+
+The first public version is intentionally conservative: preserve the proven local file format and editing infrastructure, while separating product identity, provider choice, configuration, MCP identity, and release infrastructure from upstream Takes.
+
+**v0.1.0 is a macOS release.** The inherited iOS companion source remains in the repository as upstream-derived work, but Cutmark does not start or expose the phone bridge until that companion has its own Cutmark identity and release path.
+
+## License and provenance
+
+Cutmark is distributed under the MIT license inherited from Takes. The original Takes copyright notice remains in [`LICENSE`](LICENSE).
+
+TriHerm Labs' changes include the Cutmark product identity, provider-neutral setup, additional agent adapters, direct MCP transport, configuration isolation, release infrastructure, and subsequent Cutmark-specific work. See [`NOTICE.md`](NOTICE.md).

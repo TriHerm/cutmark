@@ -263,7 +263,7 @@ final class AppModel {
             UserDefaults.standard.set(SessionMode.record.rawValue, forKey: "rightTab")
         }
         // Tests leave the app's logs alone: their perf lines and stall samples went into
-        // ~/Library/Logs/Takes beside the app's and read as the app's own (2026-10-04).
+        // ~/Library/Logs/Cutmark beside the app's and read as the app's own (2026-10-04).
         if !Self.testing { Perf.start(); PostFile.warmPortraits(library.root) }
         copilot.askChat = { [chats] text in chats.comments.send(text, title: "Comments", onStage: nil) }
         voice.source = { [weak self] in self?.promptText ?? "" }
@@ -288,8 +288,10 @@ final class AppModel {
         Task { await camera.boot() }
         if !Self.testing {
             Store.markRecording(library.root, false)  // a marker a crash left behind
-            phone = PhoneServer(app: self)
-            phone?.start()
+            if Features.phone {
+                phone = PhoneServer(app: self)
+                phone?.start()
+            }
             Transcripts.shared.start(root: { [weak self] in self?.library.root },
                                      paused: { [weak self] in self?.isRecording ?? false })
         }
@@ -375,12 +377,12 @@ final class AppModel {
         }
     }
 
-    /// takes://open?path=<project folder, session folder, or a file in a session>
+    /// cutmark://open?path=<project folder, session folder, or a file in a session>
     /// (used by the MCP server's open_in_app tool). Many Claude chats run at once, and the user works
     /// while they do, so a request never changes the screen or plays a video: it waits as a notice
     /// (the pill on the stage, a dot in the sidebar) until he clicks it (2026-10-01).
     func handle(url: URL) {
-        guard url.scheme == "takes",
+        guard url.scheme == "cutmark",
               let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "path" })?.value else { return }
         let target = URL(fileURLWithPath: path).standardizedFileURL
@@ -403,7 +405,7 @@ final class AppModel {
     /// too, so a click on a video in the chat only made a notice (2026-10-04).
     func follow(_ url: URL) {
         var path = url.isFileURL ? url.path : nil
-        if url.scheme == "takes" {
+        if url.scheme == "cutmark" {
             path = URLComponents(url: url, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "path" })?.value
         }

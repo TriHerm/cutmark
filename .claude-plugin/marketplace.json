@@ -1,11 +1,11 @@
 {
-  "name": "takes",
-  "owner": { "name": "Marvin Aziz", "url": "https://github.com/marvtub" },
+  "name": "cutmark",
+  "owner": { "name": "TriHerm Labs", "url": "https://github.com/TriHerm" },
   "plugins": [
     {
-      "name": "takes",
+      "name": "cutmark",
       "source": "./",
-      "description": "Storyboard and edit talking-head videos with the Takes Mac app (gettakes.app)."
+      "description": "Storyboard and edit talking-head videos with the Cutmark Mac app."
     }
   ]
 }

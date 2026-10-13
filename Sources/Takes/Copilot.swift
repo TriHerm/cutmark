@@ -505,7 +505,7 @@ final class CopilotRunner: ObservableObject {
     }
 
     static let redraftPrompt = """
-        The user gave feedback on LinkedIn comment drafts in the Takes app. Call get_comment_context. \
+        The user gave feedback on LinkedIn comment drafts in the Cutmark app. Call get_comment_context. \
         For each item in waiting_for_redraft, read the newest draft's variants and feedback note and \
         write 3 new variants that follow it (if the draft has an edit, that is the user's own text: \
         keep it as variant 1, changed only as the note asks), each a different shape, keeping to the lessons and the \
@@ -581,8 +581,8 @@ enum CopilotAsk {
     }
 
     static let context = """
-        The user is talking to you from the Comments board inside the Takes app: the LinkedIn \
-        comment copilot. It shows comment drafts from ~/Movies/Takes/_library/comments/suggestions/ \
+        The user is talking to you from the Comments board inside the Cutmark app: the LinkedIn \
+        comment copilot. It shows comment drafts from ~/Movies/Cutmark/_library/comments/suggestions/ \
         and redraws by itself. Use the takes tools get_comment_context, list_comment_suggestions, \
         add_comment_suggestion, redraft_comment and set_comment_posted; the lessons are \
         _library/rules/comments.md. The user reads your replies in a narrow panel: keep them short, no tables, no \

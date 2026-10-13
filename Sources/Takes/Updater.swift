@@ -3,13 +3,13 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// Agents never restart Takes (2026-10-03). `./build.sh install` stages a new build in
-/// `~/Applications/.update.noindex/Takes.app` while Takes runs; this notices it, the sidebar shows
+/// Agents never restart Cutmark. `./build.sh install` stages a new build beside Cutmark.app while
+/// Cutmark runs; this notices it, the sidebar shows
 /// Update, and only the user's click swaps it in: once nothing records or runs (a Claude reply, an
 /// export), Takes quits, the new build replaces the old one, and it opens again. `.noindex`
 /// keeps Spotlight, and so macOS, from opening the staged copy.
 ///
-/// Public releases (2026-10-07): a Takes from a GitHub release (its Info.plist has ReleaseTag)
+/// Public releases: a Cutmark build from a GitHub release (its Info.plist has ReleaseTag)
 /// also asks GitHub for the newest release, at launch and every six hours. A newer one is
 /// downloaded and staged in the same folder, so the same Update row shows, with the release
 /// notes as What's new. Before this, users of a release never heard of a newer one.
@@ -45,7 +45,7 @@ final class Updater {
             if let first = headline.first { headline = first.uppercased() + headline.dropFirst() }
             if let first = more.first { more = first.uppercased() + more.dropFirst() + (more.hasSuffix(".") ? "" : ".") }
             let detail = [more, body.trimmingCharacters(in: .whitespacesAndNewlines)].filter { !$0.isEmpty }.joined(separator: "\n\n")
-            return Change(id: id, area: area.isEmpty ? "Takes" : area, headline: headline, detail: detail, date: date)
+            return Change(id: id, area: area.isEmpty ? Product.name : area, headline: headline, detail: detail, date: date)
         }
 
         /// changes.json from build.sh; [] when the build has none (older builds).
@@ -59,7 +59,7 @@ final class Updater {
         /// A release's notes (release.sh): "### Area" headings over "- headline" lines. The
         /// Install section is for the download page, not news.
         nonisolated static func notes(_ body: String) -> [Change] {
-            var out: [Change] = [], area = "Takes"
+            var out: [Change] = [], area = Product.name
             for line in body.split(whereSeparator: \.isNewline).map({ $0.trimmingCharacters(in: .whitespaces) }) {
                 if line.hasPrefix("### ") { area = String(line.dropFirst(4)); continue }
                 guard line.hasPrefix("- "), area != "Install" else { continue }
@@ -78,13 +78,13 @@ final class Updater {
     @ObservationIgnored private var releaseTimer: Timer?
     @ObservationIgnored private var fetching = false
 
-    static let releaseRepo = "marvtub/takes-public"
+    static let releaseRepo = Product.repository
     /// This build's release tag; nil for a build from source, which never updates itself.
     private var ownRelease: String? { Bundle.main.infoDictionary?["ReleaseTag"] as? String }
 
     private var running: URL { Bundle.main.bundleURL }
     private var waiting: URL {
-        running.deletingLastPathComponent().appendingPathComponent(".update.noindex")
+        running.deletingLastPathComponent().appendingPathComponent(".cutmark-update.noindex")
             .appendingPathComponent(running.lastPathComponent)
     }
 
@@ -127,51 +127,24 @@ final class Updater {
         var assets: [Asset]
     }
 
-    /// The update check goes through gettakes.app (2026-10-10), which answers with GitHub's JSON
-    /// and counts the check: this version, the macOS version and whether an iPhone used this Mac
-    /// in the last 7 days. `from` is set on the first check of a new version: the version before
-    /// it (an update), or "new" (a first install). No ID. GitHub itself is the fallback.
-    nonisolated static func checkURL(own: String, phone: Bool, from: String? = nil) -> URL {
-        let v = ProcessInfo.processInfo.operatingSystemVersion
-        var c = URLComponents(string: "https://gettakes.app/latest")!
-        c.queryItems = [.init(name: "v", value: own), .init(name: "os", value: "\(v.majorVersion).\(v.minorVersion)"),
-                        .init(name: "phone", value: phone ? "1" : "0")]
-        if let from { c.queryItems?.append(.init(name: "from", value: from)) }
-        return c.url!
-    }
-
-    static let checkedKey = "releaseChecked"
-
-    /// What `from` says for this check: nil when this version was counted before. A Mac that
-    /// checked before this code came (no `checkedKey` but past the welcome) is not "new".
-    static func checkFrom(own: String, defaults d: UserDefaults = .standard) -> String? {
-        guard let seen = d.string(forKey: checkedKey) else { return d.bool(forKey: Onboarding.doneKey) ? nil : "new" }
-        return seen == own ? nil : seen
-    }
-
     /// Asks for the newest release; a newer one is downloaded and staged. Quiet when offline or
     /// when GitHub says no: it tries again in six hours.
     func checkRelease() {
         guard let own = ownRelease, !fetching, !applying else { return }
         fetching = true
-        let github = URL(string: "https://api.github.com/repos/\(Self.releaseRepo)/releases/latest")!
-        let api = Self.checkURL(own: own, phone: PhoneServer.usedRecently(), from: Self.checkFrom(own: own))
-        let stage = waiting.deletingLastPathComponent(), skip = staged?.release, id = Bundle.main.bundleIdentifier ?? ""
+        let api = URL(string: "https://api.github.com/repos/\(Self.releaseRepo)/releases/latest")!
+        let stage = waiting.deletingLastPathComponent(), skip = staged?.release
         Task { @MainActor in
             defer { fetching = false }
-            // Counted once gettakes.app answered, so an offline launch keeps the update to tell.
-            let counted: @Sendable () -> Void = { UserDefaults.standard.set(own, forKey: Self.checkedKey) }
-            if await Self.fetchRelease(api: api, fallback: github, own: own, skip: skip, bundleID: id, into: stage, answered: counted) != nil {
+            if await Self.fetchRelease(api: api, own: own, skip: skip, into: stage) != nil {
                 lastRead = nil; check()
             }
         }
     }
 
-    /// Reads the newest release from `api`, or from `fallback` when `api` does not answer; when
-    /// it is newer than `own` and not `skip` (already staged), downloads its Takes.dmg and stages
-    /// it. Returns the staged tag.
-    nonisolated static func fetchRelease(api: URL, fallback: URL? = nil, own: String, skip: String?, bundleID: String, into stage: URL,
-                                         answered: (@Sendable () -> Void)? = nil) async -> String? {
+    /// Reads the newest release from `api`; when it is newer than `own` and not `skip` (already
+    /// staged), downloads its Cutmark.dmg and stages it. Returns the staged tag.
+    nonisolated static func fetchRelease(api: URL, own: String, skip: String?, into stage: URL) async -> String? {
         func latest(_ url: URL) async -> Data? {
             var req = URLRequest(url: url)
             req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -179,22 +152,18 @@ final class Updater {
                   (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
             return data
         }
-        var data = await latest(api)
-        if data != nil { answered?() }
-        if data == nil, let fallback { data = await latest(fallback) }
-        let lists = fallback ?? api
-        guard let data,
+        guard let data = await latest(api),
               let r = try? JSONDecoder().decode(Release.self, from: data),
               isNewer(r.tag_name, than: own), skip != r.tag_name,
-              let dmg = r.assets.first(where: { $0.name == "Takes.dmg" }),
+              let dmg = r.assets.first(where: { $0.name == "Cutmark.dmg" }),
               let (file, dresp) = try? await URLSession.shared.download(from: dmg.browser_download_url) else { return nil }
         defer { try? FileManager.default.removeItem(at: file) }
         guard (dresp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         // One update jumps to the newest release, so What's new lists every release since `own`
         // (2026-10-08), not only the newest. Without the list, the newest release's notes.
         var bodies = [r.body ?? ""]
-        if let list = URL(string: lists.absoluteString.replacingOccurrences(of: "/releases/latest", with: "/releases?per_page=30")),
-           list != lists, let (ldata, lresp) = try? await URLSession.shared.data(for: URLRequest(url: list)),
+        if let list = URL(string: api.absoluteString.replacingOccurrences(of: "/releases/latest", with: "/releases?per_page=30")),
+           list != api, let (ldata, lresp) = try? await URLSession.shared.data(for: URLRequest(url: list)),
            (lresp as? HTTPURLResponse)?.statusCode == 200,
            let all = try? JSONDecoder().decode([Release].self, from: ldata) {
             let since = all.filter { isNewer($0.tag_name, than: own) && !isNewer($0.tag_name, than: r.tag_name) }
@@ -202,7 +171,7 @@ final class Updater {
             if !since.isEmpty { bodies = since.map { $0.body ?? "" } }
         }
         let notes = (try? JSONEncoder().encode(["tag": r.tag_name, "body": mergeNotes(bodies)])) ?? Data()
-        return Self.stage(dmg: file, tag: r.tag_name, bundleID: bundleID, notes: notes, into: stage) ? r.tag_name : nil
+        return Self.stage(dmg: file, tag: r.tag_name, notes: notes, into: stage) ? r.tag_name : nil
     }
 
     /// Several releases' notes as one: each "### Area" once, in the order it first shows, with
@@ -210,7 +179,7 @@ final class Updater {
     nonisolated static func mergeNotes(_ bodies: [String]) -> String {
         var order: [String] = [], lines: [String: [String]] = [:]
         for body in bodies {
-            var area = "Takes"
+            var area = Product.name
             for line in body.split(whereSeparator: \.isNewline).map({ $0.trimmingCharacters(in: .whitespaces) }) {
                 if line.hasPrefix("### ") { area = String(line.dropFirst(4)); continue }
                 guard line.hasPrefix("- "), area != "Install" else { continue }
@@ -221,10 +190,10 @@ final class Updater {
         return order.map { "### \($0)\n" + lines[$0]!.joined(separator: "\n") }.joined(separator: "\n\n")
     }
 
-    /// Mounts the download, checks it is Takes at that tag, and stages its app as build.sh does.
+    /// Mounts the download, checks it is Cutmark at that tag, and stages its app as build.sh does.
     /// The notes go beside it as release.json for What's new.
-    nonisolated static func stage(dmg: URL, tag: String, bundleID: String, notes: Data, into stage: URL) -> Bool {
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("takes-update-\(UUID().uuidString)")
+    nonisolated static func stage(dmg: URL, tag: String, notes: Data, into stage: URL) -> Bool {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("cutmark-update-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: tmp) }
         guard (try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)) != nil,
               (try? notes.write(to: tmp.appendingPathComponent("release.json"))) != nil else { return false }
@@ -232,18 +201,18 @@ final class Updater {
         set -e
         mnt="$0/mnt"; trap 'hdiutil detach -quiet "$mnt" 2>/dev/null || true' EXIT
         hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mnt" "$1"
-        plist="$mnt/Takes.app/Contents/Info.plist"
+        plist="$mnt/Cutmark.app/Contents/Info.plist"
         [ "$(/usr/libexec/PlistBuddy -c 'Print :ReleaseTag' "$plist")" = "$2" ]
         [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "$3" ]
         mkdir -p "$4"; rm -rf "$4/incoming.app"
-        ditto "$mnt/Takes.app" "$4/incoming.app"
+        ditto "$mnt/Cutmark.app" "$4/incoming.app"
         xattr -dr com.apple.quarantine "$4/incoming.app" 2>/dev/null || true
         cp "$0/release.json" "$4/release.json"
-        rm -rf "$4/Takes.app"; mv "$4/incoming.app" "$4/Takes.app"
+        rm -rf "$4/Cutmark.app"; mv "$4/incoming.app" "$4/Cutmark.app"
         """
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", script, tmp.path, dmg.path, tag, bundleID, stage.path]
+        p.arguments = ["-c", script, tmp.path, dmg.path, tag, Product.bundleID, stage.path]
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         guard (try? p.run()) != nil else { return false }
@@ -335,8 +304,7 @@ final class Updater {
     }
 }
 
-/// "Update" beside the name at the top of the sidebar, only while a new build waits. Two click
-/// areas (2026-10-04): "Update Takes" updates now; "N changes ›" opens What's new.
+/// "Update" beside the name at the top of the sidebar, only while a new build waits.
 struct UpdateButton: View {
     var library: Library
     private var updater = Updater.shared
@@ -361,7 +329,7 @@ struct UpdateButton: View {
                             }
                         }
                         .frame(width: 16)
-                        Text(updater.applying ? "Updating…" : "Update Takes").font(Theme.sans(13, .semibold))
+                        Text(updater.applying ? "Updating…" : "Update Cutmark").font(Theme.sans(13, .semibold))
                         Spacer(minLength: 4)
                     }
                     .padding(.leading, 10).padding(.vertical, 7)
@@ -372,7 +340,7 @@ struct UpdateButton: View {
                 .buttonStyle(.plain)
                 .disabled(updater.applying)
                 .onHover { hover = $0 ? .update : (hover == .update ? nil : hover) }
-                .help(updater.waitingFor.map { "Restarts once \($0) is done." } ?? "Update now: Takes restarts on the new build")
+                .help(updater.waitingFor.map { "Restarts once \($0) is done." } ?? "Update now: Cutmark restarts on the new build")
                 Rectangle().fill(Theme.accentInk.opacity(0.18)).frame(width: 0.5, height: 18)
                 Button { open.toggle() } label: {
                     HStack(spacing: 6) {
@@ -439,7 +407,7 @@ struct WhatsNew: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("What's new").font(Theme.display(17))
-                Text("\(staged.log.count == 1 ? "1 change" : "\(staged.log.count) changes") in \(staged.release.map { "Takes \($0.dropFirst())" } ?? "the build from \(staged.stamp.split(separator: " ").dropFirst().joined(separator: " "))")")
+                Text("\(staged.log.count == 1 ? "1 change" : "\(staged.log.count) changes") in \(staged.release.map { "Cutmark \($0.dropFirst())" } ?? "the build from \(staged.stamp.split(separator: " ").dropFirst().joined(separator: " "))")")
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted)
             }
             .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 12)
@@ -450,7 +418,7 @@ struct WhatsNew: View {
             }
             Divider().overlay(Theme.border)
             HStack(spacing: 10) {
-                Text(updater.waitingFor.map { "Waits until \($0) is done." } ?? "Takes restarts on the new build.")
+                Text(updater.waitingFor.map { "Waits until \($0) is done." } ?? "Cutmark restarts on the new build.")
                     .font(Theme.sans(11.5)).foregroundStyle(Theme.muted).lineLimit(2)
                 Spacer(minLength: 8)
                 Button(action: update) {

@@ -49,7 +49,7 @@ class HTTPTransportTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(headers["Content-Type"].startswith("application/json"))
         self.assertEqual(out["result"]["protocolVersion"], t.PROTOCOL)
-        self.assertEqual(out["result"]["serverInfo"]["name"], "takes")
+        self.assertEqual(out["result"]["serverInfo"]["name"], "cutmark")
 
         status, _, out = self.post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         self.assertEqual(status, 200)
@@ -123,7 +123,7 @@ class HTTPTransportTests(unittest.TestCase):
         self.assertIn("MCP-Protocol-Version", out["error"]["message"])
 
     def test_non_loopback_requires_a_token(self):
-        with self.assertRaisesRegex(ValueError, "TAKES_MCP_TOKEN"):
+        with self.assertRaisesRegex(ValueError, "CUTMARK_MCP_TOKEN"):
             t.http_main("0.0.0.0", 0, token=None)
 
 

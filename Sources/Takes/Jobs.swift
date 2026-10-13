@@ -17,9 +17,9 @@ import SwiftUI
 extension Notification.Name {
     /// `object`: the session folder (URL) whose jobs changed. FileWatch sends it, never
     /// `takesFilesChanged`: a job writes its file every 2 s, and the panes must not read the disk again.
-    static let takesJobsChanged = Notification.Name("de.marvinaziz.takes.jobsChanged")
+    static let takesJobsChanged = Notification.Name("com.triherm.cutmark.jobsChanged")
     /// `object`: the session folder (URL) whose chat ended a run and has nothing waiting.
-    static let takesChatIdle = Notification.Name("de.marvinaziz.takes.chatIdle")
+    static let takesChatIdle = Notification.Name("com.triherm.cutmark.chatIdle")
 }
 
 enum JobStatus: String {
@@ -109,7 +109,7 @@ final class JobBoard {
     @ObservationIgnored private let defaults: UserDefaults
     /// Ended jobs that wait for the user's next message instead of waking the chat by themselves.
     @ObservationIgnored private var held: [URL: Set<String>] = [:]
-    /// Failed jobs whose note went to the chat by itself ("Takes is on it.").
+    /// Failed jobs whose note went to the chat by itself ("Cutmark is on it.").
     private(set) var woken: Set<String> = []
     /// Failed jobs held over the cap ("did not finish again").
     private(set) var capped: Set<String> = []
@@ -293,7 +293,7 @@ final class JobBoard {
         return (Self.note(for: jobs), jobs.map(Self.tick))
     }
 
-    /// "Ask Takes" and "Run again": the job's note goes out as the user's own message.
+    /// "Ask Cutmark" and "Run again": the job's note goes out as the user's own message.
     func ask(_ job: Job) {
         let s = job.session
         held[s]?.remove(job.key)
@@ -313,21 +313,21 @@ final class JobBoard {
             let render = j.outputs.first?.hasPrefix("_edit/renders/") == true
             switch j.status {
             case .done where render:
-                return "[Takes] Job \(j.id) ended: \(j.label) is rendered and checked\(took.map { " after \($0)" } ?? ""). "
+                return "[Cutmark] Job \(j.id) ended: \(j.label) is rendered and checked\(took.map { " after \($0)" } ?? ""). "
                     + "get_job id=\(j.id) has the checks. Look at 3 to 5 frames, then publish_edit render=\(j.id)."
             case .lost where render:
-                return "[Takes] Job \(j.id) stopped: \(j.label) did not finish, because the Mac restarted or the job quit. "
+                return "[Cutmark] Job \(j.id) stopped: \(j.label) did not finish, because the Mac restarted or the job quit. "
                     + "Call render_edit again with the same base and changes."
             case .done:
                 let wrote = j.outputs.isEmpty ? "" : " It wrote \(j.outputs.joined(separator: ", "))."
-                return "[Takes] Job \(j.id) ended: \(j.label) is done\(took.map { " after \($0)" } ?? "").\(wrote) "
+                return "[Cutmark] Job \(j.id) ended: \(j.label) is done\(took.map { " after \($0)" } ?? "").\(wrote) "
                     + "Go on with the next step you planned. If nothing is left, tell the user in one line."
             case .lost:
-                return "[Takes] Job \(j.id) stopped: \(j.label) did not finish, because the Mac restarted or the job quit. "
+                return "[Cutmark] Job \(j.id) stopped: \(j.label) did not finish, because the Mac restarted or the job quit. "
                     + "get_job id=\(j.id) gives its command: run it again with run_job and new outputs from next_path."
             default:
                 let why = j.error.map { ": \($0)" } ?? ""
-                return "[Takes] Job \(j.id) failed\(took.map { " after \($0)" } ?? "")\(why). get_job id=\(j.id) has the log. "
+                return "[Cutmark] Job \(j.id) failed\(took.map { " after \($0)" } ?? "")\(why). get_job id=\(j.id) has the log. "
                     + "Fix it and run it again, or tell the user in one line what went wrong."
             }
         }.joined(separator: "\n")
@@ -398,10 +398,10 @@ final class JobBoard {
             return eta < 60 ? "\(pct) · less than a minute left" : "\(pct) · about \(Int((eta / 60).rounded())) min left"
         case .done: return j.stage.flatMap { $0.hasPrefix("Ready") ? $0 : nil } ?? "Ready"
         case .failed:
-            return woken ? "\(j.label) did not finish. Takes is on it."
+            return woken ? "\(j.label) did not finish. Cutmark is on it."
                 : again ? "\(j.label) did not finish again." : "\(j.label) did not finish."
         case .lost: return "\(j.label) stopped. The Mac restarted or the job quit."
-        case .stopped: return j.stoppedBy == "takes" ? "Takes stopped it" : "You stopped it"
+        case .stopped: return j.stoppedBy == "takes" ? "Cutmark stopped it" : "You stopped it"
         }
     }
 
@@ -524,10 +524,10 @@ struct JobsRow: View {
         case .done:
             textButton("Show", accent: true, help: "Play the file on the stage") { show(j) }
         case .failed:
-            if !woken { textButton("Ask Takes", accent: true, help: "Ask Takes to look at it") { app.jobs.ask(j) } }
+            if !woken { textButton("Ask Cutmark", accent: true, help: "Ask Cutmark to look at it") { app.jobs.ask(j) } }
             close(j)
         case .lost:
-            textButton("Run again", accent: true, help: "Ask Takes to start this job again") { app.jobs.ask(j) }
+            textButton("Run again", accent: true, help: "Ask Cutmark to start this job again") { app.jobs.ask(j) }
             close(j)
         default:
             EmptyView()
@@ -559,7 +559,7 @@ struct JobsRow: View {
         case .running where j.isGenerate: return "You paid for this clip when it started, so you cannot stop it."
         case .failed:
             let last = j.error.map { "Last line from the job: \($0)" } ?? ""
-            return woken ? last : ["Ask Takes to look at it.", last].filter { !$0.isEmpty }.joined(separator: " ")
+            return woken ? last : ["Ask Cutmark to look at it.", last].filter { !$0.isEmpty }.joined(separator: " ")
         default: return ""
         }
     }

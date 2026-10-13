@@ -644,7 +644,7 @@ struct PlatformPostPane: View {
         .onExitCommand { withAnimation(Theme.motion) { if draft != nil { draft = nil } else { focused = nil } } }
         .sheet(isPresented: $showHistory) {
             VersionsSheet(title: "Post history", subtitle: doc.meta.title,
-                          empty: "Takes saves a version whenever the chat changes the post, and while you edit it.",
+                          empty: "Cutmark saves a version whenever the chat changes the post, and while you edit it.",
                           load: { post.close(); return PostFile.versions(doc.url, platform) },
                           draftName: post.name(of:), restore: post.restore)
         }
@@ -734,7 +734,7 @@ struct PlatformPostPane: View {
                     .shadow(color: Theme.shadow, radius: 10, y: 4)
             }
             .buttonStyle(.plain)
-            .help("Comment on the selected text, for Takes")
+            .help("Comment on the selected text, for Cutmark")
             .padding(16)
             .transition(.scale(scale: 0.9, anchor: .bottomTrailing).combined(with: .opacity))
         }
@@ -840,7 +840,7 @@ struct PlatformPostPane: View {
                         CoverPicker(session: doc.url, platform: platform, video: media)
                     }
                     Button { startComment() } label: { Image(systemName: "text.bubble").frame(width: 30, height: 28) }
-                        .help("Comment for Takes: on the selected text, or on the whole post")
+                        .help("Comment for Cutmark: on the selected text, or on the whole post")
                     Button {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(post.text.trimmingCharacters(in: .whitespacesAndNewlines), forType: .string)
@@ -926,8 +926,8 @@ struct PlatformPostPane: View {
                 .font(Theme.sans(12.5)).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
                 .frame(maxWidth: 300)
             HStack(spacing: 8) {
-                // Takes drafts first: Jeremy read the empty post as "write it yourself" (2026-10-06).
-                Button("Draft it with Takes") {
+                // Cutmark drafts first: Jeremy read the empty post as "write it yourself" (2026-10-06).
+                Button("Draft it with Cutmark") {
                     app.chats.chat(doc.url).send(draftAsk, title: doc.meta.title, onStage: nil)
                     app.chats.open = true
                 }
@@ -955,15 +955,15 @@ struct PlatformPostPane: View {
 
     private var emptyHint: String {
         switch platform {
-        case .x: "Takes writes the post (one post or a thread) from your video, and it shows here as on X."
-        case .youtube: "For the long wide video: Takes writes a title and a description from your video."
-        case .vertical: "One caption for TikTok, Instagram Reels and YouTube Shorts, with the vertical edit. Takes writes it from your video."
-        case .linkedin: "Takes writes the post from your video, and it shows here as on LinkedIn."
+        case .x: "Cutmark writes the post (one post or a thread) from your video, and it shows here as on X."
+        case .youtube: "For the long wide video: Cutmark writes a title and a description from your video."
+        case .vertical: "One caption for TikTok, Instagram Reels and YouTube Shorts, with the vertical edit. Cutmark writes it from your video."
+        case .linkedin: "Cutmark writes the post from your video, and it shows here as on LinkedIn."
         case .article: "A post for your blog, shown as your blog shows it, in markdown with the blog's components. Later it goes out as a LinkedIn and an X article."
         }
     }
 
-    /// What "Draft it with Takes" asks the chat.
+    /// What "Draft it with Cutmark" asks the chat.
     private var draftAsk: String {
         switch platform {
         case .linkedin: "Draft the LinkedIn post for this video (set_post). Use the script and the takes for what I say."
@@ -987,7 +987,7 @@ struct PlatformPostPane: View {
                          let text = (draft?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                          guard !text.isEmpty else { return }
                          if let c = comments.add(text: file, quote: draft?.quote, text: text) {
-                             app.show(toast: "Comment \(c.id) saved for Takes")
+                             app.show(toast: "Comment \(c.id) saved for Cutmark")
                          }
                          withAnimation(Theme.motion) { draft = nil }
                      },
@@ -1022,7 +1022,7 @@ struct StatusControl: View {
                     }
                 }
                 .buttonStyle(AccentButtonStyle(kind: .solid))
-                .help("Pick when the post goes out. Then Takes schedules it on \(post.platform.name)")
+                .help("Pick when the post goes out. Then Cutmark schedules it on \(post.platform.name)")
                 .transition(.scale(scale: 0.9).combined(with: .opacity))
             } else {
                 Button { open = true } label: {
@@ -1062,10 +1062,10 @@ struct StatusControl: View {
     private var help: String {
         switch content.status {
         case .ready: return content.at == nil ? "Ready. Click to give it a time."
-                                              : "Ready. Ask Takes to schedule your posts; it puts this one on \(place) for this time."
+                                              : "Ready. Ask Cutmark to schedule your posts; it puts this one on \(place) for this time."
         case .scheduled: return content.needsUpdate
-            ? "Scheduled on \(place), but you changed the time or text since. Ask Takes to update it."
-            : "Scheduled on \(place). Click to change the time; Takes then moves it there too."
+            ? "Scheduled on \(place), but you changed the time or text since. Ask Cutmark to update it."
+            : "Scheduled on \(place). Click to change the time; Cutmark then moves it there too."
         default: return "Click for the time"
         }
     }
@@ -1150,8 +1150,8 @@ struct SchedulePanel: View {
                 Text("That is \(PostFile.label(date, .current)) here.").font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
             }
             Text(content.status == .scheduled
-                 ? "It is on \(post.platform.name) for \(content.at.map { PostFile.label($0, content.tz) } ?? "a time"). A new time here: ask Takes to move it."
-                 : "Then tell Takes \"schedule my posts\". It schedules the post on \(post.platform.name) for this time and marks it scheduled here.")
+                 ? "It is on \(post.platform.name) for \(content.at.map { PostFile.label($0, content.tz) } ?? "a time"). A new time here: ask Cutmark to move it."
+                 : "Then tell Cutmark \"schedule my posts\". It schedules the post on \(post.platform.name) for this time and marks it scheduled here.")
                 .font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 8) {
@@ -1254,7 +1254,7 @@ enum LinkedIn {
 
     /// Your photo, kept with the app's settings (it is not part of any session or library).
     static let photoURL: URL = {
-        let dir = URL.applicationSupportDirectory.appending(path: "Takes")
+        let dir = URL.applicationSupportDirectory.appending(path: "Cutmark")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appending(path: "linkedin-photo.jpg")
     }()
@@ -1454,7 +1454,7 @@ extension LinkedInCard {
             action(liked ? "hand.thumbsup.fill" : "hand.thumbsup", "Like", tint: liked ? LinkedIn.blue : nil) {
                 liked.toggle()
             }
-            action("text.bubble", "Comment", help: "Comment for Takes: on the selected text, or on the whole post",
+            action("text.bubble", "Comment", help: "Comment for Cutmark: on the selected text, or on the whole post",
                    perform: onComment)
             action("arrow.2.squarepath", "Repost") {}
             action("paperplane.fill", "Send") {}
@@ -1892,7 +1892,7 @@ struct PostEditor: NSViewRepresentable {
         }
 
         func textView(_ view: NSTextView, menu: NSMenu, for event: NSEvent, at charIndex: Int) -> NSMenu? {
-            let item = NSMenuItem(title: view.selectedRange().length > 0 ? "Comment for Takes…" : "Comment on the Post for Takes…",
+            let item = NSMenuItem(title: view.selectedRange().length > 0 ? "Comment for Cutmark…" : "Comment on the Post for Cutmark…",
                                   action: #selector(comment), keyEquivalent: "")
             item.target = self
             menu.insertItem(item, at: 0)

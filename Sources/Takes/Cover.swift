@@ -345,7 +345,7 @@ struct CoverPicker: View {
                     .font(Theme.sans(11.5)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
             }
             if choices.isEmpty {
-                Text("No thumbnail in this shape yet. Ask Takes to make one.")
+                Text("No thumbnail in this shape yet. Ask Cutmark to make one.")
                     .font(Theme.sans(12)).foregroundStyle(Theme.faint).padding(.vertical, 8)
             } else {
                 ScrollView {

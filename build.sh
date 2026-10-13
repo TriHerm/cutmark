@@ -1,6 +1,6 @@
 #!/bin/bash
-# Build Takes.app. `./build.sh install` copies it to ~/Applications and opens it, or, while Takes
-# runs, stages it so Takes shows Update in its sidebar (Sources/Takes/Updater.swift).
+# Build Cutmark.app from the internal Takes Swift target. `./build.sh install` copies it to
+# ~/Applications and opens it, or stages it so Cutmark shows Update in its sidebar.
 set -euo pipefail
 cd "$(dirname "$0")"
 # Several agents build Takes from their own worktrees, and each install replaces the last one
@@ -10,10 +10,10 @@ cd "$(dirname "$0")"
 if [[ "${1:-}" == "install" && "${ANY_BRANCH:-}" != 1 ]]; then
   git fetch -q origin main
   # The same commit as the Takes that runs or waits: an Update with nothing in it (2026-10-11).
-  for have in ~/Applications/Takes.app ~/Applications/.update.noindex/Takes.app; do
+  for have in ~/Applications/Cutmark.app ~/Applications/.cutmark-update.noindex/Cutmark.app; do
     was="$(/usr/libexec/PlistBuddy -c 'Print :BuildStamp' "$have/Contents/Info.plist" 2>/dev/null | cut -d' ' -f1)" || was=""
     if [[ -n "$was" && "$was" == "$(git rev-parse --short HEAD)" && "${FRESH_INSTALL:-}" != 1 ]]; then
-      echo "Nothing new to stage: Takes already has $was (installed or waiting as the update)."
+      echo "Nothing new to stage: Cutmark already has $was (installed or waiting as the update)."
       exit 0
     fi
   done
@@ -45,23 +45,26 @@ else ./test.sh --quiet
 fi
 swift build -c release
 # A .noindex folder: Spotlight skips it, so macOS never registers this copy and never opens it
-# in place of ~/Applications/Takes.app (old copies kept opening, 2026-10-01).
-APP=build.noindex/Takes.app
+# in place of ~/Applications/Cutmark.app (old copies kept opening, 2026-10-01).
+APP=build.noindex/Cutmark.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp .build/release/Takes "$APP/Contents/MacOS/Takes"
+cp .build/release/Takes "$APP/Contents/MacOS/Cutmark"
 cp .build/release/takes-faces "$APP/Contents/MacOS/takes-faces"
-cp mcp/takes_mcp.py "$APP/Contents/Resources/takes_mcp.py"
+cp mcp/takes_mcp.py "$APP/Contents/Resources/cutmark_mcp.py"
 cp mcp/clean_voice.py "$APP/Contents/Resources/clean_voice.py"
 cp mcp/prepare_take.py "$APP/Contents/Resources/prepare_take.py"
-cp assets/Takes.icns "$APP/Contents/Resources/Takes.icns"
+cp assets/Cutmark.icns "$APP/Contents/Resources/Cutmark.icns"
 mkdir -p "$APP/Contents/Resources/Fonts" && cp assets/fonts/*.ttf "$APP/Contents/Resources/Fonts/"
 # The fonts' licenses (SIL OFL) must go with every copy of the fonts.
 mkdir -p "$APP/Contents/Resources/Licenses" && cp assets/fonts/*-OFL.txt "$APP/Contents/Resources/Licenses/"
-mkdir -p "$APP/Contents/Resources/Onboarding" && cp assets/onboarding/creator.jpg "$APP/Contents/Resources/Onboarding/"
+# Keep the upstream MIT license with every distributed app derived from Takes.
+cp LICENSE "$APP/Contents/Resources/Licenses/UPSTREAM-LICENSE.txt"
+cp NOTICE.md "$APP/Contents/Resources/Licenses/CUTMARK-NOTICE.md"
+mkdir -p "$APP/Contents/Resources/Onboarding" && cp assets/onboarding/cutmark-intro.jpg "$APP/Contents/Resources/Onboarding/"
 mkdir -p "$APP/Contents/Resources/Article"
 mkdir -p "$APP/Contents/Resources/Agents" && cp assets/agents/*.svg assets/agents/*.png "$APP/Contents/Resources/Agents/"
-mkdir -p "$APP/Contents/Resources/Brand" && cp assets/brand/mascot-512.png "$APP/Contents/Resources/Brand/mascot.png" && cp assets/brand/mascot-body-512.png "$APP/Contents/Resources/Brand/mascot-body.png"
+mkdir -p "$APP/Contents/Resources/Brand" && cp assets/brand/cutmark-mascot-512.png "$APP/Contents/Resources/Brand/mascot.png" && cp assets/brand/cutmark-mascot-body-512.png "$APP/Contents/Resources/Brand/mascot-body.png"
 cp Info.plist "$APP/Contents/Info.plist"
 # The search helper (embed/, ⌘K by meaning). MLX needs Xcode and its Metal toolchain, which
 # `swift build` and the Command Line Tools lack. Without them Takes still builds, and ⌘K matches
@@ -91,7 +94,7 @@ if [[ -d plugins/skills ]]; then
   for d in scripts/public/skills/*/ plugins/skills/*/; do [[ -f "$d/SKILL.md" ]] && cp -R "${d%/}" "$APP/Contents/Resources/plugin-skills/"; done
 fi
 # The stamp tells a running Takes that a staged build is new; the changes go in the Update tooltip.
-INSTALLED="$HOME/Applications/Takes.app"
+INSTALLED="$HOME/Applications/Cutmark.app"
 STAMP="$(git rev-parse --short HEAD)$(git diff --quiet HEAD -- Sources Package.swift 2>/dev/null || echo +) $(date '+%b %-d %H:%M')"
 WAS="$(/usr/libexec/PlistBuddy -c 'Print :BuildStamp' "$INSTALLED/Contents/Info.plist" 2>/dev/null | cut -d' ' -f1 | tr -d +)" || WAS=""
 if [[ -n "$WAS" ]] && git cat-file -e "$WAS^{commit}" 2>/dev/null; then
@@ -118,9 +121,9 @@ if [[ -n "${BUILD:-}" ]]; then
   plutil -replace CFBundleVersion -string "$BUILD" "$APP/Contents/Info.plist"
 fi
 plutil -insert BuildChanges -string "$CHANGES" "$APP/Contents/Info.plist"
-# A GitHub release (release.sh sets TAKES_RELEASE): the tag lets Takes find newer releases (Updater.swift).
-if [[ -n "${TAKES_RELEASE:-}" ]]; then
-  plutil -insert ReleaseTag -string "$TAKES_RELEASE" "$APP/Contents/Info.plist"
+# A GitHub release sets CUTMARK_RELEASE: the tag lets Cutmark find newer releases (Updater.swift).
+if [[ -n "${CUTMARK_RELEASE:-}" ]]; then
+  plutil -insert ReleaseTag -string "$CUTMARK_RELEASE" "$APP/Contents/Info.plist"
 fi
 # The repo Takes > Release to GitHub releases from (only where the release script exists).
 if [[ -x scripts/public/release.sh ]]; then
@@ -128,34 +131,35 @@ if [[ -x scripts/public/release.sh ]]; then
 fi
 # Strip the symbols before signing (2026-10-12): Takes goes from 37.5 to 12.6 MB and the DMG gets
 # 2 MB smaller. The dSYM keeps the names for crash reports. After signing, a strip breaks the signature.
-dsymutil .build/release/Takes -o build.noindex/Takes.dSYM 2>/dev/null || true
-strip -x "$APP/Contents/MacOS/Takes" "$APP/Contents/MacOS/takes-faces"
+dsymutil .build/release/Takes -o build.noindex/Cutmark.dSYM 2>/dev/null || true
+strip -x "$APP/Contents/MacOS/Cutmark" "$APP/Contents/MacOS/takes-faces"
 # A stable certificate keeps camera, mic and screen permissions across installs (scripts/setup-signing.sh).
 # Without it, fall back to ad-hoc signing, and macOS asks for the permissions again after each install.
-KC="$HOME/Library/Keychains/takes-signing.keychain-db"
-if [[ -f "$KC" && -f "$HOME/.config/takes/keychain-pass" ]]; then
-  security unlock-keychain -p "$(cat "$HOME/.config/takes/keychain-pass")" "$KC"
-  [[ -f "$APP/Contents/MacOS/takes-embed" ]] && codesign --force --sign "Takes Local Signing" --keychain "$KC" --identifier de.marvinaziz.takes.embed "$APP/Contents/MacOS/takes-embed"
-  codesign --force --sign "Takes Local Signing" --keychain "$KC" --identifier de.marvinaziz.takes.faces "$APP/Contents/MacOS/takes-faces"
-  codesign --force --sign "Takes Local Signing" --keychain "$KC" --identifier de.marvinaziz.takes "$APP"
+KC="$HOME/Library/Keychains/cutmark-signing.keychain-db"
+if [[ "${CUTMARK_ADHOC_SIGN:-}" != 1 && -f "$KC" && -f "$HOME/.config/cutmark/keychain-pass" ]]; then
+  security unlock-keychain -p "$(cat "$HOME/.config/cutmark/keychain-pass")" "$KC"
+  [[ -f "$APP/Contents/MacOS/takes-embed" ]] && codesign --force --sign "Cutmark Local Signing" --keychain "$KC" --identifier com.triherm.cutmark.embed "$APP/Contents/MacOS/takes-embed"
+  codesign --force --sign "Cutmark Local Signing" --keychain "$KC" --identifier com.triherm.cutmark.faces "$APP/Contents/MacOS/takes-faces"
+  codesign --force --sign "Cutmark Local Signing" --keychain "$KC" --identifier com.triherm.cutmark "$APP"
 else
-  echo "No signing certificate: run scripts/setup-signing.sh once to keep permissions across installs."
-  [[ -f "$APP/Contents/MacOS/takes-embed" ]] && codesign --force --sign - --identifier de.marvinaziz.takes.embed "$APP/Contents/MacOS/takes-embed"
-  codesign --force --sign - --identifier de.marvinaziz.takes.faces "$APP/Contents/MacOS/takes-faces"
-  codesign --force --sign - --identifier de.marvinaziz.takes "$APP"
+  echo "Using ad-hoc signing."
+  [[ -f "$APP/Contents/MacOS/takes-embed" ]] && codesign --force --sign - --identifier com.triherm.cutmark.embed "$APP/Contents/MacOS/takes-embed"
+  codesign --force --sign - --identifier com.triherm.cutmark.faces "$APP/Contents/MacOS/takes-faces"
+  codesign --force --sign - --identifier com.triherm.cutmark "$APP"
 fi
+codesign --verify --deep --strict "$APP"
 echo "Built $APP"
 if [[ "${1:-}" == "install" ]]; then
   # Once Takes is installed, always stage: never decide by "is it running?". That check failed
   # silently twice (pgrep sees nothing from agent shells; pipefail broke ps | grep -q) and the
   # install overwrote the running app with no Update row (2026-10-06). A staged build waits for
   # the Update click whether Takes is open now or opens later. FRESH_INSTALL=1 copies directly.
-  if [[ -d ~/Applications/Takes.app && "${FRESH_INSTALL:-}" != 1 ]]; then
-    # Never quit Takes for the user: stage the build, and Takes shows Update in its sidebar.
+  if [[ -d ~/Applications/Cutmark.app && "${FRESH_INSTALL:-}" != 1 ]]; then
+    # Never quit Cutmark for the user: stage the build, and Cutmark shows Update in its sidebar.
     # Copy beside the slot, then rename, so Takes never reads a half-copied build.
-    STAGE="$HOME/Applications/.update.noindex"
+    STAGE="$HOME/Applications/.cutmark-update.noindex"
     # A slower agent's older main must not replace a newer staged build.
-    STAGED="$(/usr/libexec/PlistBuddy -c 'Print :BuildStamp' "$STAGE/Takes.app/Contents/Info.plist" 2>/dev/null | cut -d' ' -f1 | tr -d +)" || STAGED=""
+    STAGED="$(/usr/libexec/PlistBuddy -c 'Print :BuildStamp' "$STAGE/Cutmark.app/Contents/Info.plist" 2>/dev/null | cut -d' ' -f1 | tr -d +)" || STAGED=""
     if [[ -n "$STAGED" && "${ANY_BRANCH:-}" != 1 ]] && git cat-file -e "$STAGED^{commit}" 2>/dev/null \
        && ! git merge-base --is-ancestor "$STAGED" HEAD; then
       echo "Not staged: the staged build ($STAGED) has commits this one doesn't. git merge origin/main, push, then install." >&2; exit 1
@@ -163,17 +167,17 @@ if [[ "${1:-}" == "install" ]]; then
     mkdir -p "$STAGE"
     rm -rf "$STAGE/incoming.app"
     cp -R "$APP" "$STAGE/incoming.app"
-    rm -rf "$STAGE/Takes.app"
-    mv "$STAGE/incoming.app" "$STAGE/Takes.app"
-    echo "Staged $STAMP: Takes shows Update in its sidebar; the user clicks it when he's ready."
+    rm -rf "$STAGE/Cutmark.app"
+    mv "$STAGE/incoming.app" "$STAGE/Cutmark.app"
+    echo "Staged $STAMP: Cutmark shows Update in its sidebar; the user clicks it when ready."
     exit 0
   fi
   mkdir -p ~/Applications
-  rm -rf ~/Applications/Takes.app ~/Applications/.update.noindex/Takes.app
-  cp -R "$APP" ~/Applications/Takes.app
-  open -g ~/Applications/Takes.app
-  echo "Installed ~/Applications/Takes.app"
+  rm -rf ~/Applications/Cutmark.app ~/Applications/.cutmark-update.noindex/Cutmark.app
+  cp -R "$APP" ~/Applications/Cutmark.app
+  open -g ~/Applications/Cutmark.app
+  echo "Installed ~/Applications/Cutmark.app"
   # The takes MCP server in each agent on this Mac (Claude Code, Codex, Cursor, …), pointing at the
   # installed copy (stable path). Once per agent: one the user removed stays removed.
-  /usr/bin/python3 "$HOME/Applications/Takes.app/Contents/Resources/takes_mcp.py" --setup --once
+  /usr/bin/python3 "$HOME/Applications/Cutmark.app/Contents/Resources/cutmark_mcp.py" --setup --once
 fi

@@ -1,4 +1,4 @@
-"""--setup: the takes server in every MCP agent on the Mac, not only Claude Code (2026-10-10)."""
+"""--setup: the Cutmark server in every MCP agent on the Mac without replacing upstream Takes."""
 import json
 import os
 import shutil
@@ -14,8 +14,8 @@ import takes_mcp as t  # noqa: E402
 class AgentSetup(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp()
-        self.server = os.path.join(self.home, "Takes.app/Contents/Resources/takes_mcp.py")
-        self.write("Takes.app/Contents/Resources/takes_mcp.py", "")
+        self.server = os.path.join(self.home, "Cutmark.app/Contents/Resources/cutmark_mcp.py")
+        self.write("Cutmark.app/Contents/Resources/cutmark_mcp.py", "")
         self.path = os.environ.get("PATH", "")
         os.environ["PATH"] = os.path.join(self.home, "bin")  # no real claude or codex
 
@@ -45,24 +45,32 @@ class AgentSetup(unittest.TestCase):
         self.assertEqual(got, {"Cursor": "added", "opencode": "added", "pi": "added"})
         cursor = self.read(".cursor/mcp.json")
         self.assertEqual(list(cursor), ["mcpServers", "z", "a"])
-        self.assertEqual(list(cursor["mcpServers"]), ["Pipedream", "takes"])
-        self.assertEqual(cursor["mcpServers"]["takes"], {"command": "/usr/bin/python3", "args": [self.server], "env": {"TAKES_TOOLS": "core"}})
-        self.assertEqual(self.read(".pi/agent/mcp.json")["mcpServers"]["takes"]["args"], [self.server])
+        self.assertEqual(list(cursor["mcpServers"]), ["Pipedream", "cutmark"])
+        self.assertEqual(cursor["mcpServers"]["cutmark"], {"command": "/usr/bin/python3", "args": [self.server], "env": {"TAKES_TOOLS": "core"}})
+        self.assertEqual(self.read(".pi/agent/mcp.json")["mcpServers"]["cutmark"]["args"], [self.server])
         oc = self.read(".config/opencode/opencode.json")
-        self.assertEqual(oc["mcp"]["takes"], {"type": "local", "command": ["/usr/bin/python3", self.server], "enabled": True})
+        self.assertEqual(oc["mcp"]["cutmark"], {"type": "local", "command": ["/usr/bin/python3", self.server], "enabled": True})
         self.assertIn("$schema", oc)
+
+    def test_keeps_an_existing_takes_server_when_cutmark_is_added(self):
+        takes = {"command": "/usr/bin/python3", "args": ["/Applications/Takes.app/Contents/Resources/takes_mcp.py"]}
+        self.write(".cursor/mcp.json", json.dumps({"mcpServers": {"takes": takes}}))
+        self.assertEqual(self.run_setup(), {"Cursor": "added"})
+        servers = self.read(".cursor/mcp.json")["mcpServers"]
+        self.assertEqual(servers["takes"], takes)
+        self.assertEqual(servers["cutmark"]["args"], [self.server])
 
     def test_agents_not_on_the_mac_are_not_touched(self):
         self.assertEqual(self.run_setup(), {})
         self.assertFalse(os.path.exists(os.path.join(self.home, ".cursor")))
 
     def test_a_moved_app_is_pointed_again_and_a_hand_setup_stays(self):
-        self.write(".gemini/settings.json", json.dumps({"mcpServers": {"takes": {"command": "python3", "args": ["/gone/takes_mcp.py"]}}}))
-        self.write(".cursor/mcp.json", json.dumps({"mcpServers": {"takes": {"command": "uvx", "args": ["my-takes"]}}}))
+        self.write(".gemini/settings.json", json.dumps({"mcpServers": {"cutmark": {"command": "python3", "args": ["/gone/cutmark_mcp.py"]}}}))
+        self.write(".cursor/mcp.json", json.dumps({"mcpServers": {"cutmark": {"command": "uvx", "args": ["my-cutmark"]}}}))
         got = self.run_setup()
         self.assertEqual(got, {"Gemini CLI": "updated", "Cursor": "ok"})
-        self.assertEqual(self.read(".gemini/settings.json")["mcpServers"]["takes"]["args"], [self.server])
-        self.assertEqual(self.read(".cursor/mcp.json")["mcpServers"]["takes"]["command"], "uvx")
+        self.assertEqual(self.read(".gemini/settings.json")["mcpServers"]["cutmark"]["args"], [self.server])
+        self.assertEqual(self.read(".cursor/mcp.json")["mcpServers"]["cutmark"]["command"], "uvx")
 
     def test_a_file_with_comments_stays_as_it_is(self):
         text = '{\n  // mine\n  "mcpServers": {}\n}\n'
@@ -73,7 +81,7 @@ class AgentSetup(unittest.TestCase):
 
     def test_status_lists_every_agent_and_changes_nothing(self):
         # Settings › Agents (2026-10-11): which agents are here and which have the server.
-        self.write(".cursor/mcp.json", json.dumps({"mcpServers": {"takes": {"command": "x"}}}))
+        self.write(".cursor/mcp.json", json.dumps({"mcpServers": {"cutmark": {"command": "x"}}}))
         os.makedirs(os.path.join(self.home, ".pi/agent"))
         got = {a["name"]: (a["found"], a["connected"]) for a in t.agents_status(self.home)}
         self.assertEqual(got["Cursor"], (True, True))
@@ -115,23 +123,23 @@ class AgentSetup(unittest.TestCase):
         os.chmod(cli, os.stat(cli).st_mode | stat.S_IEXEC)
         self.assertEqual(self.run_setup(), {"Codex": "added"})
         with open(log) as f:
-            self.assertEqual(f.read().splitlines(), ["mcp get takes", "mcp add takes -- /usr/bin/python3 " + self.server])
+            self.assertEqual(f.read().splitlines(), ["mcp get cutmark", "mcp add cutmark -- /usr/bin/python3 " + self.server])
 
     def test_reads_the_script_from_mcp_get_output(self):
-        out = "takes\n  enabled: true\n  transport: stdio\n  command: /usr/bin/python3\n  args: /A/takes_mcp.py\n"
-        self.assertEqual(t.server_scripts(out), ["/A/takes_mcp.py"])
+        out = "cutmark\n  enabled: true\n  transport: stdio\n  command: /usr/bin/python3\n  args: /A/cutmark_mcp.py\n"
+        self.assertEqual(t.server_scripts(out), ["/A/cutmark_mcp.py"])
 
     def test_cursor_gets_the_short_tool_list_and_a_choice_of_all_stays(self):
-        self.write(".cursor/mcp.json", json.dumps({"mcpServers": {"takes": {"command": "/usr/bin/python3", "args": [self.server]}}}))
+        self.write(".cursor/mcp.json", json.dumps({"mcpServers": {"cutmark": {"command": "/usr/bin/python3", "args": [self.server]}}}))
         self.assertEqual(self.run_setup(once=True), {"Cursor": "updated"})
-        self.assertEqual(self.read(".cursor/mcp.json")["mcpServers"]["takes"]["env"], {"TAKES_TOOLS": "core"})
-        self.write(".cursor/mcp.json", json.dumps({"mcpServers": {"takes": {"command": "/usr/bin/python3", "args": [self.server], "env": {"TAKES_TOOLS": "all"}}}}))
+        self.assertEqual(self.read(".cursor/mcp.json")["mcpServers"]["cutmark"]["env"], {"TAKES_TOOLS": "core"})
+        self.write(".cursor/mcp.json", json.dumps({"mcpServers": {"cutmark": {"command": "/usr/bin/python3", "args": [self.server], "env": {"TAKES_TOOLS": "all"}}}}))
         self.assertEqual(self.run_setup(once=True), {"Cursor": "ok"})
 
     def test_antigravity_gets_its_global_config(self):
         os.makedirs(os.path.join(self.home, ".gemini/antigravity"))
         self.assertEqual(self.run_setup(), {"Antigravity": "added"})
-        self.assertEqual(self.read(".gemini/config/mcp_config.json")["mcpServers"]["takes"]["args"], [self.server])
+        self.assertEqual(self.read(".gemini/config/mcp_config.json")["mcpServers"]["cutmark"]["args"], [self.server])
 
     def test_the_short_list_fits_cursor_and_every_name_is_a_tool(self):
         names = {n for n, *_ in t.TOOLS}

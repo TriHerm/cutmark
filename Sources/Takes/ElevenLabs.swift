@@ -5,7 +5,7 @@ import SwiftUI
 
 /// ElevenLabs in Takes (2026-10-06): voice-overs, fixed words and other voices. The takes MCP does the
 /// work (tools voices, design_voice, voiceover, fix_words, change_voice), for the chat and for this page
-/// alike (`takes_mcp.py --eleven <tool> <json>`). The key sits in the login Keychain ("Takes ElevenLabs"),
+/// alike (`takes_mcp.py --eleven <tool> <json>`). The key sits in the login Keychain ("Cutmark ElevenLabs"),
 /// written and read by the security tool, so neither the app nor the chat ever asks for it again.
 @MainActor @Observable
 final class ElevenLabs {
@@ -184,15 +184,15 @@ struct VoicesPage: View {
                             Button("Search") { Task { await el.search(query) } }.disabled(query.trimmingCharacters(in: .whitespaces).isEmpty)
                         }
                         ForEach(el.library) { v in voiceRow(v) }
-                        Text("Or describe a new voice to Takes in the chat: \"Design a calm German narrator voice\".")
+                        Text("Or describe a new voice to Cutmark in the chat: \"Design a calm German narrator voice\".")
                             .font(Theme.sans(12)).foregroundStyle(Theme.faint)
                     }
                 }
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Where to use it").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
-                    use("text.badge.checkmark", "Fix words", "Assets › right-click a take › Fix Words…, then say what to change. Takes says the new words in the voice and cuts them in.")
+                    use("text.badge.checkmark", "Fix words", "Assets › right-click a take › Fix Words…, then say what to change. Cutmark says the new words in the voice and cuts them in.")
                     use("person.2.wave.2", "Another voice", "Assets › right-click › Change Voice…: same words and timing, another voice.")
-                    use("bubble.left", "Voice-over", "Ask Takes: \"Make a voice-over of the script\" or \"Read this in Anna's voice\".")
+                    use("bubble.left", "Voice-over", "Ask Cutmark: \"Make a voice-over of the script\" or \"Read this in Anna's voice\".")
                     Text("New files land in the session's generated folder, with the voice's name.")
                         .font(Theme.sans(12)).foregroundStyle(Theme.faint)
                 }
@@ -205,7 +205,7 @@ struct VoicesPage: View {
         case .unknown:
             HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Checking…").font(Theme.sans(12.5)).foregroundStyle(Theme.muted) }
         case .noKey:
-            keyForm("Connect ElevenLabs", "Paste an API key from ElevenLabs › Developers › API Keys. Takes keeps it in your Keychain.")
+            keyForm("Connect ElevenLabs", "Paste an API key from ElevenLabs › Developers › API Keys. Cutmark keeps it in your Keychain.")
         case .failed(let why):
             keyForm("ElevenLabs is not connected", why)
         case .ready(let line):

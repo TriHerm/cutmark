@@ -28,7 +28,7 @@ import Testing
         try Data(json.utf8).write(to: Storyboard.file(dir))
         let b = try #require(Storyboard.read(dir))
         #expect(b.nokey == true)
-        #expect(b.shots[0].error == "No sketch: Takes has no image key.")
+        #expect(b.shots[0].error == "No sketch: Cutmark has no image key.")
         #expect(b.shots[1].error == nil)
         let old = try JSONDecoder().decode(Storyboard.self, from: Data(#"{"shots": []}"#.utf8))
         #expect(old.nokey == nil)

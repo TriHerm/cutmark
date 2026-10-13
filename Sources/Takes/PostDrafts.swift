@@ -245,12 +245,12 @@ struct PostSideTabs: View {
             if open == nil {
                 if !hooks.hooks.isEmpty {
                     tab("Hooks", count: hooks.hooks.count, accent: true) { open = .hooks }
-                        .help("The opening lines Takes wrote. Point at one to see it in the post.")
+                        .help("The opening lines Cutmark wrote. Point at one to see it in the post.")
                 }
                 if !comments.isEmpty {
                     let n = comments.filter(\.open).count
                     tab("Comments", count: n > 0 ? n : comments.count, accent: false) { open = .comments }
-                        .help(n > 0 ? "\(n) open for Takes" : "All resolved")
+                        .help(n > 0 ? "\(n) open for Cutmark" : "All resolved")
                 }
             } else {
                 drawer

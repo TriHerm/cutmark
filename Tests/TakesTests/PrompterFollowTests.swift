@@ -112,8 +112,8 @@ struct PrompterFollowTests {
     }
 
     @Test func hintsAreNamesAndLongWords() {
-        let h = VoiceFollow.hints("Today Maya shows Takes, a teleprompter that records. It is free and it is fast.")
-        #expect(h.contains("Maya") && h.contains("Takes") && h.contains("teleprompter"))
+        let h = VoiceFollow.hints("Today Maya shows Cutmark, a teleprompter that records. It is free and it is fast.")
+        #expect(h.contains("Maya") && h.contains("Cutmark") && h.contains("teleprompter"))
         #expect(!h.contains("free") && !h.contains("fast"))
     }
 

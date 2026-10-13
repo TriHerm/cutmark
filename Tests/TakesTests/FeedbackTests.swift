@@ -287,7 +287,7 @@ extension Snap {
         var st = FeedbackStats(comments: 214, learned: 31, oneOff: 40, repeats: 4, videos: 18, checksRun: 9, checksCaught: 6)
         st.weeks = (0..<12).reversed().map { i in
             var w = FeedbackStats.Week(start: cal.date(byAdding: .weekOfYear, value: -i, to: week)!)
-            if i % 3 != 2 { w.videos = 2; w.comments = 2 * (4 + i); w.repeats = i < 4 ? 1 : 0; w.titles = ["Takes launch video", "How I make my videos"] }
+            if i % 3 != 2 { w.videos = 2; w.comments = 2 * (4 + i); w.repeats = i < 4 ? 1 : 0; w.titles = ["Cutmark launch video", "How I make my videos"] }
             return w
         }
         st.recent = 5.5

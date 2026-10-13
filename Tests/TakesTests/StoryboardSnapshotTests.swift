@@ -51,7 +51,7 @@ struct StoryboardSnapshotTests {
         let s = FileManager.default.temporaryDirectory.appending(path: "sbsnap-\(UUID().uuidString)/P/session")
         try FileManager.default.createDirectory(at: Storyboard.folder(s), withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: s.deletingLastPathComponent().deletingLastPathComponent()) }
-        let json = #"{"nokey": true, "format": "16:9", "shots": [{"id": "s1", "section": "hook", "say": "I film every idea.", "sketch": "A man."}, {"id": "s2", "say": "Then Takes cuts it.", "sketch": "A desk."}]}"#
+        let json = #"{"nokey": true, "format": "16:9", "shots": [{"id": "s1", "section": "hook", "say": "I film every idea.", "sketch": "A man."}, {"id": "s2", "say": "Then Cutmark cuts it.", "sketch": "A desk."}]}"#
         try Data(json.utf8).write(to: Storyboard.file(s))
         let board = try #require(Storyboard.read(s))
         for (name, dark) in [("dark", true), ("light", false)] {

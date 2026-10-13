@@ -1,16 +1,17 @@
 import Foundation
 
-/// First-launch setup for the agents (2026-10-04), so a downloaded Takes works without build.sh.
-/// Since 2026-10-10 any MCP agent, not only Claude Code: `takes_mcp.py --setup --once` adds the
-/// `takes` server to Claude Code, Codex, Cursor, Gemini CLI, opencode, pi and Claude Desktop, each
+/// First-launch setup for agents so a downloaded Cutmark works without build.sh.
+/// `cutmark_mcp.py --setup --once` adds the `cutmark` server to Claude Code, Codex, Cursor,
+/// Gemini CLI, opencode, pi and Claude Desktop, each
 /// one found on this Mac. It adds it once per agent (Claude Code always), and again only when the
-/// app moved. The skills the build ships in Resources/skills go to ~/.claude/skills (Claude Code,
-/// Cursor) and ~/.agents/skills (Codex, pi, opencode, Gemini CLI). It touches only the `takes`
+/// app moved. It never changes an upstream `takes` MCP entry. The skills the build ships in
+/// Resources/skills go to ~/.claude/skills (Claude Code,
+/// Cursor) and ~/.agents/skills (Codex, pi, opencode, Gemini CLI). It touches only the `cutmark`
 /// server and the skill folders it ships. In the background, once per launch.
 enum AgentSetup {
     static func run() {
         let resources = Bundle.main.bundleURL.appending(path: "Contents/Resources")
-        let server = resources.appending(path: "takes_mcp.py").path
+        let server = resources.appending(path: "cutmark_mcp.py").path
         guard FileManager.default.fileExists(atPath: server) else { return }
         Task.detached(priority: .utility) {
             // Without the Command Line Tools, /usr/bin/python3 opens Apple's install dialog.

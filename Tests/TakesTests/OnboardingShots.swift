@@ -35,8 +35,8 @@ let onboardingDir = ProcessInfo.processInfo.environment["TAKES_ONBOARDING"]
         let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../..")
         for f in (try? FileManager.default.contentsOfDirectory(at: repo.appending(path: "assets/fonts"), includingPropertiesForKeys: nil)) ?? []
         where f.pathExtension == "ttf" { CTFontManagerRegisterFontsForURL(f as CFURL, .process, nil) }
-        NSApp.applicationIconImage = NSImage(contentsOf: repo.appending(path: "assets/Takes.icns"))
-        Onboarding.creator = NSImage(contentsOf: repo.appending(path: "assets/onboarding/creator.jpg"))
+        NSApp.applicationIconImage = NSImage(contentsOf: repo.appending(path: "assets/Cutmark.icns"))
+        Onboarding.creator = NSImage(contentsOf: repo.appending(path: "assets/onboarding/cutmark-intro.jpg"))
         Look.shared.palette = .graphite
         defer { Look.shared.reset() }
         let setup = Setup.shared
@@ -89,8 +89,8 @@ let onboardingDir = ProcessInfo.processInfo.environment["TAKES_ONBOARDING"]
         let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../..")
         for f in (try? FileManager.default.contentsOfDirectory(at: repo.appending(path: "assets/fonts"), includingPropertiesForKeys: nil)) ?? []
         where f.pathExtension == "ttf" { CTFontManagerRegisterFontsForURL(f as CFURL, .process, nil) }
-        NSApp.applicationIconImage = NSImage(contentsOf: repo.appending(path: "assets/Takes.icns"))
-        Onboarding.creator = NSImage(contentsOf: repo.appending(path: "assets/onboarding/creator.jpg"))
+        NSApp.applicationIconImage = NSImage(contentsOf: repo.appending(path: "assets/Cutmark.icns"))
+        Onboarding.creator = NSImage(contentsOf: repo.appending(path: "assets/onboarding/cutmark-intro.jpg"))
         Look.shared.palette = .graphite
         defer { Look.shared.reset() }
         let d = UserDefaults.standard

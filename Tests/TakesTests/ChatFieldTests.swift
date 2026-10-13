@@ -19,7 +19,7 @@ private struct FieldHost: View {
         VStack {
             Spacer()
             ChatField(draft: $draft, focused: $focused, dictation: dictation, spokenAfter: $after,
-                      placeholder: "Message Takes", running: false, canSend: true,
+                      placeholder: "Message Cutmark", running: false, canSend: true,
                       send: {}, stop: {})
                 .frame(width: box.width)
         }

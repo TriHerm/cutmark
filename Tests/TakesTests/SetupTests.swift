@@ -52,6 +52,28 @@ struct SetupTests {
         #expect(Setup.readiness(here: [], ready: [], preferred: .claude) == (.claude, false))
     }
 
+    @Test func eachFirstRunAgentHasAnExplicitInstaller() {
+        #expect(AgentKind.claude.installation.command == Agents.claudeInstaller)
+        #expect(AgentKind.codex.installation.command == "npm install -g @openai/codex@latest")
+        #expect(AgentKind.pi.installation.command == "curl -fsSL https://pi.dev/install.sh | sh")
+        #expect(AgentKind.opencode.installation.command == "curl -fsSL https://opencode.ai/install | bash")
+        #expect(AgentKind.allCases.allSatisfy { !$0.installation.detail.isEmpty && !$0.installation.hint.isEmpty })
+    }
+
+    @Test @MainActor func firstRunRequiresAnExplicitProviderChoice() {
+        let s = Setup()
+        s.agent = .missing
+        #expect(s.installChoice == nil)
+        s.chooseAgent(.codex)
+        #expect(s.installChoice == .codex && s.target == .codex)
+        s.agent = .failed("old provider failed")
+        s.chooseAgent(.opencode)
+        #expect(s.agent == .missing && s.installChoice == .opencode && s.target == .opencode)
+        s.agent = .ok
+        s.chooseAgent(.pi)
+        #expect(s.installChoice == .opencode && s.target == .opencode, "an installed-agent setup ignores first-run choices")
+    }
+
     @Test @MainActor func nothingShowsBeforeTheFirstCheck() {
         let s = Setup()
         #expect(!s.needed)

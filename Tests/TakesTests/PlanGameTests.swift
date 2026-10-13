@@ -131,7 +131,7 @@ import Testing
         g.streak = 4
         g.rested = false
         g.almost = [.init(id: "a", title: "Why I stopped using Notion", url: url, step: 3),
-                    .init(id: "b", title: "Building Takes in public, week 3", url: url, step: 3, readyNoDay: true),
+                    .init(id: "b", title: "Building Cutmark in public, week 3", url: url, step: 3, readyNoDay: true),
                     .init(id: "c", title: "The 20-minute video", url: url, step: 2)]
         g.wins = [.init(id: "w", title: "Claude shop", url: url, platform: "LinkedIn", reach: 12_400, label: "Your best post ever", at: Date()),
                   .init(id: "v", title: "Tulum", url: url, platform: "LinkedIn", reach: 6_100, label: "2.4× your typical post", at: Date())]

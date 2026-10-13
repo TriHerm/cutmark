@@ -7,7 +7,7 @@ import SwiftUI
 /// at Replicate's price per second, with no plan. The user moved to it because his Higgsfield plan
 /// cost about a third more per clip. The takes MCP does the work (tools replicate, replicate_model,
 /// replicate_status), for the chat and for this page alike (`takes_mcp.py --replicate <call> <json>`).
-/// The token sits in the login Keychain ("Takes Replicate"). This page only holds the token and a
+/// The token sits in the login Keychain ("Cutmark Replicate"). This page only holds the token and a
 /// short list of default models; the chat sets the rest per clip from each model's own inputs.
 @MainActor @Observable
 final class Replicate {
@@ -179,7 +179,7 @@ struct ReplicatePage: View {
             if rep.connected {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Default video models").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
-                    Text("Takes uses the first one unless you name another in the chat. Length, shape, sound and quality: just ask Takes.")
+                    Text("Cutmark uses the first one unless you name another in the chat. Length, shape, sound and quality: just ask Cutmark.")
                         .font(Theme.sans(12)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
                     card {
                         VStack(alignment: .leading, spacing: 6) {
@@ -202,9 +202,9 @@ struct ReplicatePage: View {
             }
             VStack(alignment: .leading, spacing: 12) {
                 Text("Where to use it").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
-                use("sparkles", "Storyboard", "Press ✦ on a shot. Takes writes the prompt from the shot, and the clip plays on the shot.")
+                use("sparkles", "Storyboard", "Press ✦ on a shot. Cutmark writes the prompt from the shot, and the clip plays on the shot.")
                 use("photo.on.rectangle", "Assets", "Right-click a video › Change with Replicate…, then say what to change.")
-                use("bubble.left", "Chat", "Ask Takes, for example: \"Make a 5 s clip of my desk at sunrise, 480p first\".")
+                use("bubble.left", "Chat", "Ask Cutmark, for example: \"Make a 5 s clip of my desk at sunrise, 480p first\".")
                 Text("New files land in the session's generated folder. With Replicate connected, ✦ and Assets use it before Higgsfield.")
                     .font(Theme.sans(12)).foregroundStyle(Theme.faint).fixedSize(horizontal: false, vertical: true)
             }
@@ -247,7 +247,7 @@ struct ReplicatePage: View {
         case .unknown:
             HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Checking…").font(Theme.sans(12.5)).foregroundStyle(Theme.muted) }
         case .noKey:
-            keyForm("Connect Replicate", "Paste an API token from replicate.com › Account › API tokens. Takes keeps it in your Keychain.")
+            keyForm("Connect Replicate", "Paste an API token from replicate.com › Account › API tokens. Cutmark keeps it in your Keychain.")
         case .failed(let why):
             keyForm("Replicate is not connected", why)
         case .ready(let line):

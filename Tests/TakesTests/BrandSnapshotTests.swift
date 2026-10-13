@@ -13,7 +13,7 @@ struct BrandSnapshotTests {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../../assets")
         for f in (try? FileManager.default.contentsOfDirectory(at: root.appending(path: "fonts"), includingPropertiesForKeys: nil)) ?? []
         where f.pathExtension == "ttf" { CTFontManagerRegisterFontsForURL(f as CFURL, .process, nil) }
-        let mascot = NSImage(contentsOf: root.appending(path: "brand/mascot-512.png"))
+        let mascot = NSImage(contentsOf: root.appending(path: "brand/cutmark-mascot-512.png"))
         for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
             NSAppearance.current = NSAppearance(named: appearance)
             let r = ImageRenderer(content: Sheet(mascot: mascot).environment(\.colorScheme, name == "dark" ? .dark : .light))
@@ -30,7 +30,7 @@ struct BrandSnapshotTests {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../../assets")
         for f in (try? FileManager.default.contentsOfDirectory(at: root.appending(path: "fonts"), includingPropertiesForKeys: nil)) ?? []
         where f.pathExtension == "ttf" { CTFontManagerRegisterFontsForURL(f as CFURL, .process, nil) }
-        let pic = NSImage(contentsOf: root.appending(path: "brand/mascot-512.png"))
+        let pic = NSImage(contentsOf: root.appending(path: "brand/cutmark-mascot-512.png"))
         for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
             NSAppearance.current = NSAppearance(named: appearance)
             let v = VStack(alignment: .leading, spacing: 28) {
@@ -267,7 +267,7 @@ struct BrandSnapshotTests {
     @Test func mascotMoods() throws {
         guard let dir = ProcessInfo.processInfo.environment["TAKES_SNAPSHOT"] else { return }
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "../../assets")
-        MascotView.bodyImage = NSImage(contentsOf: root.appending(path: "brand/mascot-body-512.png"))?
+        MascotView.bodyImage = NSImage(contentsOf: root.appending(path: "brand/cutmark-mascot-body-512.png"))?
             .cgImage(forProposedRect: nil, context: nil, hints: nil)
         let moods: [LiveMascot.Mood] = [.idle, .thinking, .writing, .working]
         let s = 256
@@ -296,8 +296,8 @@ private struct Sheet: View {
         HStack(alignment: .top, spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
                 SectionLabel(text: "sessions")
-                ForEach(["Fix AI agents with context", "Why I record every day", "Takes launch"], id: \.self) { t in
-                    HStack { Circle().fill(t == "Takes launch" ? Theme.live : Theme.accent).frame(width: 7, height: 7)
+                ForEach(["Fix AI agents with context", "Why I record every day", "Cutmark launch"], id: \.self) { t in
+                    HStack { Circle().fill(t == "Cutmark launch" ? Theme.live : Theme.accent).frame(width: 7, height: 7)
                         Text(t).font(Theme.sans(13, .medium)).foregroundStyle(Theme.ink) }
                         .padding(8).frame(maxWidth: .infinity, alignment: .leading)
                         .background(t.hasPrefix("Why") ? Theme.hover : .clear, in: RoundedRectangle(cornerRadius: 9))
@@ -310,7 +310,7 @@ private struct Sheet: View {
                 if let mascot { Image(nsImage: mascot).resizable().aspectRatio(contentMode: .fit).frame(width: 96) }
                 (Text("Ready when you are.\n").foregroundStyle(Theme.ink) + Text("Just hit record.").foregroundStyle(Theme.accent))
                     .font(Theme.display(42))
-                Text("Takes makes the session for you and names it from your script.")
+                Text("Cutmark makes the session for you and names it from your script.")
                     .font(Theme.sans(15)).foregroundStyle(Theme.muted)
                 HStack(spacing: 10) {
                     Button("Record") {}.buttonStyle(AccentButtonStyle(kind: .solid))
@@ -344,7 +344,7 @@ private struct Sheet: View {
 private struct TokenField: View {
     @State var draft: String
     var body: some View {
-        TextField("Message Takes", text: $draft, axis: .vertical)
+        TextField("Message Cutmark", text: $draft, axis: .vertical)
             .textFieldStyle(.plain).font(Theme.sans(13)).lineLimit(1...6)
             .overlay(alignment: .topLeading) { CommandToken(draft: draft) }
             .padding(.leading, 14).padding(.trailing, 6).padding(.vertical, 12)

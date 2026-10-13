@@ -3,31 +3,31 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIconFile</key>
-    <string>Takes</string>
-    <key>CFBundleExecutable</key><string>Takes</string>
-    <key>CFBundleIdentifier</key><string>de.marvinaziz.takes</string>
-    <key>CFBundleName</key><string>Takes</string>
-    <key>CFBundleDisplayName</key><string>Takes</string>
+    <string>Cutmark</string>
+    <key>CFBundleExecutable</key><string>Cutmark</string>
+    <key>CFBundleIdentifier</key><string>com.triherm.cutmark</string>
+    <key>CFBundleName</key><string>Cutmark</string>
+    <key>CFBundleDisplayName</key><string>Cutmark</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
-    <key>NSCameraUsageDescription</key><string>Takes records you on camera.</string>
-    <key>NSMicrophoneUsageDescription</key><string>Takes records your voice.</string>
-    <key>NSSpeechRecognitionUsageDescription</key><string>Takes turns your voice notes into text for the chat, and follows your script as you talk.</string>
-    <key>NSDownloadsFolderUsageDescription</key><string>The Takes chat asks for Downloads only when you send it a file from there, such as a video you AirDropped.</string>
-    <key>NSDocumentsFolderUsageDescription</key><string>The Takes chat asks for Documents only when you send it a file from there.</string>
-    <key>NSDesktopFolderUsageDescription</key><string>The Takes chat asks for the Desktop only when you send it a file from there.</string>
-    <key>NSPhotoLibraryUsageDescription</key><string>The Takes chat asks for Photos only when you ask it to use a photo or video from your library.</string>
-    <key>NSAppleMusicUsageDescription</key><string>Takes does not need your music library. You can say no; Takes keeps its own music in the library folder.</string>
+    <key>NSCameraUsageDescription</key><string>Cutmark records you on camera.</string>
+    <key>NSMicrophoneUsageDescription</key><string>Cutmark records your voice.</string>
+    <key>NSSpeechRecognitionUsageDescription</key><string>Cutmark turns voice notes into text and follows your script as you talk.</string>
+    <key>NSDownloadsFolderUsageDescription</key><string>Cutmark asks for Downloads only when you send the chat a file from there.</string>
+    <key>NSDocumentsFolderUsageDescription</key><string>Cutmark asks for Documents only when you send the chat a file from there.</string>
+    <key>NSDesktopFolderUsageDescription</key><string>Cutmark asks for the Desktop only when you send the chat a file from there.</string>
+    <key>NSPhotoLibraryUsageDescription</key><string>Cutmark asks for Photos only when you ask it to use a photo or video from your library.</string>
+    <key>NSAppleMusicUsageDescription</key><string>Cutmark does not need your music library. You can say no; it keeps its own music in the library folder.</string>
     <key>NSCameraUseContinuityCameraDeviceType</key><true/>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>
-            <key>CFBundleURLName</key><string>de.marvinaziz.takes</string>
-            <key>CFBundleURLSchemes</key><array><string>takes</string></array>
+            <key>CFBundleURLName</key><string>com.triherm.cutmark</string>
+            <key>CFBundleURLSchemes</key><array><string>cutmark</string></array>
         </dict>
     </array>
 </dict>

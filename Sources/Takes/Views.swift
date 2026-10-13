@@ -4,7 +4,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 @main
-struct TakesApp: App {
+struct CutmarkApp: App {
     /// The Plugins board can turn a plugin off: draw again without it.
     @AppStorage(Plugins.removedKey) private var pluginsRemoved = ""
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
@@ -13,14 +13,16 @@ struct TakesApp: App {
     init() { Theme.registerFonts() }
 
     var body: some Scene {
-        Window("Takes", id: "main") {
+        Window(Product.name, id: "main") {
             ContentView(library: app.library)
                 .environment(app)
                 .tint(Theme.accent)
                 .font(Theme.body)
                 .foregroundStyle(Theme.ink)
                 .frame(minWidth: 960, minHeight: 580)
-                .overlay(alignment: .top) { PhonePairBanner().environment(app) }
+                .overlay(alignment: .top) {
+                    if Features.phone { PhonePairBanner().environment(app) }
+                }
                 .overlay { ScreenFindLayer().ignoresSafeArea() }
                 .overlay { SearchPalette().environment(app) }
                 .overlay { OnboardingLayer().environment(app) }
@@ -58,7 +60,7 @@ struct TakesApp: App {
                 }
                 Button("Styles") { app.toggle(.styles) }.keyboardShortcut("y", modifiers: [.command, .shift])
                 Button("Plugins") { app.toggle(.plugins) }.keyboardShortcut("p", modifiers: [.command, .shift])
-                Button("Chat with Takes") {
+                Button("Chat with Cutmark") {
                     // Record: the chat takes the script's column, and goes again.
                     if app.chats.docked, UserDefaults.standard.string(forKey: "rightTab") == "script", app.board == nil {
                         if app.chats.onRecord && app.chats.open { app.chats.onRecord = false }
@@ -112,7 +114,7 @@ struct TakesApp: App {
                 Button("Reveal Library in Finder") { app.library.reveal(app.library.root) }
                 Button("Change Library Folder…") { app.chooseLibraryFolder() }
                 Divider()
-                Button("Forget Paired Phones") { app.phone?.forgetAll() }
+                if Features.phone { Button("Forget Paired Phones") { app.phone?.forgetAll() } }
             }
         }
         Window("Prompter", id: "prompter") {
@@ -120,7 +122,7 @@ struct TakesApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 960, height: 600)
-        Window("About Takes", id: "about") {
+        Window("About Cutmark", id: "about") {
             AboutView().environment(app).tint(Theme.accent).foregroundStyle(Theme.ink)
         }
         .windowStyle(.hiddenTitleBar)
@@ -148,8 +150,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ScreenFind.shared.install()
         MediaSearch.shared.start()
         // Design check without screen-recording rights and without taking focus: post
-        // "de.marvinaziz.takes.snapshot" (object = output path) and Takes draws its window into a PNG.
-        DistributedNotificationCenter.default().addObserver(forName: .init("de.marvinaziz.takes.snapshot"),
+        // "com.triherm.cutmark.snapshot" (object = output path) and Cutmark draws its window into a PNG.
+        DistributedNotificationCenter.default().addObserver(forName: .init("com.triherm.cutmark.snapshot"),
                                                             object: nil, queue: .main) { n in
             guard let out = n.object as? String,
                   let frame = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil })?.contentView?.superview,
@@ -716,7 +718,7 @@ struct SessionList: View {
         guard !moving.isEmpty else { return }
         let busy = moving.contains { u in app.chats.all.contains { $0.running && $0.session?.standardizedFileURL == u.standardizedFileURL } }
         if app.isRecording || busy {
-            app.show(toast: app.isRecording ? "Stop the take first, then move the session" : "Takes is working in it. Move it when it is done.")
+            app.show(toast: app.isRecording ? "Stop the take first, then move the session" : "Cutmark is working in it. Move it when it is done.")
             return
         }
         let name = library.projects.first { $0.url.standardizedFileURL == project.standardizedFileURL }?.name ?? project.lastPathComponent
@@ -1666,7 +1668,7 @@ enum DevicePanel {
                 MenuButton(d.name, icon: "display", checked: d.id == screen.displayID) { screen.displayID = d.id }
             }
             MenuView("screen-note") {
-                Text("Takes hides itself from the screen file.").font(Theme.sans(11)).foregroundStyle(Theme.faint)
+                Text("Cutmark hides itself from the screen file.").font(Theme.sans(11)).foregroundStyle(Theme.faint)
                     .padding(.leading, 33).padding(.trailing, 8).padding(.bottom, 4)
             }
         }
@@ -1888,7 +1890,7 @@ struct EmptySessionView: View {
                      + Text("Just hit record.").foregroundStyle(Theme.accent))
                         .font(Theme.display(42))
                         .lineSpacing(2)
-                    Text("Takes makes the session for you and names it from your script.")
+                    Text("Cutmark makes the session for you and names it from your script.")
                         .font(Theme.sans(15)).foregroundStyle(Theme.muted)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -1932,7 +1934,7 @@ struct EmptySessionView: View {
                         .overlay(RoundedRectangle(cornerRadius: Theme.radius).strokeBorder(Theme.border))
                     }
                 }
-                Text("Tip: ask Takes to “create a Takes session with this script”. It shows up here.")
+                Text("Tip: ask Cutmark to “create a Cutmark session with this script”. It shows up here.")
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted)
                     .builderBorder()
             }
@@ -1988,7 +1990,7 @@ struct BulkView: View {
                                 }
                             }
                             .disabled(others.isEmpty)
-                            action("star.slash", "Keep Only Starred Takes",
+                            action("star.slash", "Keep Only Starred Cutmark",
                                    stats.unstarred == 0 ? "Every take has a star" : "Trash \(stats.unstarred) take\(stats.unstarred == 1 ? "" : "s") without a star") {
                                 let n = library.trashNonKeepers(urls)
                                 note = "Moved \(n) take\(n == 1 ? "" : "s") to the Trash."
@@ -2148,13 +2150,13 @@ struct ClaudeActivity: View {
     var body: some View {
         if let chat { Live(chat: chat, waiting: waiting, job: job) }
         else if job { Self.ring }
-        else if waiting { Self.dot.help("Takes has something to show you here") }
+        else if waiting { Self.dot.help("Cutmark has something to show you here") }
     }
 
     static var ring: some View {
         LayerSpinner(color: Theme.faint, lineWidth: 1.5, inset: 0, length: 0.3)
             .frame(width: 9, height: 9)
-            .help("Takes is working in this session")
+            .help("Cutmark is working in this session")
     }
 
     static var dot: some View { Circle().fill(Theme.accent).frame(width: 7, height: 7) }
@@ -2168,7 +2170,7 @@ struct ClaudeActivity: View {
                 if chat.running || job {
                     ClaudeActivity.ring
                 } else if waiting || chat.unread {
-                    ClaudeActivity.dot.help(waiting ? "Takes has something to show you here" : "Takes replied")
+                    ClaudeActivity.dot.help(waiting ? "Cutmark has something to show you here" : "Cutmark replied")
                 }
             }
             .transition(.opacity)
@@ -2193,7 +2195,7 @@ struct NoticePill: View {
                           + (more > 0 ? "  +\(more)" : ""), icon: "sparkle", accent: true)
             }
             .buttonStyle(.plain)
-            .help("Takes wants to show you this. Click to go there.")
+            .help("Cutmark wants to show you this. Click to go there.")
             Button { app.notices.removeAll() } label: {
                 Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
                     .frame(width: 22, height: 22)
@@ -2304,8 +2306,8 @@ struct NoticeCardBody: View {
             }
             .buttonStyle(.plain)
             .onHover { h in withAnimation(Theme.motion) { hover = h } }
-            .help(more > 0 ? "Takes wants to show you this. Click to go there. \(more) more after it."
-                           : "Takes wants to show you this. Click to go there.")
+            .help(more > 0 ? "Cutmark wants to show you this. Click to go there. \(more) more after it."
+                           : "Cutmark wants to show you this. Click to go there.")
             Button(action: dismiss) {
                 Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.faint)
                     .frame(width: 22, height: 22).contentShape(Circle())
@@ -2439,7 +2441,7 @@ struct ScriptPane: View {
                 if doc.activeText.isEmpty {
                     // In the script's own font, size and place, so the cursor sits just before it.
                     // The text view starts at its inset (40, 36) plus 5 pt of line padding on each side.
-                    Text("Paste your script here.\nOr have Takes write script.md into the session folder.")
+                    Text("Paste your script here.\nOr have Cutmark write script.md into the session folder.")
                         .font(Font(Theme.prompter(app.fontSize))).lineSpacing(app.fontSize * 0.35)
                         .foregroundStyle(Theme.faint)
                         .padding(.horizontal, 45).padding(.top, 36)
@@ -2459,7 +2461,7 @@ struct ScriptPane: View {
                         StagePill(text: "Comment", icon: "text.bubble", accent: true)
                     }
                     .buttonStyle(.plain)
-                    .help("Comment on the selected text, for Takes")
+                    .help("Comment on the selected text, for Cutmark")
                     .padding(12)
                     .transition(.opacity)
                 }
@@ -2583,7 +2585,7 @@ struct ScriptPane: View {
                          let text = (draft?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                          guard !text.isEmpty, let q = draft?.quote else { return }
                          if let c = comments.add(script: scriptFile, quote: q, text: text) {
-                             app.show(toast: "Comment \(c.id) saved for Takes")
+                             app.show(toast: "Comment \(c.id) saved for Cutmark")
                          }
                          withAnimation(Theme.motion) { draft = nil }
                      },
@@ -2760,7 +2762,7 @@ struct ScriptCommentList: View {
                 Button { withAnimation(Theme.motion) { collapsed.toggle() } } label: {
                     HStack(spacing: 8) {
                         Text("COMMENTS").font(Theme.mono(10.5, .medium)).foregroundStyle(Theme.accent)
-                        Text(open > 0 ? "\(open) open for Takes" : "all resolved")
+                        Text(open > 0 ? "\(open) open for Cutmark" : "all resolved")
                             .font(Theme.mono(10.5)).foregroundStyle(Theme.muted)
                         Spacer()
                         Image(systemName: collapsed ? "chevron.down" : "chevron.up")
@@ -2923,7 +2925,7 @@ struct HistorySheet: View {
 
     var body: some View {
         VersionsSheet(title: "Script history", subtitle: doc.meta.title,
-                      empty: "Takes saves a version while you edit, before each take, and whenever the chat changes the script.",
+                      empty: "Cutmark saves a version while you edit, before each take, and whenever the chat changes the script.",
                       load: { doc.snapshotDirty(); return doc.versions() },
                       draftName: doc.draftName, restore: doc.restore)
     }
@@ -3362,7 +3364,7 @@ struct Prompter: NSViewRepresentable {
 
         func textView(_ view: NSTextView, menu: NSMenu, for event: NSEvent, at charIndex: Int) -> NSMenu? {
             guard view.selectedRange().length > 0 else { return menu }
-            let item = NSMenuItem(title: "Comment for Takes…", action: #selector(commentFromMenu), keyEquivalent: "")
+            let item = NSMenuItem(title: "Comment for Cutmark…", action: #selector(commentFromMenu), keyEquivalent: "")
             item.target = self
             menu.insertItem(item, at: 0)
             menu.insertItem(.separator(), at: 1)

@@ -317,7 +317,7 @@ struct MarkdownReader: NSViewRepresentable {
 
         func textView(_ view: NSTextView, menu: NSMenu, for event: NSEvent, at charIndex: Int) -> NSMenu? {
             guard view.selectedRange().length > 0 else { return menu }
-            let item = NSMenuItem(title: "Comment for Takes…", action: #selector(comment), keyEquivalent: "")
+            let item = NSMenuItem(title: "Comment for Cutmark…", action: #selector(comment), keyEquivalent: "")
             item.target = self
             menu.insertItem(item, at: 0)
             menu.insertItem(.separator(), at: 1)

@@ -31,13 +31,13 @@ struct SearchTests {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let doc = SessionDoc(url: url)
-        doc.meta = SessionMeta(title: "Takes launch video", createdAt: Date(), named: true)
+        doc.meta = SessionMeta(title: "Cutmark launch video", createdAt: Date(), named: true)
         doc.save()
         let app = AppModel()
         app.library.setRoot(root)
         let launch = MediaSearch.places("takes launch", app: app)
         #expect(launch.map(\.kind) == ["session"])
-        #expect(launch.first?.title == "Takes launch video")
+        #expect(launch.first?.title == "Cutmark launch video")
         #expect(launch.first?.text == "Weekly Challenge")
         #expect(MediaSearch.places("weekly", app: app).first?.kind == "project")
         // The public build has no social boards (Features.socialBoards), so no Performance there.

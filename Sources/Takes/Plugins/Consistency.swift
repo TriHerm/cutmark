@@ -22,7 +22,7 @@ import SwiftUI
 enum Consistency {
     static let plugin = TakesPlugin(
         id: "consistency", title: "Plan", icon: "calendar", key: "c",
-        help: "Plan your videos on a calendar. Pick the days you post, and Takes shows your next slot, your buffer and your streak (⇧⌘C)",
+        help: "Plan your videos on a calendar. Pick the days you post, and Cutmark shows your next slot, your buffer and your streak (⇧⌘C)",
         badge: { _ in AnyView(EmptyView()) },
         board: { app in
             let root = app.library.root
@@ -37,7 +37,7 @@ enum Consistency {
 
     @MainActor static func context(_ root: URL) -> String {
         """
-        The user is talking to you from the Plan board inside the Takes app: a calendar of the next weeks. \
+        The user is talking to you from the Plan board inside the Cutmark app: a calendar of the next weeks. \
         It shows the posting days (get_plan; change them with set_plan when the user asks), a chart of videos \
         per week (posted, scheduled, planned, against the goal), the open posting days and the planned video \
         cards. Each card says Posted or Scheduled from its post: when the user says a video went \
@@ -667,7 +667,7 @@ struct ConsistencyPage: View {
                     Text(title).font(Theme.sans(13)).foregroundStyle(Theme.ink).lineLimit(1)
                 }
             }
-            Text("Ask Takes in the chat to put one in your next open slot.")
+            Text("Ask Cutmark in the chat to put one in your next open slot.")
                 .font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -820,14 +820,14 @@ struct CommitCard: View {
     private var perMonth: String { days.isEmpty ? "Pick at least one day." : CoachWords.perMonth(days.count) }
 }
 
-/// How hot the plan runs: the mascot's flame, from none (no days) to a gold "Super Takes" (four
+/// How hot the plan runs: the mascot's flame, from none (no days) to a gold "Super Cutmark" (four
 /// or more). The user asked for super-saiyan levels (2026-10-11).
 struct FireLevel: Equatable {
     let rank: Int
 
     init(days: Int) { rank = min(max(days, 0), 4) }
 
-    var name: String { ["Pick a day to start", "Warming up", "The sweet spot", "On fire", "Super Takes"][rank] }
+    var name: String { ["Pick a day to start", "Warming up", "The sweet spot", "On fire", "Super Cutmark"][rank] }
     var opacity: Double { [0, 0.45, 0.8, 1, 1][rank] }
     var scale: CGFloat { [0.6, 0.7, 0.85, 1, 1.22][rank] }
     var outer: Color { Color(nsColor: NSColor(hex: [0x3B82F6, 0x3B82F6, 0x3B82F6, 0xFF6A1A, 0xFFB800][rank])) }
@@ -1031,7 +1031,7 @@ struct SlotStrip: View {
                 }
                 Spacer()
                 if stats.videos.isEmpty {
-                    Text("Point at a day and click + to add a video, or ask Takes in the chat.").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+                    Text("Point at a day and click + to add a video, or ask Cutmark in the chat.").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
                 }
             } }
         }

@@ -157,7 +157,7 @@ struct Storyboard: Decodable, Equatable {
         // No image key: a shot with no sketch says so, instead of "Drawing…" forever.
         if b.nokey == true {
             for i in b.shots.indices where b.shots[i].image == nil && b.shots[i].video == nil && b.shots[i].error == nil {
-                b.shots[i].error = "No sketch: Takes has no image key."
+                b.shots[i].error = "No sketch: Cutmark has no image key."
             }
         }
         // Hook, main, end, each in the order written.
@@ -214,7 +214,7 @@ struct NoSketchKeyCard: View {
             Image(systemName: "key").font(.system(size: 14)).foregroundStyle(Theme.warn).padding(.top, 2)
             VStack(alignment: .leading, spacing: 4) {
                 Text("No sketches yet").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
-                Text("Takes needs an image key to draw them: Gemini, OpenAI or Replicate. Add a key, then click Draw. Or ask the chat to draw them itself.")
+                Text("Cutmark needs an image key to draw them: Gemini, OpenAI or Replicate. Add a key, then click Draw. Or ask the chat to draw them itself.")
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 12)
@@ -451,7 +451,7 @@ struct StoryboardPane: View {
         VStack(spacing: 12) {
             Image(systemName: "rectangle.split.3x1").font(.system(size: 30)).foregroundStyle(Theme.faint)
             Text("No storyboard yet").font(Theme.sans(15, .semibold)).foregroundStyle(Theme.ink)
-            Text("Takes writes the script and sketches each shot,\nso you see how to film it before you start.")
+            Text("Cutmark writes the script and sketches each shot,\nso you see how to film it before you start.")
                 .font(Theme.sans(12.5)).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
             Button("Storyboard this video") {
                 app.chats.chat(doc.url).send("Storyboard this video. Use the storyboard skill.",
@@ -968,7 +968,7 @@ private struct ShotDetail: View {
                         .contentShape(RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(PressStyle()).foregroundStyle(Theme.muted)
-                .help("Ask Takes for another variant of this shot")
+                .help("Ask Cutmark for another variant of this shot")
             }
             .padding(.horizontal, 2).padding(.top, 2)
         }
@@ -993,7 +993,7 @@ private struct ShotDetail: View {
                     app.chats.open = true
                 }
                 .buttonStyle(.bordered).controlSize(.large)
-                .help("A GPT Image draft. Takes redraws it sharp with Nano Banana 2.1 at 4K.")
+                .help("A GPT Image draft. Cutmark redraws it sharp with Nano Banana 2.1 at 4K.")
             }
             if isTrying {
                 Button("Back to \(letter(shot.video))") { onTry(nil) }
@@ -1023,7 +1023,7 @@ private struct ShotDetail: View {
         .background(Theme.accentSoft, in: Circle())
         .disabled(shot.generating != nil)
         .opacity(shot.generating != nil ? 0.45 : 1)
-        .help(shot.generating != nil ? "Takes is making this clip"
+        .help(shot.generating != nil ? "Cutmark is making this clip"
               : "\(clip == nil ? "Make this shot's clip" : "Make a new clip") with \(VideoMaker.current?.name ?? "AI video")")
     }
 
@@ -1073,7 +1073,7 @@ private struct ShotDetail: View {
         return VStack(alignment: .leading, spacing: 8) {
             ForEach(open) { c in note(c) }
             if showResolved { ForEach(done) { c in note(c) } }
-            AskBox(placeholder: "Note for Takes: what should change?", text: $draft, focus: $typing, send: send,
+            AskBox(placeholder: "Note for Cutmark: what should change?", text: $draft, focus: $typing, send: send,
                    cancel: { draft = ""; typing = false }, autofocus: false, inline: true)
             if !done.isEmpty {
                 Button { withAnimation(Theme.motion) { showResolved.toggle() } } label: {
@@ -1103,7 +1103,7 @@ private struct ShotDetail: View {
                 .help(c.open ? "Resolve" : "Open again")
             }
             ForEach(Array((c.replies ?? []).enumerated()), id: \.offset) { _, r in
-                Text((r.by == "claude" ? "Takes: " : "You: ") + r.text)
+                Text((r.by == "claude" ? "Cutmark: " : "You: ") + r.text)
                     .font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1136,7 +1136,7 @@ private struct ShotDetail: View {
                 }
             }
         }
-        MenuButton("Ask Takes for a variant", icon: "sparkles") { askVariant() }
+        MenuButton("Ask Cutmark for a variant", icon: "sparkles") { askVariant() }
         if let media {
             MenuButton(clip != nil ? "Open the clip" : "Open the still", icon: "arrow.up.forward.app") { NSWorkspace.shared.openSoon(media) }
             MenuButton("Show in Finder", icon: "folder") { NSWorkspace.shared.revealSoon([media]) }
@@ -1263,7 +1263,7 @@ extension TakeThumb {
         case "running": s += "\nGemini is finding the best cut…"
         case "failed": s += "\nNo best cut: \(cut?.error ?? "it failed")"
         case "done":
-            let who = cut?.by == "agent" ? "Best cut, checked by Takes" : "Gemini's first suggestion (Takes checks it before cutting)"
+            let who = cut?.by == "agent" ? "Best cut, checked by Cutmark" : "Gemini's first suggestion (Cutmark checks it before cutting)"
             if let r = cut?.range { s += "\n\(who): \(r)\(cut?.clean == false ? " (not every word clean)" : "")" }
             if let w = cut?.why { s += ": \(w)" }
         default: break

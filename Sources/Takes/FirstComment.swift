@@ -36,7 +36,7 @@ struct FirstCommentRow: View {
                             .lineSpacing(4)
                             .focused($focused)
                             .padding(.top, 6)
-                            .help("The first comment. Takes posts it under the post once it is live")
+                            .help("The first comment. Cutmark posts it under the post once it is live")
                     }
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(Color(red: 0.95, green: 0.95, blue: 0.95), in: RoundedRectangle(cornerRadius: 8))

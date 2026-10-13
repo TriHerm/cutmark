@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 // Which agent runs the Takes chat, and on which model (2026-10-11). Before this the chat always ran
-// `claude` on the model Claude Code picks by itself. Now the line under "Takes" in the chat header
+// `claude` on the model Claude Code picks by itself. Now the line under "Cutmark" in the chat header
 // says "Claude Code · Opus" and opens a small card: the agent, its model, and a link to
 // Settings › Agents, which also lists the other agents that can open the library.
 //
@@ -181,7 +181,7 @@ enum AgentCheck {
 }
 
 /// What Settings › Agents and the chat's card show: sign-in of the chat agents, and which MCP
-/// agents have the takes server (takes_mcp.py --agents). Read when a page opens, and on Check again.
+/// agents have the Cutmark server (cutmark_mcp.py --agents). Read when a page opens, and on Check again.
 @MainActor
 @Observable
 final class AgentsStatus {
@@ -207,7 +207,7 @@ final class AgentsStatus {
     private(set) var connecting: String?
 
     private var server: String? {
-        let p = Bundle.main.bundleURL.appending(path: "Contents/Resources/takes_mcp.py").path
+        let p = Bundle.main.bundleURL.appending(path: "Contents/Resources/cutmark_mcp.py").path
         return FileManager.default.fileExists(atPath: p) ? p : nil
     }
 
@@ -239,7 +239,7 @@ final class AgentsStatus {
         }
     }
 
-    /// Adds the takes server to one agent (takes_mcp.py --setup --only NAME), then checks again.
+    /// Adds the Cutmark server to one agent (cutmark_mcp.py --setup --only NAME), then checks again.
     func connect(_ name: String) {
         guard let server, connecting == nil else { return }
         connecting = name
@@ -283,9 +283,9 @@ final class AgentsStatus {
     }
 }
 
-// MARK: - The line under "Takes" and its card
+// MARK: - The line under "Cutmark" and its card
 
-/// "Claude Code · Opus ⌄" under "Takes" in the chat header. A click opens the card.
+/// "Claude Code · Opus ⌄" under "Cutmark" in the chat header. A click opens the card.
 struct AgentLine: View {
     var chat: ClaudeChat
     @State private var open = false
@@ -397,7 +397,7 @@ struct AgentCard: View {
         }
         .buttonStyle(.plain)
         .disabled(!there || (chat.running && !selected))
-        .help(chat.running && !selected ? "Wait until Takes is done to switch" : "")
+        .help(chat.running && !selected ? "Wait until Cutmark is done to switch" : "")
     }
 }
 
@@ -488,7 +488,7 @@ struct AgentsPage: View {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Agents").font(Theme.display(26)).foregroundStyle(Theme.ink)
-                    Text("One agent runs the chat in Takes, on your own plan. Every agent below can also open your library, from its own app or terminal.")
+                    Text("One agent runs the chat in Cutmark, on your own plan. Every agent below can also open your library, from its own app or terminal.")
                         .font(Theme.sans(12.5)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
                 }
                 VStack(alignment: .leading, spacing: 10) {
@@ -512,7 +512,7 @@ struct AgentsPage: View {
                     }
                     card {
                         if status.library.isEmpty {
-                            Text(status.checking ? "Checking the agents on this Mac…" : "Takes found no agents on this Mac.")
+                            Text(status.checking ? "Checking the agents on this Mac…" : "Cutmark found no agents on this Mac.")
                                 .font(Theme.sans(12.5)).foregroundStyle(Theme.faint)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(14)
@@ -603,8 +603,8 @@ struct AgentsPage: View {
 
     /// One line on what each agent gets.
     static let notes: [String: String] = [
-        "Claude Code": "In your terminal too, with the two Takes skills",
-        "Codex": "In your terminal too, with the two Takes skills",
+        "Claude Code": "In your terminal too, with the two Cutmark skills",
+        "Codex": "In your terminal too, with the two Cutmark skills",
         "Cursor": "The main tools, so Cursor stays under its tool limit",
         "pi": "Through pi-mcp-adapter",
     ]

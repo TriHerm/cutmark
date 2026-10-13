@@ -1,11 +1,11 @@
 ---
-name: takes-video-edit
-description: Edit a video recorded in Takes, starting from the Takes session (takes MCP): rough_cut and cut_take for the cuts, render_edit and publish_edit to build and save each version from its recipe. Use when the user asks to edit, cut, trim, caption, reframe (for example to 9:16), clean up the audio of, fix the words said in, add a voice-over to, or make a thumbnail for a take or a video in Takes, or asks for a new version of an edit after review comments.
+name: cutmark-video-edit
+description: Edit a video recorded in Cutmark, starting from the Cutmark session (Cutmark MCP): rough_cut and cut_take for the cuts, render_edit and publish_edit to build and save each version from its recipe. Use when the user asks to edit, cut, trim, caption, reframe (for example to 9:16), clean up the audio of, fix the words said in, add a voice-over to, or make a thumbnail for a take or a video in Cutmark, or asks for a new version of an edit after review comments.
 ---
 
-# Takes video edit
+# Cutmark video edit
 
-Takes cuts the takes (`rough_cut`, `cut_take`) and builds each version of the edit from a recipe
+Cutmark cuts the takes (`rough_cut`, `cut_take`) and builds each version of the edit from a recipe
 (`render_edit`, `publish_edit`). `ffmpeg`/`ffprobe` are for stills and picture layers. Exact commands
 are in `references/ffmpeg-recipes.md`. Other tools (for example HyperFrames for motion graphics) are
 optional. Use them only if the user has them and asks for that kind of work.
@@ -17,9 +17,9 @@ captions land late, crops cut off heads, all without an error. After any cut, cr
 grade change, render stills (first frame, last frame, the longest caption, the tightest crop)
 and look at them with the Read tool before you call the edit done.
 
-## Start from the Takes session
+## Start from the Cutmark session
 
-Use the `takes` MCP, not file guessing. **Follow the user's rules**: what you learned from their
+Use the `cutmark` MCP, not file guessing. **Follow the user's rules**: what you learned from their
 comments on earlier videos. `get_session` and `next_path` give them (the `rules` key) the first
 time in a chat; `get_rules area=edit,thumbnail` gives them all. A rule the user wrote (`by_user`) wins.
 
@@ -27,7 +27,7 @@ time in a chat; `get_rules area=edit,thumbnail` gives them all. A rule the user 
    variant and hook it was read with), every asset, the folder rules, `warnings` and
    `open_comments`. Fix any `warnings` about files in the wrong place.
 2. **Edit the keeper** (the starred take). No star: ask which take. Do not pick one yourself.
-   A recording made outside Takes (phone, QuickTime, a download): add it with `import_take`
+   A recording made outside Cutmark (phone, QuickTime, a download): add it with `import_take`
    first. Never edit `session.json` by hand.
 3. **Camera + screen takes:** both files of one take share a number. Both carry the mic, so
    line them up by their audio if they drift.
@@ -37,7 +37,7 @@ time in a chat; `get_rules area=edit,thumbnail` gives them all. A rule the user 
    title. Use its `tokens` (colours, type) and `template` if the user picked a style. No style:
    use plain, readable defaults (see below).
 6. **Music and sound effects:** mix them into a new version of the edit with ffmpeg, under the
-   voice. Takes plays only the file: it never adds a song or an effect while a video plays, so
+   voice. Cutmark plays only the file: it never adds a song or an effect while a video plays, so
    what the user hears is what posts. Find files with `list_music`. The Sound page's Use button
    sends you the file, and for an effect the video and second. No song asked for: suggest two
    or three from `list_music` and ask first.
@@ -48,7 +48,7 @@ time in a chat; `get_rules area=edit,thumbnail` gives them all. A rule the user 
 
 ## Build and publish a version
 
-An edit is a recipe (JSON) that Takes keeps beside each version: `edits/<name>-vN.recipe.json`. Takes
+An edit is a recipe (JSON) that Cutmark keeps beside each version: `edits/<name>-vN.recipe.json`. Cutmark
 renders the recipe. You change the recipe. So a new chat, or the same chat after a week, builds the
 next version from that file, not from memory.
 
@@ -70,7 +70,7 @@ recipe and the versions before it.
 
 ## Cut a talking-head video
 
-Takes makes each take ready to edit when it saves it: word times on the video clock
+Cutmark makes each take ready to edit when it saves it: word times on the video clock
 (`get_session` → each take's `edit_ready`). Cut takes with `rough_cut` and `cut_take` by default:
 they fix the take's audio offset (0.16–0.24 s on a camera take) and its frame rate.
 
@@ -96,7 +96,7 @@ synced `_work` clip and `.wav`, or from the take with the `audio_offset_s` that 
 take minutes: start each one with `run_job` (`cmd` with paths relative to the session, `outputs`
 from `next_path`, a short `label`), never as a background Bash job or with `sleep`. If it ends
 within about 2 min, wait with `get_job wait_s=50`. Else tell the user in one line what runs and
-end your turn: Takes tells you when it ends, and you go on from there (stills, `check_edit`,
+end your turn: Cutmark tells you when it ends, and you go on from there (stills, `check_edit`,
 `open_in_app`). Quick steps (a still, an `ffprobe`) stay in Bash.
 
 ## Voice
@@ -113,12 +113,12 @@ Keep every intermediate audio file as float WAV (`pcm_f32le`). Integer WAVs clip
 
 ## New words, voice-over, other voices (ElevenLabs)
 
-These tools need an ElevenLabs key in Takes › Plugins › Voices. When a tool says there is no key,
+These tools need an ElevenLabs key in Cutmark › Plugins › Voices. When a tool says there is no key,
 tell the user to open that page. Each call costs ElevenLabs characters (about one per letter), so
 make one call per ask.
 
 - **Fix what was said:** `fix_words` with `take` (or `file`), `old` (the words exactly as said; the
-  transcript has them) and `new`. Takes says the new words in the voice, using the sentences around
+  transcript has them) and `new`. Cutmark says the new words in the voice, using the sentences around
   them so the tone matches. It cuts them in at the word edges, using the take's cleaned voice when
   there is one. When the new words fit the old time (0.8–1.25×), the result is the same length as
   the take, with a `.wav` and an `.mp4`, so your cut list still holds. If they do not fit, there is
@@ -202,7 +202,7 @@ several options when the user did not ask for one specific look.
 
 ## Review comments
 
-The user reviews edits in Takes with comments on a time range and an area of the frame, on an
+The user reviews edits in Cutmark with comments on a time range and an area of the frame, on an
 image area, or on selected script text. `get_session` shows `open_comments`.
 
 1. `get_comments` returns each comment with `when` (start/end seconds), `area`, `said` (the words

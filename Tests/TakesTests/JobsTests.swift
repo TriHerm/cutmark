@@ -111,7 +111,7 @@ struct JobsTests {
         j.status = .done
         #expect(JobBoard.line(j, now: now) == "Ready")
         j.status = .failed
-        #expect(JobBoard.line(j, woken: true, now: now) == "Render edit v3 did not finish. Takes is on it.")
+        #expect(JobBoard.line(j, woken: true, now: now) == "Render edit v3 did not finish. Cutmark is on it.")
         #expect(JobBoard.line(j, now: now) == "Render edit v3 did not finish.")
         #expect(JobBoard.line(j, again: true, now: now) == "Render edit v3 did not finish again.")
         j.status = .lost
@@ -119,7 +119,7 @@ struct JobsTests {
         j.status = .stopped; j.stoppedBy = "you"
         #expect(JobBoard.line(j, now: now) == "You stopped it")
         j.stoppedBy = "takes"
-        #expect(JobBoard.line(j, now: now) == "Takes stopped it")
+        #expect(JobBoard.line(j, now: now) == "Cutmark stopped it")
         #expect(JobBoard.duration(212) == "3 min 32 s")
         #expect(JobBoard.duration(45) == "45 s")
     }
@@ -128,15 +128,15 @@ struct JobsTests {
         let start = Date().addingTimeInterval(-212)
         let done = Job(id: "job-7f3a1c", label: "Render edit v3", outputs: ["edits/launch-v3.mp4"], fromChat: true, status: .done,
                        started: start, ended: start.addingTimeInterval(212), isGenerate: false, folder: URL(fileURLWithPath: "/tmp/s/.jobs"))
-        #expect(JobBoard.note(for: [done]) == "[Takes] Job job-7f3a1c ended: Render edit v3 is done after 3 min 32 s. It wrote edits/launch-v3.mp4. Go on with the next step you planned. If nothing is left, tell the user in one line.")
+        #expect(JobBoard.note(for: [done]) == "[Cutmark] Job job-7f3a1c ended: Render edit v3 is done after 3 min 32 s. It wrote edits/launch-v3.mp4. Go on with the next step you planned. If nothing is left, tell the user in one line.")
         var failed = done
         failed.status = .failed; failed.error = "boom"; failed.ended = start.addingTimeInterval(64)
-        #expect(JobBoard.note(for: [failed]) == "[Takes] Job job-7f3a1c failed after 1 min 4 s: boom. get_job id=job-7f3a1c has the log. Fix it and run it again, or tell the user in one line what went wrong.")
+        #expect(JobBoard.note(for: [failed]) == "[Cutmark] Job job-7f3a1c failed after 1 min 4 s: boom. get_job id=job-7f3a1c has the log. Fix it and run it again, or tell the user in one line what went wrong.")
         #expect(JobBoard.note(for: [done, failed]).split(separator: "\n").count == 2)
         // A lost job's note names the job and where its command is: the chat may have lost both.
         var lost = done
         lost.status = .lost
-        #expect(JobBoard.note(for: [lost]) == "[Takes] Job job-7f3a1c stopped: Render edit v3 did not finish, because the Mac restarted or the job quit. get_job id=job-7f3a1c gives its command: run it again with run_job and new outputs from next_path.")
+        #expect(JobBoard.note(for: [lost]) == "[Cutmark] Job job-7f3a1c stopped: Render edit v3 did not finish, because the Mac restarted or the job quit. get_job id=job-7f3a1c gives its command: run it again with run_job and new outputs from next_path.")
         #expect(JobBoard.tick(done).text == "Render edit v3 is done" && JobBoard.tick(done).isJobNote)
         #expect(JobBoard.tick(failed).text == "Render edit v3 did not finish" && JobBoard.tick(failed).role == .tool)
     }
@@ -184,10 +184,10 @@ struct JobsTests {
     }
 
     @Test func watcherRoutesJobFiles() {
-        let s = "/Movies/Takes/p/2026-10-10-demo"
+        let s = "/Movies/Cutmark/p/2026-10-10-demo"
         let paths = [s + "/.jobs/job-1.json", s + "/.jobs/job-1.log", s + "/.jobs/job-1.lock", s + "/.jobs/job-1.json.tmp",
                      s + "/.jobs/job-1.partial/a.mp4", s + "/generated/.jobs/shot-1-v1.json", s + "/.jobs/job-1.told",
-                     "/Movies/Takes/.jobs.claims"]
+                     "/Movies/Cutmark/.jobs.claims"]
         #expect(FileWatch.folders(paths).isEmpty)
         #expect(FileWatch.jobSessions(paths) == [s])
         #expect(FileWatch.folders(paths + [s + "/edits/launch-v3.mp4"]) == [s + "/edits"])
@@ -268,7 +268,7 @@ extension ChatRunTests {
         b.reload(session)
         await until { runs == 1 && !chat.running }
         let sent = try #require(ask(1))
-        #expect(sent.contains("[Takes] Job job-1 ended") && sent.contains("[Takes] Job job-2 failed"))
+        #expect(sent.contains("[Cutmark] Job job-1 ended") && sent.contains("[Cutmark] Job job-2 failed"))
         #expect(!sent.contains("job-3") && !sent.contains("job-4") && !sent.contains("job-5"))
         #expect(told("job-1") && told("job-2") && !told("job-4"))
         // The panel: two tick lines, no message from the user, nothing red.
@@ -277,7 +277,7 @@ extension ChatRunTests {
         b.reload(session)  // the same ends again: nothing new
         try? await Task.sleep(for: .milliseconds(300))
         #expect(runs == 1)
-        #expect(b.woken.count == 1 && b.woken.first?.contains("/job-2@") == true)  // "Takes is on it."
+        #expect(b.woken.count == 1 && b.woken.first?.contains("/job-2@") == true)  // "Cutmark is on it."
     }
 
     @Test func endsAtLaunchOrAfterAStopWaitForTheNextMessage() async throws {
@@ -294,7 +294,7 @@ extension ChatRunTests {
         chat.send("Make the cut", title: "T", onStage: nil)
         await until { runs == 1 }
         // His message carries the end that waited since the launch.
-        #expect(ask(1)?.hasPrefix("[Takes] Job job-1 ended") == true)
+        #expect(ask(1)?.hasPrefix("[Cutmark] Job job-1 ended") == true)
         #expect(ask(1)?.hasSuffix("Make the cut") == true)
         #expect(told("job-1"))
         chat.stop()
@@ -308,7 +308,7 @@ extension ChatRunTests {
         chat.send("What now?", title: "T", onStage: nil)
         await until { runs == 2 && !chat.running }
         let sent = try #require(ask(2))
-        #expect(sent.hasPrefix("[Takes] Job job-2 ended") && sent.hasSuffix("What now?"))
+        #expect(sent.hasPrefix("[Cutmark] Job job-2 ended") && sent.hasSuffix("What now?"))
         #expect(!sent.contains("job-1"))
         #expect(told("job-2"))
         #expect(chat.messages.last { $0.role == .user }?.text == "What now?")
@@ -329,7 +329,7 @@ extension ChatRunTests {
         b.reload(session)
         #expect(runs <= 1)
         await until { runs == 2 && !chat.running }
-        #expect(ask(2)?.hasPrefix("[Takes] Job job-1 ended") == true)
+        #expect(ask(2)?.hasPrefix("[Cutmark] Job job-1 ended") == true)
     }
 
     @Test func wakeCaps() async throws {

@@ -165,7 +165,7 @@ import SwiftUI
         #expect(FireLevel(days: 2).name == "The sweet spot")
         #expect(FireLevel(days: 3).name == "On fire")
         #expect(FireLevel(days: 7) == FireLevel(days: 4))
-        #expect(FireLevel(days: 7).name == "Super Takes")
+        #expect(FireLevel(days: 7).name == "Super Cutmark")
         #expect((0...6).map { FireLevel(days: $0).scale } == (0...6).map { FireLevel(days: $0).scale }.sorted())
     }
 }
@@ -198,7 +198,7 @@ extension Snap {
         s.streak = 3; s.recordedThisWeek = true; s.takesThisWeek = 7
         s.kept = 5; s.due = 6
         let card = { (t: String) in ConsistencyStats.Card(id: "P/\(t)", title: t, url: root, poster: nil) }
-        s.videos[s.slots[2].date] = [card("Open models flip"), card("Second Takes video")]
+        s.videos[s.slots[2].date] = [card("Open models flip"), card("Second Cutmark video")]
         s.videos[s.days[5].date] = [card("AI tutorial reaction")]
         var posted = card("Bookkeeping agent"); posted.status = .posted
         s.videos[today] = [posted]
@@ -217,7 +217,7 @@ extension Snap {
         store.stats = s
                 // Change days: the flame at each level, with the two-week preview.
         let mascot = NSImage(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .appending(path: "../../assets/brand/mascot.png").standardized)
+            .appending(path: "../../assets/brand/cutmark-mascot-512.png").standardized)
         for dark in [true, false] {
             shoot("consistency-board-\(dark ? "dark" : "light")", ConsistencyPage(store: store, root: root, mascot: mascot),
                   size: CGSize(width: 1100, height: 820), dark: dark)

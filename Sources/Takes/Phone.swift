@@ -16,7 +16,7 @@ import UniformTypeIdentifiers
 // Who may talk to it:
 //   1. Only tailnet requests: `tailscale serve` adds Tailscale-User-Login. It must be the Mac's
 //      own Tailscale login.
-//   2. Only a paired phone: the first time, the phone asks; Takes shows "Allow" on the Mac. The
+//   2. Only a paired phone: the first time, the phone asks; Cutmark shows "Allow" on the Mac. The
 //      phone keeps the token in its Keychain behind Face ID.
 // Never `tailscale funnel` this: that puts it on the public internet.
 
@@ -302,7 +302,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
     func start() {
         let l = PhoneListener(handler: self)
         do { try l.start(port: Self.port) } catch {
-            NSLog("Takes phone server: \(error)")
+            NSLog("Cutmark phone server: \(error)")
             return
         }
         listener = l
@@ -385,7 +385,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         if let me, me.lowercased() != who.lowercased() { return PhoneError(403, "This Tailscale login is not the user's") }
         // With the Mac's login unknown, anyone on this Mac could write the header: only a paired
         // phone's token gets in then. Pairing waits until the login is known.
-        guard needsToken || me != nil else { return PhoneError(503, "Takes cannot see your Tailscale login yet. Try again in a minute.") }
+        guard needsToken || me != nil else { return PhoneError(503, "Cutmark cannot see your Tailscale login yet. Try again in a minute.") }
         guard needsToken else { return nil }
         let token = req.header("authorization").map { $0.replacingOccurrences(of: "Bearer ", with: "") }
             ?? req.query["token"] ?? ""
@@ -801,7 +801,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         lock.withLock { phones.append(PairedPhone(name: r.name, hash: Self.hash(token), paired: Date())) }
         savePhones()
         await MainActor.run {
-            self.app?.show(toast: "\(r.name) can now use Takes")
+            self.app?.show(toast: "\(r.name) can now use Cutmark")
             self.keepAwake()
         }
         return .encode(["token": token])
@@ -1008,7 +1008,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         case let other?: place = "on the \(other) screen"
         case nil: place = ""
         }
-        var s = "The user sent the latest message from the Takes app on an iPhone, not from the Mac"
+        var s = "The user sent the latest message from the Cutmark app on an iPhone, not from the Mac"
         s += place.isEmpty ? "." : ", while \(place). \"This\" most likely means what that screen shows."
         if b["voice"] == "1" { s += " It was dictated: read past words the transcription got wrong." }
         return s + " The user may be away from the Mac: don't count on the user seeing anything on its screen."
@@ -1062,7 +1062,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
 
     /// A new session from the phone. The Mac stays on the session it shows.
     @MainActor private func create(project: String?, title: String?, idea: String?) -> PhoneResponse {
-        guard let app else { return .error(503, "Takes is not ready") }
+        guard let app else { return .error(503, "Cutmark is not ready") }
         let root = app.library.root.standardizedFileURL
         let name = Self.projectName(project)
         let title = (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1135,7 +1135,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
     }
 
     static func laneTitle(_ lane: String) -> String {
-        if lane.hasPrefix("plugin:") { return Plugins.named(String(lane.dropFirst(7)))?.title ?? "Takes" }
+        if lane.hasPrefix("plugin:") { return Plugins.named(String(lane.dropFirst(7)))?.title ?? "Cutmark" }
         return lane == "performance" ? "Performance" : lane == "styles" ? "Styles" : "Comments"
     }
 
@@ -1237,7 +1237,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
     /// Run now (find posts) or Post approved, as on the board: a new conversation in its chat.
     /// The Mac's panel stays as it is.
     @MainActor private func run(lane: String, count: Int?) -> PhoneResponse {
-        guard let app, let c = boardChat(lane) else { return .error(503, "Takes is not ready") }
+        guard let app, let c = boardChat(lane) else { return .error(503, "Cutmark is not ready") }
         guard !c.running else { return .error(409, "It is still running.") }
         let ask: String
         if lane == "post" {
@@ -1378,7 +1378,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         if want && assertion == 0 {
             IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
                                         IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                                        "Takes: the phone app can reach the Mac" as CFString, &assertion)
+                                        "Cutmark: the phone app can reach the Mac" as CFString, &assertion)
         } else if !want && assertion != 0 {
             IOPMAssertionRelease(assertion)
             assertion = 0
@@ -1420,7 +1420,7 @@ final class PhoneServer: PhoneHandler, @unchecked Sendable {
         }
     }
 
-    static var thumbFolder: URL { URL.cachesDirectory.appending(path: "Takes/phone-thumbs") }
+    static var thumbFolder: URL { URL.cachesDirectory.appending(path: "Cutmark/phone-thumbs") }
 
     /// A JPEG at most `width` px wide: a frame for a video, the picture for an image. Cached on disk.
     static func thumb(_ u: URL, width: Int) async -> URL? {
@@ -1515,7 +1515,7 @@ enum Tailscale {
     }
 }
 
-/// "iPhone wants to use Takes": Allow or Don't Allow, at the top of the window.
+/// "iPhone wants to use Cutmark": Allow or Don't Allow, at the top of the window.
 struct PhonePairBanner: View {
     @Environment(AppModel.self) var app
 
@@ -1524,8 +1524,8 @@ struct PhonePairBanner: View {
             HStack(spacing: 12) {
                 Image(systemName: "iphone").font(.system(size: 18))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(r.name) wants to use Takes").font(Theme.sans(13, .semibold))
-                    Text("It can chat with Takes, see your sessions and send files. \(r.login)")
+                    Text("\(r.name) wants to use Cutmark").font(Theme.sans(13, .semibold))
+                    Text("It can chat with Cutmark, see your sessions and send files. \(r.login)")
                         .font(Theme.sans(11)).foregroundStyle(Theme.muted)
                 }
                 Spacer(minLength: 8)

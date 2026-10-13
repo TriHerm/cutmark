@@ -161,7 +161,7 @@ class CheckEdit(Base):
         for f in ["edits/" + x for x in files] + ["script.md"]:
             with self.assertRaises(ValueError) as e:
                 t.t_check_edit({"session": self.s, "file": f})
-            self.assertEqual(str(e.exception), "Takes cannot read this file (no video or sound stream). Render it again.")
+            self.assertEqual(str(e.exception), "Cutmark cannot read this file (no video or sound stream). Render it again.")
 
     def test_file_outside_session_or_missing_is_an_error(self):
         with self.assertRaisesRegex(ValueError, "is not in this session. Pass an edit from get_session"):

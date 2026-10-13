@@ -133,7 +133,7 @@ class Replicate(unittest.TestCase):
             self.real_http("GET", "/account")
         finally:
             urllib.request.urlopen = real
-        self.assertTrue(seen[0].startswith("Takes"))
+        self.assertTrue(seen[0].startswith("Cutmark"))
 
     def test_wrong_inputs_say_what_the_model_takes(self):
         with self.assertRaisesRegex(ValueError, "480p, 720p, 1080p"):

@@ -1,11 +1,7 @@
 import Foundation
 
-/// The demo session (2026-10-09, after Ben's and Haneen's first tries: nobody saw what Takes makes
-/// until the user showed them). "Start here / Your first video" is a finished example by a made-up
-/// creator, a kebab-shop owner: takes, the storyboard, the edit, a fixed comment and the posts.
-/// On the first launch of an empty library Takes downloads it from the latest public release
-/// (takes-demo.zip, made by scripts/public/demo_pack.py) and puts it in the sidebar. It opens on its
-/// edit (session.json "opens"). Without a connection it still comes, with the script only.
+/// Cutmark's first-run demo. v0.1 ships a local script-only example; a future release can opt into
+/// a richer pack with CUTMARK_DEMO_URL without making first launch depend on a remote asset.
 /// Help › Add the Demo Session adds it again, or opens it when it is there.
 @MainActor @Observable
 final class Demo {
@@ -14,9 +10,8 @@ final class Demo {
     static let project = "Start here"
     static let folder = "2026-10-08-your-first-video"
     static let title = "Your first video"
-    /// The pack. TAKES_DEMO_URL (a file:// URL too) stands in for it, to try a new pack first.
-    static var pack: URL = ProcessInfo.processInfo.environment["TAKES_DEMO_URL"].flatMap(URL.init(string:))
-        ?? URL(string: "https://github.com/\(Updater.releaseRepo)/releases/latest/download/takes-demo.zip")!
+    /// Optional richer demo pack for development or a later first-party release.
+    static var pack: URL? = ProcessInfo.processInfo.environment["CUTMARK_DEMO_URL"].flatMap(URL.init(string:))
     /// The script of the video, for the session without the download.
     static let script = """
         This app records the take, and an agent does the edit.
@@ -73,7 +68,7 @@ final class Demo {
         let project = library.root.appending(path: Self.project)
         let there = project.appending(path: Self.folder)
         if FileManager.default.fileExists(atPath: there.appending(path: "session.json").path) { return there }
-        if let zip = try? await Self.download(Self.pack) {
+        if let pack = Self.pack, let zip = try? await Self.download(pack) {
             defer { try? FileManager.default.removeItem(at: zip) }
             if let url = try? await Task.detached { try Self.install(zip: zip, into: project) }.value {
                 SessionDoc(url: url).save()  // SESSION.md names this Mac's folder
@@ -89,7 +84,7 @@ final class Demo {
             try? FileManager.default.removeItem(at: file)
             throw URLError(.badServerResponse)
         }
-        let zip = FileManager.default.temporaryDirectory.appending(path: "takes-demo-\(UUID().uuidString).zip")
+        let zip = FileManager.default.temporaryDirectory.appending(path: "cutmark-demo-\(UUID().uuidString).zip")
         try FileManager.default.moveItem(at: file, to: zip)
         return zip
     }
@@ -98,7 +93,7 @@ final class Demo {
     /// stays: the demo then gets the next free name.
     nonisolated static func install(zip: URL, into project: URL) throws -> URL {
         let fm = FileManager.default
-        let tmp = fm.temporaryDirectory.appending(path: "takes-demo-\(UUID().uuidString)")
+        let tmp = fm.temporaryDirectory.appending(path: "cutmark-demo-\(UUID().uuidString)")
         try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: tmp) }
         let p = Process()

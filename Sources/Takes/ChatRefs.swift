@@ -162,7 +162,7 @@ struct ChatReply: View {
         if let (id, action) = linksCache, id == ObjectIdentifier(app) { return action }
         let action = OpenURLAction { [weak app] url in
             guard let app else { return .systemAction }
-            if url.isFileURL || url.scheme == "takes" { app.follow(url); return .handled }
+            if url.isFileURL || url.scheme == "cutmark" { app.follow(url); return .handled }
             return .systemAction
         }
         linksCache = (ObjectIdentifier(app), action)
@@ -355,7 +355,7 @@ struct FileRefCard: View {
                 caption.padding(.horizontal, 12).padding(.vertical, 9).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Open \(url.lastPathComponent) in Takes")
+            .help("Open \(url.lastPathComponent) in Cutmark")
         }
         .modifier(CardShell())
     }
@@ -386,7 +386,7 @@ struct FileRefCard: View {
                         .foregroundStyle(Theme.faint).frame(width: 24, height: 24).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("Open \(url.lastPathComponent) in Takes")
+                .help("Open \(url.lastPathComponent) in Cutmark")
             }
             .padding(10)
             .overlay(alignment: .bottomLeading) {
@@ -405,7 +405,7 @@ struct FileRefCard: View {
     }
 
     private var refCard: some View {
-        RefCard(help: "Open \(url.lastPathComponent) in Takes") {
+        RefCard(help: "Open \(url.lastPathComponent) in Cutmark") {
             if let postPlatform {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 6) {
@@ -550,7 +550,7 @@ struct PostRefCard: View {
                         .lineLimit(1).truncationMode(.middle)
                 }
                 if let s = found?.session {
-                    Button("Open in Takes") {
+                    Button("Open in Cutmark") {
                         let p = PostPlatform.allCases.first { $0.name == platform } ?? .linkedin
                         app.follow(s.appending(path: p.rel))
                     }

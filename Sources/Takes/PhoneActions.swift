@@ -160,14 +160,14 @@ extension PhoneServer {
         switch b["what"] {
         case "take":
             guard let n = b["take"].flatMap(Int.init) else { return .error(400, "Which take?") }
-            if app?.isRecording == true { return .error(409, "Takes is recording. Trash it when the take is done.") }
+            if app?.isRecording == true { return .error(409, "Cutmark is recording. Trash it when the take is done.") }
             guard let d = sessionDoc(s), d.meta.takes.contains(where: { $0.number == n }) else { return .error(404, "No such take") }
             // As the Assets menu: the player lets go of it first.
             if d.meta.takes.contains(where: { $0.number == n && d.fileURL($0) == app?.preview }) { app?.preview = nil }
             d.trashTake(n)
             return .encode(["ok": true])
         case "unstarred":
-            if app?.isRecording == true { return .error(409, "Takes is recording. Try again when the take is done.") }
+            if app?.isRecording == true { return .error(409, "Cutmark is recording. Try again when the take is done.") }
             let n: Int
             if let lib = app?.library { n = lib.trashNonKeepers([Store.dir(s)]) } else {
                 guard let d = sessionDoc(s) else { return .error(404, "No such session") }
@@ -178,9 +178,9 @@ extension PhoneServer {
             return .encode(["trashed": n])
         case "session":
             if app?.isRecording == true, app?.library.current?.url.standardizedFileURL == s {
-                return .error(409, "Takes is recording in this session.")
+                return .error(409, "Cutmark is recording in this session.")
             }
-            if app?.chats.existing(s)?.running == true { return .error(409, "Takes is still replying in this session. Stop it first.") }
+            if app?.chats.existing(s)?.running == true { return .error(409, "Cutmark is still replying in this session. Stop it first.") }
             if let lib = app?.library { lib.trashSessions([Store.dir(s)]) } else {
                 do { try FileManager.default.trashItem(at: s, resultingItemURL: nil) } catch {
                     return .error(500, "Could not move it to the Trash: \(error.localizedDescription)")
@@ -207,10 +207,10 @@ extension PhoneServer {
         guard let p = project(name) else { return .error(404, "No such project") }
         if let app = appModel {
             if app.isRecording, app.library.current?.url.deletingLastPathComponent().standardizedFileURL == p {
-                return .error(409, "Takes is recording in this project.")
+                return .error(409, "Cutmark is recording in this project.")
             }
             if app.chats.all.contains(where: { $0.running && $0.session?.deletingLastPathComponent().standardizedFileURL == p }) {
-                return .error(409, "Takes is still replying in this project. Stop it first.")
+                return .error(409, "Cutmark is still replying in this project. Stop it first.")
             }
             app.library.trashProject(app.library.projects.first { $0.url.standardizedFileURL == p }?.url ?? p)
         } else {
@@ -237,7 +237,7 @@ extension PhoneServer {
         case "take":
             guard let n = b["take"].flatMap(Int.init) else { return .error(400, "Which take?") }
             guard let d = sessionDoc(s), d.meta.takes.contains(where: { $0.number == n }) else { return .error(404, "No such take") }
-            if appModel?.isRecording == true { return .error(409, "Takes is recording. Rename it when the take is done.") }
+            if appModel?.isRecording == true { return .error(409, "Cutmark is recording. Rename it when the take is done.") }
             d.renameTake(n, to: name)
             return .encode(["ok": true])
         case "session":
@@ -262,7 +262,7 @@ extension PhoneServer {
         guard raw?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { return .error(400, "A project needs a name") }
         if let app = appModel {
             if app.chats.all.contains(where: { $0.running && $0.session?.deletingLastPathComponent().standardizedFileURL == p }) {
-                return .error(409, "Takes is still replying in this project. Rename it when it is done.")
+                return .error(409, "Cutmark is still replying in this project. Rename it when it is done.")
             }
             let url = app.library.projects.first { $0.url.standardizedFileURL == p }?.url ?? p
             guard let moved = app.library.renameProject(url, to: name) else { return .error(409, "That name is taken") }
@@ -298,9 +298,9 @@ extension PhoneServer {
     /// Why a session cannot change its folder now, or nil.
     @MainActor private func busy(_ s: URL) -> String? {
         if appModel?.isRecording == true, appModel?.library.current?.url.standardizedFileURL == s {
-            return "Takes is recording in this session."
+            return "Cutmark is recording in this session."
         }
-        if appModel?.chats.existing(s)?.running == true { return "Takes is still replying in this session. Try again when it is done." }
+        if appModel?.chats.existing(s)?.running == true { return "Cutmark is still replying in this session. Try again when it is done." }
         return nil
     }
 

@@ -273,7 +273,7 @@ class Pure(Base):
         r = {"name": "hook", "mix": {"target": -14.0, "lufs": -20.9}, "voice": {"source": "take"},
              "checks": {"results": []}}
         v = t.render_view(self.s, "job-1", r)
-        self.assertEqual(v["warnings"], ["The edit is at -20.9 LUFS, not -14: its loudest peaks hold it down (Takes adds "
+        self.assertEqual(v["warnings"], ["The edit is at -20.9 LUFS, not -14: its loudest peaks hold it down (Cutmark adds "
                                          "no limiter). Clean the voice with clean_voice, then render again."])
         r["mix"]["lufs"] = -14.2
         self.assertNotIn("warnings", t.render_view(self.s, "job-1", r))
@@ -870,7 +870,7 @@ class Render(Base):
         r = t.t_render_edit({"session": self.s, "wait_s": 120, "recipe": {
             "name": "hook", "cut": self.CUT, "steps": [{"run": [sys.executable, "-c", "raise SystemExit(3)"]}]}})
         self.assertEqual(r["status"], "failed")
-        self.assertEqual(r["error"], "Stopped: the graphics step failed. Nothing was saved. Ask Takes in the chat to "
+        self.assertEqual(r["error"], "Stopped: the graphics step failed. Nothing was saved. Ask Cutmark in the chat to "
                                      "try again.")
         self.assertFalse(os.path.exists(os.path.join(self.s, r["render"])))
         with self.assertRaises(ValueError) as e:

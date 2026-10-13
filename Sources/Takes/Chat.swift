@@ -272,7 +272,7 @@ final class ClaudeChat {
     @ObservationIgnored private var stderr = Data()
 
     nonisolated static func file(_ session: URL) -> URL { session.appending(path: ".claude-chat.json") }
-    nonisolated static var boardFolder: URL { URL.applicationSupportDirectory.appending(path: "Takes") }
+    nonisolated static var boardFolder: URL { URL.applicationSupportDirectory.appending(path: "Cutmark") }
     /// What a plugin board tells its chat, by board name (Plugins/). Read on every send, so it can
     /// name what the board shows right now.
     static var boardContexts: [String: @MainActor () -> String] = [:]
@@ -404,13 +404,13 @@ final class ClaudeChat {
             return URL(fileURLWithPath: saved)
         }
         if Plugins.own {
-            let life = fm.homeDirectoryForCurrentUser.appending(path: "Documents/Takes Notes")
+            let life = fm.homeDirectoryForCurrentUser.appending(path: "Documents/Cutmark Notes")
             if fm.fileExists(atPath: life.path) { return life }
         }
         // The library, never the home folder: Claude looks through its folder, and in the home
         // folder macOS then asks for Downloads, Photos and Music (Jeremy's first launch, 2026-10-06).
         let root = UserDefaults.standard.string(forKey: "root").map { URL(fileURLWithPath: $0) }
-            ?? fm.homeDirectoryForCurrentUser.appending(path: "Movies/Takes")
+            ?? fm.homeDirectoryForCurrentUser.appending(path: Product.defaultLibrary)
         try? fm.createDirectory(at: root, withIntermediateDirectories: true)
         return root
     }
@@ -457,7 +457,7 @@ final class ClaudeChat {
     /// The library folder, as Library.init finds it.
     nonisolated static var libraryRoot: URL {
         UserDefaults.standard.string(forKey: "root").map { URL(fileURLWithPath: $0) }
-            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Takes")
+            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: Product.defaultLibrary)
     }
 
     /// The takes MCP keeps the rules this chat has seen in this file (2026-10-10). Deleted when the
@@ -494,14 +494,14 @@ final class ClaudeChat {
         path.split(separator: ":").contains(Substring(bin)) ? path : path + ":" + bin
     }
 
-    static let commentsAsk = "I left comments in Takes, some maybe on older versions. Read them with get_comments, "
+    static let commentsAsk = "I left comments in Cutmark, some maybe on older versions. Read them with get_comments, "
         + "fix them in the newest version, and reply to each one (resolve=true when it is fixed)."
 
     /// Marks the open comments added after a typed message (2026-10-03): The user often means one
     /// of them, and Claude did not know they were there. Since 2026-10-04 every typed message in a
     /// session gets them, not only one with "@comments": he wrote about v19 and Claude never saw
     /// his open comment on v17. The chat shows the message without it.
-    nonisolated static let commentsMark = "\n\n[@comments: open comments in Takes on this session"
+    nonisolated static let commentsMark = "\n\n[@comments: open comments in Cutmark on this session"
 
     /// "@comments" typed in the box is taken out of the message: the comments go with every message.
     nonisolated static let commentsToken = "@comments"
@@ -654,7 +654,7 @@ final class ClaudeChat {
         guard let claude = exePath else {
             append(ChatMessage(role: .error, text: Agents.installed.isEmpty
                 ? "The chat is not set up yet. Click Finish setup in the sidebar, then try again."
-                : "\(agent.name) is not on this Mac. Pick another agent in the line under Takes, or install \(agent.name) and try again."))
+                : "\(agent.name) is not on this Mac. Pick another agent in the line under Cutmark, or install \(agent.name) and try again."))
             return
         }
         if Self.isCompact(text) && !agent.adapter.compacts {
@@ -686,7 +686,7 @@ final class ClaudeChat {
         let gen = generation
         running = true
         if awake == nil {
-            awake = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Takes is working")
+            awake = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Cutmark is working")
         }
         parser = ChatParser(messages, context: context, adapter: agent.adapter)
         stderr = Data()
@@ -695,8 +695,8 @@ final class ClaudeChat {
         if let session {
             let id = Store.sessionID(session).map { ", session id \($0)" } ?? ""
             context = """
-            The user is talking to you from the chat panel inside the Takes app. This conversation \
-            belongs to one Takes session: "\(title)", folder \(session.path)\(id). "This video" and \
+            The user is talking to you from the chat panel inside the Cutmark app. This conversation \
+            belongs to one Cutmark session: "\(title)", folder \(session.path)\(id). "This video" and \
             "this session" mean that folder. If the folder gets a new name, the id still finds it. \
             Use the takes MCP tools and the video skills as you \
             would from the terminal. The user reads your replies in a narrow panel: keep them short, \
@@ -707,7 +707,7 @@ final class ClaudeChat {
             posts/linkedin.md has a cover: field, put that image in the recipe's cover \
             (render_edit) so every new version starts with it. Build each edit version with \
             render_edit and save it with publish_edit. When the user \
-            brainstorms a video idea or asks for a storyboard, use the takes-storyboard skill: script \
+            brainstorms a video idea or asks for a storyboard, use the cutmark-storyboard skill: script \
             first, then set_storyboard (it shows on the Storyboard tab). get_session and next_path \
             give the rules for the step (from past comments) the first time; follow each one; \
             render_edit checks each version it makes, and check_edit checks any other new edit \
@@ -735,8 +735,8 @@ final class ClaudeChat {
             context = plugin()
         } else if boardName == "styles" {
             context = """
-            The user is talking to you from the Styles board inside the Takes app. It shows the named \
-            styles (~/Movies/Takes/_library/styles/) side by side: each style's preview.mp4, its \
+            The user is talking to you from the Styles board inside the Cutmark app. It shows the named \
+            styles (~/Movies/Cutmark/_library/styles/) side by side: each style's preview.mp4, its \
             guide, tokens and parts, with your notes. Use the takes MCP tools: get_library, \
             create_style, save_to_library, get_comments and reply_comment with library \
             'style:<Name>'. A change to a part is a new version, never an overwrite. The user often works \
@@ -745,8 +745,8 @@ final class ClaudeChat {
             """
         } else {
             context = """
-            The user is talking to you from the Performance board inside the Takes app. The board \
-            shows the LinkedIn and X numbers from ~/Movies/Takes/_library/social.json and \
+            The user is talking to you from the Performance board inside the Cutmark app. The board \
+            shows the LinkedIn and X numbers from ~/Movies/Cutmark/_library/social.json and \
             redraws by itself when that file changes. To update it, follow the "Social data" \
             runbook in your notes repo tracking/README.md: run python3 tracking/scripts/refresh_social.py \
             from your notes repo, and when a source is OLD get the export from the user's \
@@ -970,8 +970,8 @@ final class ClaudeChat {
         save()
     }
 
-    static let cutOff = "Takes quit while the chat was working."
-    static let goOn = "Takes quit while you were working. Go on where you stopped."
+    static let cutOff = "Cutmark quit while the chat was working."
+    static let goOn = "Cutmark quit while you were working. Go on where you stopped."
     /// The last reply was cut off by a quit.
     var wasCutOff: Bool { !running && messages.last?.role == .error && messages.last?.text == Self.cutOff }
 
@@ -1103,7 +1103,7 @@ final class ClaudeChat {
         } else if stopped {
             parser.messages.append(ChatMessage(role: .error, text: "Stopped."))
         } else if !parser.finished, let signal, signal == SIGTERM || signal == SIGKILL || signal == SIGINT || signal == SIGHUP {
-            parser.messages.append(ChatMessage(role: .error, text: "The chat was stopped from outside Takes (signal \(signal))."))
+            parser.messages.append(ChatMessage(role: .error, text: "The chat was stopped from outside Cutmark (signal \(signal))."))
         } else if !parser.finished && status != 0 {
             let why = why.trimmingCharacters(in: .whitespacesAndNewlines)
             parser.messages.append(ChatMessage(role: .error, text: why.isEmpty ? "The chat quit (code \(status))." : String(why.suffix(400))))
@@ -1470,7 +1470,7 @@ private struct ChatCornerBody: View {
         Button {
             chat.send(ClaudeChat.commentsAsk, title: target.title, onStage: app.preview)
         } label: {
-            Label("Let Takes fix \(openComments) comment\(openComments == 1 ? "" : "s")", systemImage: "text.bubble.fill")
+            Label("Let Cutmark fix \(openComments) comment\(openComments == 1 ? "" : "s")", systemImage: "text.bubble.fill")
                 .font(Theme.sans(12.5, .semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14).frame(height: 34)
@@ -1478,7 +1478,7 @@ private struct ChatCornerBody: View {
                 .shadow(color: .black.opacity(0.16), radius: 8, y: 4)
         }
         .buttonStyle(PressStyle())
-        .help("Takes reads your open comments, fixes them and replies to each one")
+        .help("Cutmark reads your open comments, fixes them and replies to each one")
         .transition(.scale(scale: 0.9, anchor: .trailing).combined(with: .opacity))
     }
 
@@ -1521,7 +1521,7 @@ private struct ChatCornerBody: View {
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
-        .help(away ? "Talk to Takes (⇧⌘L)" : open ? "Close the chat (⇧⌘L)" : "Talk to Takes about this session (⇧⌘L)")
+        .help(away ? "Talk to Cutmark (⇧⌘L)" : open ? "Close the chat (⇧⌘L)" : "Talk to Cutmark about this session (⇧⌘L)")
     }
 }
 
@@ -1569,7 +1569,7 @@ private struct ChatPanel: View {
         HStack(spacing: 10) {
             LiveMascot(mood: chat.mood, size: 34)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Takes").font(Theme.display(20))
+                Text("Cutmark").font(Theme.display(20))
                 if chat.boardName.hasPrefix("comments") {
                     LaneSwitch(hub: hub, find: hub.comments, post: hub.commentsPost)
                 } else {
@@ -1696,7 +1696,7 @@ private struct ChatPanel: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(IconButtonStyle())
-        .help(chat.compacting ? "Compacting the conversation" : "How much of this conversation Takes keeps in mind")
+        .help(chat.compacting ? "Compacting the conversation" : "How much of this conversation Cutmark keeps in mind")
         .disabled(chat.compacting)
         .takesPopover(isPresented: $showMeter) {
             VStack(alignment: .leading, spacing: 10) {
@@ -1710,10 +1710,10 @@ private struct ChatPanel: View {
                 .frame(height: 5)
                 Text(size.map { "\(Int((f * 100).rounded()))% full: \($0)." } ?? "The size shows after the next reply.")
                     .font(Theme.sans(12, .medium)).monospacedDigit()
-                Text("This is the conversation itself, not work that runs. When it is full, Takes compacts it: it keeps a short summary and drops the details. Compact earlier to start a new topic with a clean slate.")
+                Text("This is the conversation itself, not work that runs. When it is full, Cutmark compacts it: it keeps a short summary and drops the details. Compact earlier to start a new topic with a clean slate.")
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted)
                     .fixedSize(horizontal: false, vertical: true)
-                Button(chat.running ? "Compact when Takes is done" : "Compact now") {
+                Button(chat.running ? "Compact when Cutmark is done" : "Compact now") {
                     showMeter = false
                     send("/compact")
                 }
@@ -1775,7 +1775,7 @@ private struct ChatPanel: View {
                 }
             } else if chat.boardName == "styles" {
                 Text("Your styles.").font(Theme.display(22)).foregroundStyle(Theme.ink)
-                Text("Takes makes new styles, renders their previews and fixes the parts you comment on.")
+                Text("Cutmark makes new styles, renders their previews and fixes the parts you comment on.")
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                 VStack(alignment: .leading, spacing: 6) {
                     suggestion("I left comments on my styles. Read them with get_comments for each style library, fix each part as a new version, and reply to each one.", "Fix my comments")
@@ -1788,7 +1788,7 @@ private struct ChatPanel: View {
                     ForEach(intro.asks, id: \.0) { label, ask in suggestion(ask, label) }
                 }
             } else if target.session == nil {
-                Text("Ask Takes about your numbers.").font(Theme.display(22)).foregroundStyle(Theme.ink)
+                Text("Ask Cutmark about your numbers.").font(Theme.display(22)).foregroundStyle(Theme.ink)
                 Text("It can refresh this board for you. Past chats are under the clock.")
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                 VStack(alignment: .leading, spacing: 6) {
@@ -1796,7 +1796,7 @@ private struct ChatPanel: View {
                     suggestion("Which of my posts did best in the last two weeks, and why?", "What worked lately?")
                 }
             } else {
-                Text("Ask Takes about this video.").font(Theme.display(22)).foregroundStyle(Theme.ink)
+                Text("Ask Cutmark about this video.").font(Theme.display(22)).foregroundStyle(Theme.ink)
                 Text("It runs \(chat.agent.name), like your terminal, and it knows this session.")
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                 VStack(alignment: .leading, spacing: 6) {
@@ -1866,7 +1866,7 @@ private struct ChatComposer: View {
         VStack(alignment: .leading, spacing: 8) {
             if chat.wasCutOff {
                 Button { send(ClaudeChat.goOn) } label: {
-                    Label("Continue where Takes stopped", systemImage: "arrow.clockwise")
+                    Label("Continue where Cutmark stopped", systemImage: "arrow.clockwise")
                         .font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.accentInk)
                         .padding(.horizontal, 10).padding(.vertical, 5)
                         .background(Theme.accentSoft, in: Capsule())
@@ -1877,7 +1877,7 @@ private struct ChatComposer: View {
             if chat.reconnecting {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.mini)
-                    Text("The connection dropped. Takes goes on when the Mac is online.")
+                    Text("The connection dropped. Cutmark goes on when the Mac is online.")
                         .font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
                     Button("Stop") { chat.stop() }.buttonStyle(.link).font(Theme.sans(11.5, .medium))
                 }
@@ -1892,7 +1892,7 @@ private struct ChatComposer: View {
             }
             if let session = target.session { JobsRow(session: session) }
             ForEach(Array(chat.queued.enumerated()), id: \.offset) { i, q in
-                QueuedChip(text: CopilotAsk.shown(q), help: "Queued: sent when Takes is done") {
+                QueuedChip(text: CopilotAsk.shown(q), help: "Queued: sent when Cutmark is done") {
                     if i < chat.queued.count { chat.queued.remove(at: i) }
                 }
             }
@@ -1903,9 +1903,9 @@ private struct ChatComposer: View {
             ChatField(
                 draft: $chat.draft, focused: $focused, dictation: dictation, spokenAfter: $spokenAfter,
                 placeholder: chat.compacting ? "Queue a message: it goes after compacting"
-                    : chat.running ? "Queue a message (⌘Return: Takes stops and reads it now)" : "Message Takes",
+                    : chat.running ? "Queue a message (⌘Return: Cutmark stops and reads it now)" : "Message Cutmark",
                 running: chat.running, canSend: canSend, micOff: app.isRecording,
-                sendHelp: chat.running ? "Queue: sent when Takes is done (Return). ⌘Return steers now." : "Send (Return)",
+                sendHelp: chat.running ? "Queue: sent when Cutmark is done (Return). ⌘Return steers now." : "Send (Return)",
                 stopHelp: "Stop the reply",
                 send: { send(chat.draft) }, stop: stop,
                 steer: { send(chat.draft, now: true) },

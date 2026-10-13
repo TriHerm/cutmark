@@ -1,12 +1,9 @@
 import AppKit
 import SwiftUI
 
-/// Anonymous usage counts (2026-10-10), off until the user says yes. A Takes from a release asks
-/// once, 20 minutes after its first launch with this code (never over the welcome or a recording);
-/// Settings › Usage turns it on or off later. When on, it sends one report a day to
-/// gettakes.app/ping: a random ID made only for this, the versions and counts of the library.
-/// The report has no field for text: chats with the agent, scripts, titles, file names, post text
-/// and keys can never go in it. The site keeps only these fields (gettakes-site functions/ping.js).
+/// Optional anonymous usage counts. Cutmark ships with reporting disabled: no analytics endpoint is
+/// configured for the TriHerm Labs distribution. The reporting machinery remains so a future build
+/// can add a documented first-party endpoint without changing the report shape.
 @MainActor @Observable
 final class Usage {
     static let shared = Usage()
@@ -15,7 +12,7 @@ final class Usage {
     static let firstKey = "usageFirstSeen"
     static let sentKey = "usageSent"       // the UTC day of the last report, YYYY-MM-DD
     static let reportKey = "usageLastReport"
-    static var endpoint = URL(string: "https://gettakes.app/ping")!
+    static var endpoint: URL? = nil
     static let askAfter: TimeInterval = 20 * 60
 
     /// The ask card is on screen.
@@ -46,7 +43,7 @@ final class Usage {
 
     func start(_ library: Library) {
         self.library = library
-        guard timer == nil, Self.release != nil else { return }
+        guard timer == nil, Self.release != nil, Self.endpoint != nil else { return }
         let d = UserDefaults.standard
         if d.object(forKey: Self.firstKey) == nil { d.set(Date(), forKey: Self.firstKey) }
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
@@ -90,7 +87,7 @@ final class Usage {
     }
 
     private func sendIfDue() {
-        guard on, !sending, Self.release != nil, let library,
+        guard on, !sending, Self.release != nil, let endpoint = Self.endpoint, let library,
               UserDefaults.standard.string(forKey: Self.sentKey) != Self.today() else { return }
         sending = true
         let job = reportJob(library)
@@ -98,7 +95,7 @@ final class Usage {
             defer { sending = false }
             let report = await Task.detached(priority: .utility) { job() }.value
             guard let body = try? Self.encode(report) else { return }
-            var req = URLRequest(url: Self.endpoint)
+            var req = URLRequest(url: endpoint)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = body
@@ -126,7 +123,7 @@ final class Usage {
         let sessions = library.projects.flatMap { library.grouped[$0.url] ?? [] }.map { ($0.url, $0.takeCount, $0.published) }
         let v = ProcessInfo.processInfo.operatingSystemVersion
         let id = Self.id, version = Self.release ?? "source", root = library.root, projects = library.projects.count
-        let plugins = Plugins.all.map(\.id), phone = PhoneServer.usedRecently()
+        let plugins = Plugins.all.map(\.id), phone = Features.phone && PhoneServer.usedRecently()
         return {
             Self.report(id: id, version: version, os: "\(v.majorVersion).\(v.minorVersion)", root: root, projects: projects,
                         sessions: sessions, plugins: plugins, phone: phone)
@@ -162,14 +159,13 @@ final class Usage {
 
 /// What the report never holds, first and largest: the chats with the agent.
 enum UsageCopy {
-    static let neverTitle = "Your chats with Takes are never sent."
+    static let neverTitle = "Your chats with Cutmark are never sent."
     static let neverDetail = "No chat history, prompts or replies. No scripts, video titles, file names, post text or keys. They stay on your Mac."
     static let sent: [(icon: String, text: String)] = [
         ("number", "How many takes, edits and storyboards"),
         ("paperplane", "How many posts are ready, scheduled or posted"),
         ("puzzlepiece.extension", "Which plugins are on"),
-        ("iphone", "If you use Takes on an iPhone"),
-        ("app.badge", "The Takes and macOS versions"),
+        ("app.badge", "The Cutmark and macOS versions"),
         ("dice", "A random ID made only for this"),
     ]
 }
@@ -284,7 +280,7 @@ struct UsageAskCard: View {
                 }
                 .accessibilityHidden(true)
                 VStack(spacing: 6) {
-                    Text("Help make Takes better?").font(Theme.display(22)).foregroundStyle(Theme.ink)
+                    Text("Help make Cutmark better?").font(Theme.display(22)).foregroundStyle(Theme.ink)
                     Text("Share a few anonymous counts once a day. You can turn it off any time.")
                         .font(Theme.sans(13.5)).foregroundStyle(Theme.muted)
                         .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
@@ -361,13 +357,11 @@ struct UsagePage: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Usage counts").font(Theme.display(17)).foregroundStyle(Theme.ink)
-                    Text(Usage.release == nil
-                         ? "This Takes is built from source, so it never sends anything."
-                         : "Anonymous counts, once a day, to gettakes.app. Off unless you turn it on.")
+                    Text(Self.reportingCopy)
                         .font(Theme.sans(12)).foregroundStyle(Theme.muted)
                 }
                 Spacer()
-                if Usage.release != nil {
+                if Usage.release != nil, Usage.endpoint != nil {
                     RuleSwitch(on: usage.on) { usage.answer(!usage.on) }
                         .help(usage.on ? "Stop sending counts" : "Send counts once a day")
                 }
@@ -399,11 +393,18 @@ struct UsagePage: View {
                             }
                         }
                     }
-                    Link("Privacy at gettakes.app/privacy", destination: URL(string: "https://gettakes.app/privacy")!)
-                        .font(Theme.sans(12)).foregroundStyle(Theme.accentInk)
+                    Text("Cutmark currently sends no usage data. A future reporting endpoint will require an explicit opt-in.")
+                        .font(Theme.sans(12)).foregroundStyle(Theme.faint)
                 }
                 .padding(20)
             }
         }
+    }
+
+    private static var reportingCopy: String {
+        guard Usage.release != nil else { return "This Cutmark is built from source, so it never sends anything." }
+        return Usage.endpoint == nil
+            ? "Usage reporting is disabled in this Cutmark release. No analytics endpoint is configured."
+            : "Anonymous counts, once a day. Off unless you turn it on."
     }
 }

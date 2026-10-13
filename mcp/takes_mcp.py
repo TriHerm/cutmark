@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""MCP server for Takes (stdio, stdlib only).
+"""MCP server for Cutmark (stdio + optional Streamable HTTP, stdlib only).
 
 Lets any MCP agent (Claude Code, Codex, Cursor, Gemini CLI, Antigravity, opencode, pi, Claude Desktop) manage
-the Takes library: projects, sessions, scripts, takes.
+the Cutmark library: projects, sessions, scripts, takes.
 It writes the same on-disk format as the app (see Sources/Takes/Library.swift).
 The app rescans every 2 seconds, so changes show up without a click.
 
-Register:  python3 <path>/takes_mcp.py --setup   (adds it to every agent on this Mac)
-       or:  claude mcp add takes --scope user -- python3 <path>/takes_mcp.py
+Register:  python3 <path>/cutmark_mcp.py --setup   (adds it to every agent on this Mac)
+       or:  claude mcp add cutmark --scope user -- python3 <path>/cutmark_mcp.py
 """
 import array
 import concurrent.futures
@@ -34,21 +34,44 @@ import wave
 from datetime import datetime, timedelta, timezone
 
 PROTOCOL = "2025-06-18"
+SERVER_NAME = "cutmark"
+AUX_ENV_FILES = ("~/.config/cutmark/.env", "~/.claude/.env")
+
+
+def aux_env_key(*names):
+    """Read an auxiliary API key from Cutmark's config, then the legacy Claude env file."""
+    for path in AUX_ENV_FILES:
+        found = {}
+        try:
+            with open(os.path.expanduser(path)) as f:
+                for line in f:
+                    k, _, v = line.strip().partition("=")
+                    k = k.strip().removeprefix("export ").strip()
+                    v = v.strip().strip('"').strip("'")
+                    if k in names and v:
+                        found[k] = v
+        except OSError:
+            continue
+        for name in names:
+            if found.get(name):
+                return found[name]
+    return None
 
 
 # ---------- library on disk ----------
 
 def root():
-    if os.environ.get("TAKES_ROOT"):
-        return os.environ["TAKES_ROOT"]
+    override = os.environ.get("CUTMARK_ROOT") or os.environ.get("TAKES_ROOT")
+    if override:
+        return override
     try:
-        out = subprocess.run(["defaults", "read", "de.marvinaziz.takes", "root"],
+        out = subprocess.run(["defaults", "read", "com.triherm.cutmark", "root"],
                              capture_output=True, text=True, timeout=5)
         if out.returncode == 0 and out.stdout.strip():
             return out.stdout.strip()
     except Exception:
         pass
-    return os.path.expanduser("~/Movies/Takes")
+    return os.path.expanduser("~/Movies/Cutmark")
 
 
 def slug(s):
@@ -149,7 +172,7 @@ def resolve_project(name):
     path = os.path.normpath(name if os.path.isabs(name) else os.path.join(root(), name))
     parts = lib_parts(path)
     if not name or parts is None or len(parts) != 1:
-        raise ValueError("No project '%s'. A project is a folder in the Takes library: use list_projects or "
+        raise ValueError("No project '%s'. A project is a folder in the Cutmark library: use list_projects or "
                          "create_project." % name)
     if not os.path.isdir(path):
         raise ValueError("No project '%s'. Use list_projects or create_project." % name)
@@ -190,7 +213,7 @@ def write_meta(session, meta):
         lines.append("Published: " + ", ".join(
             "%s (%s)" % (p.get("platform") or "Published", p["at"][:10]) + (" " + p["url"] if p.get("url") else "")
             for p in meta["published"]))
-    lines += ["", "## Takes\n"]
+    lines += ["", "## Cutmark\n"]
     takes = meta.get("takes", [])
     if not takes:
         lines.append("_No takes yet._")
@@ -634,9 +657,9 @@ FOLDERS = {
     "assets/": "Files the user dropped on the Assets tab. Read them; never write here.",
     "(library)": "Reusable style (logos, icons, images, motion graphics, fonts, colours, type) goes in the "
                  "style or project library, never in a session. See get_library.",
-    "_work/": "Cuts of cut_take and rough_cut, as <name>-vN.mp4 with .wav, .words.json and .json. Takes "
+    "_work/": "Cuts of cut_take and rough_cut, as <name>-vN.mp4 with .wav, .words.json and .json. Cutmark "
               "keeps the newest 5 of a name. List the folder to find an earlier cut. Write here only with those tools.",
-    "_edit/": "_edit/<name>/ holds an edit's sources and renders. Takes manages it. Other scratch stays outside the "
+    "_edit/": "_edit/<name>/ holds an edit's sources and renders. Cutmark manages it. Other scratch stays outside the "
               "session.",
 }
 
@@ -1272,7 +1295,7 @@ def take_clock(path):
         return dict(CLOCKS[key])
     probe = find_tool("ffprobe")
     if not probe:
-        raise ValueError("ffprobe is not installed. Open Takes and click Finish setup, or run brew install ffmpeg.")
+        raise ValueError("ffprobe is not installed. Open Cutmark and click Finish setup, or run brew install ffmpeg.")
     r = subprocess.run([probe, "-v", "error", "-show_entries",
                         "stream=codec_type,start_time,r_frame_rate,avg_frame_rate,width,height,pix_fmt,channels,"
                         "color_primaries,color_transfer,color_space:stream_side_data=rotation",
@@ -1602,7 +1625,7 @@ SEEN_DAYS = 30  # Claude Code keeps a conversation 30 days
 
 
 def chat_id():
-    """The Claude Code conversation: the same id for every message and after a restart of Takes
+    """The Claude Code conversation: the same id for every message and after a restart of Cutmark
     (claude sets CLAUDE_CODE_SESSION_ID for its MCP servers). Every Takes chat also sets TAKES_CHAT_ID
     (Codex 2026-10-11, all agents 2026-10-12: pi hands it on to its MCP servers). None for other
     agents. A Codex or pi process started from a Claude Code Bash tool inherits the id and shares
@@ -1776,7 +1799,7 @@ def rule_view(r):
 
 def counts(r):
     """Counts toward the AREA_MAX of its area: on, not waiting for a merge, not merged away. The app's
-    LearnedRule.counts is the same, so the board and Takes agree when an area is full."""
+    LearnedRule.counts is the same, so the board and Cutmark agree when an area is full."""
     return r.get("on", True) and not r.get("merge") and not r.get("merged_into")
 
 
@@ -2097,8 +2120,8 @@ NEAR = 10.0         # align: first look this far around where the last piece end
 MATCH = 0.75        # align: a piece matches at this correlation or more (heavy echo: 0.79; another take: 0.6)
 BANDS = [125, 250, 500, 1000, 2000, 4000, 8000, 16000]
 AUDIO_EXT = (".m4a", ".wav", ".mp3", ".aac", ".aif", ".aiff", ".flac", ".caf")
-NO_SOURCE = "Takes does not know which take this edit came from. Pass source."
-NOT_FOUND = "Takes could not find this edit in %s (heavy music, another take or another file)."
+NO_SOURCE = "Cutmark does not know which take this edit came from. Pass source."
+NOT_FOUND = "Cutmark could not find this edit in %s (heavy music, another take or another file)."
 GIVEN_SHARE = 0.25  # a source argument still needs this share of the edit's sound found in it
 OUT_OF_TIME = "Out of time. Run check_edit again; the second run is faster."
 LABELS = {"streams": "Extra track", "frozen_video": "Frozen picture", "echo": "Echo", "words": "Missing words",
@@ -2133,7 +2156,7 @@ def probe_streams(path):
     """Every stream and chapter of a file, from one ffprobe."""
     probe = find_tool("ffprobe")
     if not probe:
-        raise ValueError("ffprobe is not installed. Open Takes and click Finish setup, or run brew install ffmpeg.")
+        raise ValueError("ffprobe is not installed. Open Cutmark and click Finish setup, or run brew install ffmpeg.")
     r = subprocess.run([probe, "-v", "error", "-show_streams", "-show_chapters", "-show_format", "-of", "json", path],
                        capture_output=True, text=True, timeout=60)
     try:
@@ -2606,7 +2629,7 @@ def voice_tails(edit, take):
             raise Skip("Too little sound to measure the room.")
         top, floor = percentile(allv, 0.95), percentile(allv, 0.10)
         if top - floor < 25:
-            raise Skip("Music or noise under the voice. Takes cannot measure the room.")
+            raise Skip("Music or noise under the voice. Cutmark cannot measure the room.")
         return top - 12, max(top - 30, floor + 4)
 
     def tail(env, ps, i, lo):
@@ -2748,13 +2771,13 @@ def picture_offset(ctx):
     E = grey_frames(ctx["path"], xe, width, rate)
     S = grey_frames(ctx["src"]["path"], xs, width + 2.0, rate)
     if len(E) < rate * width * 0.8 or len(S) < len(E) + rate:
-        raise Skip("Takes could not read the picture to check the sync.")
+        raise Skip("Cutmark could not read the picture to check the sync.")
     if sum(_mad(E[i], E[i + 1]) for i in range(len(E) - 1)) / (len(E) - 1) < 0.5:
-        raise Skip("The picture does not move. Takes cannot check the sync.")
+        raise Skip("The picture does not move. Cutmark cannot check the sync.")
     scores = [sum(_mad(E[i], S[k + i]) for i in range(len(E))) / len(E) for k in range(len(S) - len(E) + 1)]
     k = min(range(len(scores)), key=scores.__getitem__)
     if scores[k] > 0.7 * median(scores):
-        raise Skip("The picture does not show a clear match in the take. Takes cannot check the sync.")
+        raise Skip("The picture does not show a clear match in the take. Cutmark cannot check the sync.")
     d = 0.0
     if 0 < k < len(scores) - 1:
         den = scores[k - 1] - 2 * scores[k] + scores[k + 1]
@@ -2942,11 +2965,11 @@ def voice_repeat(edit, take, lo=-4, hi=22):
         G[i][i] += ridge
     h = solve(G, r)
     if not h:
-        raise Skip("Takes could not measure the echo.")
+        raise Skip("Cutmark could not measure the echo.")
     k0 = max(range(len(h)), key=lambda i: h[i])
     main = sum(h[max(0, k0 - 2):k0 + 3])
     if main <= 0:
-        raise Skip("The edit's sound does not follow the take. Takes cannot measure the echo.")
+        raise Skip("The edit's sound does not follow the take. Cutmark cannot measure the echo.")
     best, at = 0.0, None
     for j in range(k0 + 4, min(len(h) - 1, k0 + 20)):
         v = max(0.0, h[j]) + max(0.0, h[j + 1])
@@ -3012,7 +3035,7 @@ def chk_echo(ctx):
                                       % (round(repeat[0] * 1000), round(repeat[1] * 100), fix)})
     out = {"want": want}
     if tails is None:
-        out["note"] = "%s Takes measured only the repeat of the voice." % why
+        out["note"] = "%s Cutmark measured only the repeat of the voice." % why
     return (round(tails[0] - tails[1], 2) if tails else repeat[1], [], None, out)
 
 
@@ -3187,7 +3210,7 @@ def chk_picture_drift(ctx):
                 break
             region = None
         if region is None:
-            raise Skip("Takes could not find the edit's picture in the take.")
+            raise Skip("Cutmark could not find the edit's picture in the take.")
     if region and region == (0, 0, ts[0] // 2 * 2, ts[1] // 2 * 2):
         region = None
     rw, rh = (region[2], region[3]) if region else ts
@@ -3228,7 +3251,7 @@ def chk_picture_drift(ctx):
     want = "U and V within %g, saturation at least %g x and blur at most %g x the take" % (lim["chroma"], lim["sat"], lim["blur"])
     extra = {"want": want}
     if not tone:
-        extra["note"] = "The take is HDR and this ffmpeg has no zscale, so Takes did not compare the colors."
+        extra["note"] = "The take is HDR and this ffmpeg has no zscale, so Cutmark did not compare the colors."
     elif ctx["src"].get("grade"):
         extra["note"] = "The edit has a grade, so only green and blur are compared."
     if not found:
@@ -3242,7 +3265,7 @@ def chk_picture_drift(ctx):
 
 # ---------- framing ----------
 # The user: "zoom out a little and center me", "make sure to crop me better" (2026-10-11). The faces come
-# from takes-faces (Apple Vision, Sources/TakesFaces) in Takes.app. A face is judged inside the card it
+# from takes-faces (Apple Vision, Sources/TakesFaces) in Cutmark.app. A face is judged inside the card it
 # sits in: the nearest straight edges around it where most pixels change at once (a card on a
 # background, a split line), else the frame. Only "too tight" is checked: off centre failed 17 of 72
 # edits he passed, as a face beside text on purpose reads the same.
@@ -3254,8 +3277,8 @@ def faces_helper():
     for p in (os.environ.get("TAKES_FACES"), os.path.join(here, "..", "MacOS", "takes-faces"),
               os.path.join(here, "..", ".build", "release", "takes-faces"),
               os.path.join(here, "..", ".build", "debug", "takes-faces"),
-              os.path.expanduser("~/Applications/Takes.app/Contents/MacOS/takes-faces"),
-              "/Applications/Takes.app/Contents/MacOS/takes-faces"):
+              os.path.expanduser("~/Applications/Cutmark.app/Contents/MacOS/takes-faces"),
+              "/Applications/Cutmark.app/Contents/MacOS/takes-faces"):
         if p and os.access(p, os.X_OK):
             return os.path.realpath(p)
     return None
@@ -3310,7 +3333,7 @@ def framing_samples(path, times, size):
             got = [x for x in ex.map(grab, times) if x[2] and os.path.exists(x[1])]
         boxes = face_boxes([png for _, png, _ in got])
         if boxes is None:
-            raise Skip("Takes cannot find faces here: takes-faces is not in Takes.app. Update Takes.")
+            raise Skip("Cutmark cannot find faces here: takes-faces is not in Cutmark.app. Update Cutmark.")
         out = []
         for t, png, g in got:
             found = []
@@ -3662,7 +3685,7 @@ def run_builtin(s, rel, path, given=None, as_rel=None):
     t0 = time.time()
     p = probe_streams(path)
     if not p["video"] and not p["audio"]:
-        raise ValueError("Takes cannot read this file (no video or sound stream). Render it again.")
+        raise ValueError("Cutmark cannot read this file (no video or sound stream). Render it again.")
     src = edit_source(s, rel, given)
     ctx = {"s": s, "rel": rel, "path": path, "probe": p, "line_rel": as_rel or rel, "src": src, "src_probe": None, "env_e": None,
            "env_s": None, "segments": None, "known": False,
@@ -3724,11 +3747,11 @@ def run_builtin(s, rel, path, given=None, as_rel=None):
                     if src["given"] and not ctx["known"]:
                         ctx["why"] = NOT_FOUND % os.path.basename(src["path"])
             else:
-                ctx["why"] = "The take has no sound, so Takes cannot find the edit in it."
+                ctx["why"] = "The take has no sound, so Cutmark cannot find the edit in it."
         except (ValueError, OSError, subprocess.SubprocessError) as e:
-            ctx["why"] = "Takes could not read the take: %s" % e
+            ctx["why"] = "Cutmark could not read the take: %s" % e
     elif src["path"]:
-        ctx["why"] = "The edit has no sound, so Takes cannot find it in the take."
+        ctx["why"] = "The edit has no sound, so Cutmark cannot find it in the take."
     names = ["av_sync", "frozen_video", "band_balance", "echo", "picture_drift", "framing", "words", "regression"]
     if not p["video"]:
         names = [n for n in names if n not in PICTURE_CHECKS]  # a sound-only edit: picture checks are not listed
@@ -4010,7 +4033,7 @@ def shot_section(x):
 
 def shot_ids(old, given):
     """An id per shot: the given one, else the id of the old shot with the same sketch or the same lines,
-    else a new one. Takes and comments point at these ids, so a rewrite must keep them."""
+    else a new one. Cutmark and comments point at these ids, so a rewrite must keep them."""
     used, out = set(), []
     nums = [int(x["id"][1:]) for x in old + given if str(x.get("id", ""))[1:].isdigit()]
     nxt = max(nums or [0]) + 1
@@ -4154,14 +4177,14 @@ def shot_video(s, f):
     return os.path.relpath(added, s)
 
 
-NO_KEY_NOTE = ("No sketches: Takes has no image key (Gemini, OpenAI or Replicate). Ask the user for a Gemini key "
-               "(Takes › Settings › Gemini; aistudio.google.com/apikey) or an OpenAI key, then call set_storyboard "
+NO_KEY_NOTE = ("No sketches: Cutmark has no image key (Gemini, OpenAI or Replicate). Ask the user for a Gemini key "
+               "(Cutmark › Settings › Gemini; aistudio.google.com/apikey) or an OpenAI key, then call set_storyboard "
                "again or let them click Draw on the Storyboard tab. Or, if you can make images yourself, draw each "
                "sketch and pass it as the shot's 'image' (a PNG or JPG path).")
 
 
 def image_sources():
-    """The image services Takes can draw with right now, as names."""
+    """The image services Cutmark can draw with right now, as names."""
     if os.environ.get("TAKES_SKETCH_CMD"):
         return ["test"]
     found = []
@@ -4289,7 +4312,7 @@ def draw_gemini(prompt, out, fmt, model, images=(), size="1K"):
     import urllib.request
     key = gemini_key()
     if not key:
-        raise ValueError("No Gemini key. Add one in Takes › Settings › Gemini.")
+        raise ValueError("No Gemini key. Add one in Cutmark › Settings › Gemini.")
     parts = [{"text": prompt}]
     for f in images:
         mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(
@@ -4455,14 +4478,7 @@ IMAGE_SIZES = ("1024x1024", "1536x1024", "1024x1536")  # the sizes every GPT Ima
 def openai_key():
     if os.environ.get("OPENAI_API_KEY"):
         return os.environ["OPENAI_API_KEY"]
-    try:
-        for line in open(os.path.expanduser("~/.claude/.env")):
-            k, _, v = line.strip().partition("=")
-            if k.strip().removeprefix("export ").strip() == "OPENAI_API_KEY":
-                return v.strip().strip('"').strip("'") or None
-    except OSError:
-        pass
-    return None
+    return aux_env_key("OPENAI_API_KEY")
 
 
 def openai_size(fmt):
@@ -4494,7 +4510,7 @@ def openai_image(prompt, out, fmt=None, images=(), quality="medium", model=IMAGE
     import uuid
     key = openai_key()
     if not key:
-        raise ValueError("No OPENAI_API_KEY in ~/.claude/.env.")
+        raise ValueError("No OPENAI_API_KEY in the environment or ~/.config/cutmark/.env.")
     size = openai_size(fmt) if fmt else "auto"
 
     def call(size):
@@ -4630,8 +4646,8 @@ ELEVEN_API = "https://api.elevenlabs.io"
 ELEVEN_TTS_MODEL = "eleven_multilingual_v2"
 ELEVEN_STS_MODEL = "eleven_multilingual_sts_v2"
 ELEVEN_STT_MODEL = "scribe_v1"
-ELEVEN_KEYCHAIN = "Takes ElevenLabs"
-ELEVEN_SETUP = "Open Takes › Plugins › Voices and paste your ElevenLabs API key."
+ELEVEN_KEYCHAIN = "Cutmark ElevenLabs"
+ELEVEN_SETUP = "Open Cutmark › Plugins › Voices and paste your ElevenLabs API key."
 ELEVEN_CHUNK = 2500  # characters per text-to-speech call; neighbours go along as previous/next text
 ELEVEN_FIT = (0.8, 1.25)  # how far fix_words may speed up or slow down new words to fit the old slot
 
@@ -4648,14 +4664,7 @@ def eleven_key():
                 return r.stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
             pass
-    try:
-        for line in open(os.path.expanduser("~/.claude/.env")):
-            k, _, v = line.strip().partition("=")
-            if k.strip().removeprefix("export ").strip() == "ELEVENLABS_API_KEY":
-                return v.strip().strip('"').strip("'") or None
-    except OSError:
-        pass
-    return None
+    return aux_env_key("ELEVENLABS_API_KEY")
 
 
 def eleven_save_key(key):
@@ -4795,7 +4804,7 @@ def resolve_voice(ref):
         d = read_voices_config().get("default")
         if d and d.get("id"):
             return d["id"], d.get("name") or d["id"]
-        raise ValueError("No default voice yet. Pick one in Takes › Plugins › Voices, or pass voice.")
+        raise ValueError("No default voice yet. Pick one in Cutmark › Plugins › Voices, or pass voice.")
     voices = eleven_voices()
     v = pick_voice(voices, ref)
     if not v:
@@ -4897,7 +4906,7 @@ def t_design_voice(a):
 def need_ffmpeg():
     ffmpeg = find_tool("ffmpeg")
     if not ffmpeg:
-        raise ValueError("ffmpeg is not installed. Open Takes and click Finish setup, or run brew install ffmpeg.")
+        raise ValueError("ffmpeg is not installed. Open Cutmark and click Finish setup, or run brew install ffmpeg.")
     return ffmpeg
 
 
@@ -5184,7 +5193,7 @@ def t_change_voice(a):
 # ---------- jobs: long work that Takes runs (2026-10-10, same format as Sources/Takes/Jobs.swift) ----------
 #
 # A render, Demucs, Whisper or matting ran as a background Bash job in the chat. A steer, a Stop, a
-# compaction or a Takes quit ended the chat's process, and the render died with it. run_job starts
+# compaction or a Cutmark quit ended the chat's process, and the render died with it. run_job starts
 # the command in a runner that is not a child of anything in the chat (spawn_detached), so it goes
 # on. The runner keeps <session>/.jobs/<id>.json up to date; the app shows it in the Jobs row and
 # tells the chat when it ends. Higgsfield and Replicate jobs (generated/.jobs) read the same way.
@@ -5335,7 +5344,7 @@ def read_job(s, job_id, generate=False):
     except OSError:
         raise ValueError("No job %s in %s." % (job_id, s))
     except ValueError:
-        raise ValueError("Takes cannot read the job file %s. It is left as it is. Start it again with run_job."
+        raise ValueError("Cutmark cannot read the job file %s. It is left as it is. Start it again with run_job."
                          % os.path.relpath(p, s))
     if job_lost(s, raw, generate):
         # Read again: a runner that ended between the read and the lock check wrote its end first.
@@ -5522,7 +5531,7 @@ def new_job_id(s):
 
 
 def from_chat():
-    """A job the Takes chat of a session started: the app tells that chat when it ends. Board chats
+    """A job the Cutmark chat of a session started: the app tells that chat when it ends. Board chats
     (TAKES_BOARD) and other agents get no note."""
     return os.environ.get("TAKES_CHAT") == "1" and not os.environ.get("TAKES_BOARD")
 
@@ -5596,12 +5605,12 @@ def t_run_job(a):
         raise ValueError("The label is longer than 60 characters. Use a few words, e.g. Render edit v3.")
     job = start_job(s, cmd, outputs, label)
     if job["from_chat"]:
-        then = "Otherwise tell the user in one line what runs and end your turn: Takes sends you a note when it ends."
+        then = "Otherwise tell the user in one line what runs and end your turn: Cutmark sends you a note when it ends."
     else:  # only the Takes chat of a session gets a note: other agents must look
         then = ("Otherwise tell the user in one line what runs. No note comes to you when it ends: "
                 "check later with get_job id=%s." % job["id"])
     return {"job": job["id"], "status": job["status"], "label": label, "outputs": job["outputs"],
-            "note": "Takes runs it and shows it in the Jobs row. If it should end within about 2 min, wait with "
+            "note": "Cutmark runs it and shows it in the Jobs row. If it should end within about 2 min, wait with "
                     "get_job wait_s=50. " + then}
 
 
@@ -5640,7 +5649,7 @@ def t_get_job(a):
 def t_stop_job(a):
     s, job = find_job(a.get("id") or "", a.get("session"))
     if job.get("type") == "generate":
-        raise ValueError("Higgsfield and Replicate charge for a clip when it starts, so Takes cannot stop it.")
+        raise ValueError("Higgsfield and Replicate charge for a clip when it starts, so Cutmark cannot stop it.")
     if job["status"] in JOB_ENDED:
         return dict(job_brief(s, job), note="It already ended.")
     with open(job_path(s, job["id"], ".stop") + ".tmp", "w") as f:
@@ -5867,7 +5876,7 @@ def job_run(s, job_id):
         if stopping["by"]:
             raise JobStopped
         if timed_out:
-            job.update(status="failed", error="It ran over %s, so Takes stopped it." % span(job.get("timeout_s") or job_timeout()))
+            job.update(status="failed", error="It ran over %s, so Cutmark stopped it." % span(job.get("timeout_s") or job_timeout()))
         elif code != 0:
             job.update(status="failed", exit=code,
                        error=job_reason(seen["lines"]) or "It ended with code %d." % code)
@@ -5892,7 +5901,7 @@ def job_run(s, job_id):
                 os.killpg(child.pid, signal.SIGKILL)
             except OSError:
                 pass
-        job.update(status="failed", error=("Takes could not run it: %s" % e)[:160])
+        job.update(status="failed", error=("Cutmark could not run it: %s" % e)[:160])
     if job["status"] in ("failed", "stopped"):
         # What it wrote leaves the session, so a half-written file never reads as a result.
         part = os.path.join(JOBS_DIR, job_id + ".partial")
@@ -5918,7 +5927,7 @@ def job_run(s, job_id):
 GENERATED_DIR = "generated"
 HF_VIDEO_MODEL = "seedance_2_5"
 HF_WORKFLOWS = ("reframe", "draw_to_video")
-HF_SETUP = "Open Takes › Plugins › Higgsfield: Install, then Sign in."
+HF_SETUP = "Open Cutmark › Plugins › Higgsfield: Install, then Sign in."
 
 
 def higgsfield_cli():
@@ -6232,18 +6241,18 @@ def higgsfield_run(s, job_path):
 # ---------- Replicate: AI video, pay per clip (2026-10-09) ----------
 #
 # The same models as Higgsfield (Seedance 2.5 and the rest) at Replicate's price per second, with no
-# plan. The API key sits in the login Keychain ("Takes Replicate"), saved from Takes › Plugins ›
+# plan. The API key sits in the login Keychain ("Cutmark Replicate"), saved from Cutmark › Plugins ›
 # Replicate. The user keeps a short list of default models there (_library/replicate.json, first one
 # is the default); everything else (length, shape, sound, reference images) the chat sets per job
 # from the model's own inputs (replicate_model). A job runs detached like a Higgsfield one, in the
 # same generated/.jobs folder.
 
 REP_API = "https://api.replicate.com/v1"
-REP_KEYCHAIN = "Takes Replicate"
-REP_SETUP = "Open Takes › Plugins › Replicate and paste your Replicate API token."
+REP_KEYCHAIN = "Cutmark Replicate"
+REP_SETUP = "Open Cutmark › Plugins › Replicate and paste your Replicate API token."
 REP_DEFAULT_MODELS = ["bytedance/seedance-2.5"]
-REP_AGENT = "Takes (+https://gettakes.app)"
-# Takes' own words for a job, and the input names models use for them, most usual first.
+REP_AGENT = "Cutmark (+https://github.com/TriHerm/cutmark)"
+# Cutmark' own words for a job, and the input names models use for them, most usual first.
 REP_INPUTS = {
     "image": ("image", "start_image", "first_frame_image", "first_frame", "input_image", "image_url"),
     "end_image": ("end_image", "last_frame_image", "last_frame", "end_frame", "tail_image"),
@@ -6256,7 +6265,7 @@ REP_INPUTS = {
 
 
 def rep_key():
-    """REPLICATE_API_TOKEN, else the Keychain, else ~/.claude/.env."""
+    """REPLICATE_API_TOKEN, else the Keychain, else Cutmark config, then legacy Claude config."""
     if os.environ.get("REPLICATE_API_TOKEN"):
         return os.environ["REPLICATE_API_TOKEN"]
     if not os.environ.get("TAKES_NO_KEYCHAIN"):
@@ -6267,14 +6276,7 @@ def rep_key():
                 return r.stdout.strip()
         except (OSError, subprocess.TimeoutExpired):
             pass
-    try:
-        for line in open(os.path.expanduser("~/.claude/.env")):
-            k, _, v = line.strip().partition("=")
-            if k.strip().removeprefix("export ").strip() == "REPLICATE_API_TOKEN":
-                return v.strip().strip('"').strip("'") or None
-    except OSError:
-        pass
-    return None
+    return aux_env_key("REPLICATE_API_TOKEN")
 
 
 def rep_save_key(key):
@@ -6407,7 +6409,7 @@ def rep_is_file(schema):
 
 
 def rep_input(s, info, a, shot):
-    """The prediction's input: Takes' words mapped to the model's names, then params as they are.
+    """The prediction's input: Cutmark' words mapped to the model's names, then params as they are.
     File inputs keep session refs ('sketch', a take number, a path); the runner uploads them."""
     props = info["inputs"]
     out, dropped = {}, []
@@ -6595,7 +6597,7 @@ def options_text(name, p):
     return None
 
 
-# Takes' words for a model's settings and media inputs, both providers.
+# Cutmark' words for a model's settings and media inputs, both providers.
 DETAIL_SETTINGS = (("duration", "Length"), ("resolution", "Quality"), ("aspect_ratio", "Shape"))
 DETAIL_TAKES = (("image", "Start frame"), ("end_image", "End frame"), ("video", "Video in"),
                 ("image_references", "Reference images"), ("reference_images", "Reference images"),
@@ -6605,7 +6607,7 @@ DETAIL_TAKES = (("image", "Start frame"), ("end_image", "End frame"), ("video", 
 
 
 def detail_from_inputs(inputs, name_of):
-    """Settings and the media a model takes, from {input name: schema}. name_of maps Takes' word to
+    """Settings and the media a model takes, from {input name: schema}. name_of maps Cutmark' word to
     the model's own input name (None when it has none)."""
     settings = []
     for word, title in DETAIL_SETTINGS:
@@ -6789,7 +6791,7 @@ def t_higgsfield_details(a):
         note = "You have %d credits: about %d clips at %s." % (n, n // max(cheapest, 1),
                                                                  next(x["when"] for x in prices if int(x["price"].split()[0]) == cheapest))
     elif not prices:
-        note = "Higgsfield gives no estimate without the model's media. Ask Takes for the price of a real clip."
+        note = "Higgsfield gives no estimate without the model's media. Ask Cutmark for the price of a real clip."
     return {"model": job, "label": m.get("display_name") or job, "description": "", "page": None,
             "prices": prices, "price_note": note,
             "speed": None, "settings": settings, "takes": takes, "default": hf_default_model() == job,
@@ -7359,7 +7361,7 @@ def t_set_post(a):
         if not os.path.exists(os.path.join(s, rel)):
             raise ValueError("media %s does not exist in %s." % (rel, s))
         media = rel
-    if a.get("media") is not None:  # Takes picked it: publish_edit may move it to the next version
+    if a.get("media") is not None:  # Cutmark picked it: publish_edit may move it to the next version
         fm["media_by"] = "takes" if media else None
     fm["media"] = media
     if a.get("title") is not None:
@@ -7383,9 +7385,9 @@ def t_set_post(a):
         if bad:
             raise ValueError("on takes tiktok, reels, shorts; not %s." % ", ".join(bad))
         fm["on"] = None if set(a["on"]) == set(VERTICAL_PLACES) else (", ".join(x for x in VERTICAL_PLACES if x in a["on"]) or "none")
-    post_snapshot(s, "user", "Before Takes' change", p=p)
+    post_snapshot(s, "user", "Before Cutmark' change", p=p)
     write_post_file(s, fm, text, p)
-    post_snapshot(s, "claude", a.get("note") or "Edited by Takes", p=p)
+    post_snapshot(s, "claude", a.get("note") or "Edited by Cutmark", p=p)
     out = read_post(s, p)
     if p == "x":
         long = [t["n"] for t in out["tweets"] if t["cut_in_feed"]]
@@ -7421,10 +7423,10 @@ def set_post_variant(s, a, p="linkedin"):
                          % (PLATFORMS[p]["name"], a["variant"]))
     text = post_text_arg(a, p)
     text = v["text"] if text is None else text.strip("\n") + "\n"
-    post_snapshot(s, "user", "Before Takes' change", v["variant"], p)
+    post_snapshot(s, "user", "Before Cutmark' change", v["variant"], p)
     write_post_variant(s, v["variant"], a.get("name") or v["name"], v["author"] or "claude",
                        a.get("note") if a.get("note") is not None else v["note"], v["created"], text, p)
-    post_snapshot(s, "claude", a.get("note") or "Edited by Takes", v["variant"], p)
+    post_snapshot(s, "claude", a.get("note") or "Edited by Cutmark", v["variant"], p)
     return {"platform": PLATFORMS[p]["name"], "updated": v["variant"], "chars": len(text.strip())}
 
 
@@ -7852,7 +7854,7 @@ def t_rename_take(a):
 
 
 def take_said(s, t, takes):
-    """What a take says, from the transcript Takes writes next to it (Apple's speech model on the Mac).
+    """What a take says, from the transcript Cutmark writes next to it (Apple's speech model on the Mac).
     One per take: the camera file's, or the screen file's when the take has no camera file."""
     if t["kind"] == "screen" and any(o["number"] == t["number"] and o["kind"] == "camera" for o in takes):
         return {}
@@ -7862,7 +7864,7 @@ def take_said(s, t, takes):
     except Exception:  # a broken transcript loses its text, not the session
         words = None
     if words is None:
-        return {"said": None, "said_note": "No transcript yet. Takes writes one in the background (macOS 26)."}
+        return {"said": None, "said_note": "No transcript yet. Cutmark writes one in the background (macOS 26)."}
     text = " ".join(w for _, _, w in words)
     return {"said": text[:1500] + ("…" if len(text) > 1500 else ""),
             "transcript": os.path.splitext(path)[0] + ".words.json"}
@@ -8021,7 +8023,7 @@ def all_ideas():
 
 def idea_index(ideas):
     """INDEX.md. Ideas.swift writes the same text, so the app and the server never fight over it."""
-    lines = ["# Ideas", "", "Takes writes this list from the idea files. Change an idea in its own file.", ""]
+    lines = ["# Ideas", "", "Cutmark writes this list from the idea files. Change an idea in its own file.", ""]
     if not ideas:
         lines.append("No ideas yet.")
     for st in IDEA_STATUSES:
@@ -8638,10 +8640,11 @@ def audio_dir():
 
 
 def sound_source():
-    if os.environ.get("TAKES_SOUND_SOURCE"):
-        return os.environ["TAKES_SOUND_SOURCE"]
+    override = os.environ.get("CUTMARK_SOUND_SOURCE") or os.environ.get("TAKES_SOUND_SOURCE")
+    if override:
+        return override
     try:
-        out = subprocess.run(["defaults", "read", "de.marvinaziz.takes", "soundSource"],
+        out = subprocess.run(["defaults", "read", "com.triherm.cutmark", "soundSource"],
                              capture_output=True, text=True, timeout=5).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         out = ""
@@ -8792,14 +8795,14 @@ def t_list_broll(a):
 # ---------- search by meaning ----------
 #
 # The app's ⌘K search (Sources/Takes/Search.swift): EmbeddingGemma 2 on this Mac, in the takes-embed
-# helper inside Takes.app. Takes downloads the model in the background and keeps the index in
+# helper inside Cutmark.app. Cutmark downloads the model in the background and keeps the index in
 # <root>/_library/search/index.json. This tool asks the same helper.
 
 def embed_helper():
     here = os.path.dirname(os.path.abspath(__file__))
     for p in (os.environ.get("TAKES_EMBED"), os.path.join(here, "..", "MacOS", "takes-embed"),
-              os.path.expanduser("~/Applications/Takes.app/Contents/MacOS/takes-embed"),
-              "/Applications/Takes.app/Contents/MacOS/takes-embed"):
+              os.path.expanduser("~/Applications/Cutmark.app/Contents/MacOS/takes-embed"),
+              "/Applications/Cutmark.app/Contents/MacOS/takes-embed"):
         if p and os.access(p, os.X_OK):
             return os.path.realpath(p)
     return None
@@ -8807,7 +8810,7 @@ def embed_helper():
 
 def embed_models():
     return os.environ.get("TAKES_EMBED_MODELS") or os.path.expanduser(
-        "~/Library/Application Support/Takes/Models/embeddinggemma-2-q8")
+        "~/Library/Application Support/Cutmark/Models/embeddinggemma-2-q8")
 
 
 def t_search_media(a):
@@ -8816,9 +8819,9 @@ def t_search_media(a):
         return {"error": "Say what to look for."}
     helper = embed_helper()
     if not helper:
-        return {"error": "This Takes build has no search helper. Use list_broll or get_session instead."}
+        return {"error": "This Cutmark build has no search helper. Use list_broll or get_session instead."}
     if not os.path.exists(os.path.join(embed_models(), "text-q8", "model.safetensors")):
-        return {"error": "The search model is still downloading (Takes > Settings > Search). Use list_broll for now."}
+        return {"error": "The search model is still downloading (Cutmark > Settings > Search). Use list_broll for now."}
     cmd = [helper, "search", "--models", embed_models(), "--root", root(), "--limit", str(int(a.get("limit") or 12))]
     if a.get("kinds"):
         cmd += ["--kind", ",".join(a["kinds"])]
@@ -8841,7 +8844,7 @@ def t_search_media(a):
         hits.append(h)
     out = {"results": hits, "indexed_files": (data.get("status") or {}).get("files")}
     if not hits:
-        out["note"] = "Nothing indexed yet. Takes indexes the library in the background once the model is downloaded."
+        out["note"] = "Nothing indexed yet. Cutmark indexes the library in the background once the model is downloaded."
     return out
 
 
@@ -8935,7 +8938,7 @@ def t_update_variant(a):
         fm["note"] = a.get("note", fm.get("note", ""))
     order = [(k, fm.get(k, "")) for k in ("name", "author", "note", "created")]
     write_text(p, render_fm(order, a.get("script", body)))
-    snapshot(s, a["variant"], a.get("author", "claude"), a.get("note") or "Edited by Takes")
+    snapshot(s, a["variant"], a.get("author", "claude"), a.get("note") or "Edited by Cutmark")
     return {"updated": a["variant"]}
 
 
@@ -9036,7 +9039,7 @@ def voice_script():
 
 def ensure_uv():
     """uv runs the cleanup with its Python packages. A new Mac has none: get it once with
-    Astral's installer into ~/.local/bin, where Takes also puts ffmpeg."""
+    Astral's installer into ~/.local/bin, where Cutmark also puts ffmpeg."""
     uv = find_tool("uv")
     if uv:
         return uv
@@ -9142,7 +9145,7 @@ def voice_mix(s, key):
     g = VOICE_LOUDNESS.get(v.get("loudness"), 0.0)
     ffmpeg = find_tool("ffmpeg")
     if not ffmpeg:
-        raise ValueError("ffmpeg is not installed. Open Takes and click Finish setup, or run brew install ffmpeg.")
+        raise ValueError("ffmpeg is not installed. Open Cutmark and click Finish setup, or run brew install ffmpeg.")
     subprocess.run([ffmpeg, "-v", "error", "-y", "-i", f["clean"], "-i", f["dry"], "-filter_complex",
                     "[0:a][1:a]amerge=inputs=2,pan=mono|c0=%.4f*c0+%.4f*c1,volume=%.1fdB" % (k, 1 - k, g),
                     "-ar", "48000", "-c:a", "pcm_f32le", f["mix"] + ".tmp.wav"], check=True, timeout=600)
@@ -9246,9 +9249,8 @@ def t_clean_voice(a):
 
 
 def open_in_app(path):
-    # -g: never bring Takes to the front. The user may be working in another app or another session;
-    # Takes never shows it at once: it waits as a notice until he clicks it.
-    url = "takes://open?path=" + urllib.parse.quote(path)
+    # -g: never bring Cutmark to the front. It waits as a notice until the user clicks it.
+    url = "cutmark://open?path=" + urllib.parse.quote(path)
     subprocess.run(["open", "-g", url], capture_output=True)
 
 
@@ -9328,18 +9330,8 @@ def gemini_key():
     for k in ("GEMINI_API_KEY", "GOOGLE_AI_API_KEY", "GOOGLE_API_KEY"):
         if os.environ.get(k):
             return os.environ[k]
-    # ~/.claude/.env: Takes › Settings › Gemini saves GEMINI_API_KEY there; it wins over an older GOOGLE_AI_API_KEY.
-    found = {}
-    try:
-        for line in open(os.path.expanduser("~/.claude/.env")):
-            k, _, v = line.strip().partition("=")
-            k = k.strip().removeprefix("export ").strip()
-            v = v.strip().strip('"').strip("'")
-            if k in ("GEMINI_API_KEY", "GOOGLE_AI_API_KEY") and v:
-                found[k] = v
-    except OSError:
-        pass
-    return found.get("GEMINI_API_KEY") or found.get("GOOGLE_AI_API_KEY")
+    # Settings saves GEMINI_API_KEY in Cutmark's config. The legacy Claude file remains a fallback.
+    return aux_env_key("GEMINI_API_KEY", "GOOGLE_AI_API_KEY")
 
 
 DESCRIBE_PROMPT = """You describe one B-roll video for a video editor's library. The person in it (if any) is \
@@ -9443,10 +9435,10 @@ def describe_video(src, prompt=None, schema=None, ask="Describe this clip.", fps
         return json.loads(r.stdout)
     key = gemini_key()
     if not key:
-        raise ValueError("No Gemini key. Add one in Takes › Settings › Gemini.")
+        raise ValueError("No Gemini key. Add one in Cutmark › Settings › Gemini.")
     ffmpeg = find_tool("ffmpeg")
     if not ffmpeg:
-        raise ValueError("ffmpeg is not installed. Open Takes and click Finish setup, or run brew install ffmpeg.")
+        raise ValueError("ffmpeg is not installed. Open Cutmark and click Finish setup, or run brew install ffmpeg.")
     tmp = tempfile.mkdtemp(prefix="takes-describe-")
     try:
         # A small copy: Gemini looks at about 1 frame a second, so 480 px and a low bitrate lose nothing.
@@ -9476,7 +9468,7 @@ def tag_broll(path, title, description, keywords):
     """Writes the tags into the clip (stream copy into a new file, then swap). Returns the file."""
     ffmpeg = find_tool("ffmpeg")
     if not ffmpeg:
-        raise ValueError("ffmpeg is not installed. Open Takes and click Finish setup, or run brew install ffmpeg.")
+        raise ValueError("ffmpeg is not installed. Open Cutmark and click Finish setup, or run brew install ffmpeg.")
     d, f = os.path.split(path)
     tmp = os.path.join(d, ".tagging-" + f)  # hidden: list_broll and the tab skip it
     subprocess.run([ffmpeg, "-v", "error", "-y", "-i", path, "-map", "0", "-c", "copy",
@@ -9631,8 +9623,8 @@ WORK_DIR = "_work"
 WORK_KEEP = 5
 CUT_MAX = 200
 CUT_WAIT = 25
-DOWNLOAD_ERROR = ("Takes could not download the speech model. Connect to the internet. "
-                  "Takes tries again at the next cut.")
+DOWNLOAD_ERROR = ("Cutmark could not download the speech model. Connect to the internet. "
+                  "Cutmark tries again at the next cut.")
 MODEL_LABEL = "Getting the speech model (one time, about 500 MB)"
 ENCODERS = {}
 
@@ -9790,16 +9782,16 @@ def prepare_locked(s, n, kind):
     src = voice_file(s, t)
     name = os.path.splitext(t["file"])[0] + ".words.json"
     if not os.path.exists(src):
-        raise PrepareError("Take %d has no file %s. Takes cannot find words in it." % (n, t["file"]))
+        raise PrepareError("Take %d has no file %s. Cutmark cannot find words in it." % (n, t["file"]))
     clock = take_clock(src)
     doc = words_doc(src)
     if doc is None:
-        raise PrepareError("Takes cannot read %s. Takes did not change it. Move it out of the session folder, "
-                           "then try again: Takes finds the words again." % name)
+        raise PrepareError("Cutmark cannot read %s. Cutmark did not change it. Move it out of the session folder, "
+                           "then try again: Cutmark finds the words again." % name)
     if is_ready(doc, clock):
         return "ready"
     if not clock or clock.get("audio_offset_s") is None:
-        raise PrepareError("Take %d has no sound. Takes cannot find words in it." % n)
+        raise PrepareError("Take %d has no sound. Cutmark cannot find words in it." % n)
     before = doc.get("before") if doc.get("v") == 2 else (doc or None)
     m = re.match(r"apple ([a-z]{2})", str((doc if doc.get("v") != 2 else (before or {})).get("source") or ""))
     lang = m.group(1) if m else None
@@ -9825,7 +9817,7 @@ def prepare_locked(s, n, kind):
             # uv stops before the script when it cannot get the packages (offline, a proxy): the same fix.
             if code == 3 or last == DOWNLOAD_ERROR or not started:
                 raise prep_offline(s)
-            raise PrepareError(last or "Takes could not find the words in take %d." % n)
+            raise PrepareError(last or "Cutmark could not find the words in take %d." % n)
         with open(out) as f:
             res = json.load(f)
     words = []
@@ -9904,7 +9896,7 @@ def wav_voiced(path, hop_s, over_db):
 
 def ensure_onsets(s, t):
     """A words file prepared before 2026-10-11 has first words after a pause 0.2 to 1 s early. The first
-    time Takes reads it for a cut, it runs only prepare_take's onsets() pass (no Whisper) on the take's
+    time Cutmark reads it for a cut, it runs only prepare_take's onsets() pass (no Whisper) on the take's
     voice and marks the file "onsets": 1. No voice, or any failure: the file stays as it is."""
     src = voice_file(s, t)
     doc = words_doc(src)
@@ -9978,7 +9970,7 @@ def prepare_run(numbers):
             failed = str(e)
             say(failed)
         except Exception as e:  # the runner never ends on a traceback: the Jobs row shows the last line
-            failed = "Takes could not find the words in take %s: %s" % (n, e)
+            failed = "Cutmark could not find the words in take %s: %s" % (n, e)
             say(failed)
     if failed:
         say(failed)
@@ -10030,7 +10022,7 @@ def check_segments(s, segs):
         src = os.path.join(s, t["file"])
         c = take_clock(src) if os.path.exists(src) else None
         if not c:
-            raise ValueError("Segment %d: take %d has no video file Takes can read (%s)." % (i, t["number"], t["file"]))
+            raise ValueError("Segment %d: take %d has no video file Cutmark can read (%s)." % (i, t["number"], t["file"]))
         dur = c.get("duration") or t.get("duration") or 0
         try:
             a, b = float(g["in"]), float(g["out"])
@@ -10137,7 +10129,7 @@ def start_cut(s, segs, name, extra=None):
             raise
         prune_work(s, name, n)
         return job, n
-    raise ValueError("Takes could not find a free version in %s/. Try again." % WORK_DIR)
+    raise ValueError("Cutmark could not find a free version in %s/. Try again." % WORK_DIR)
 
 
 def cut_view(s, rel):
@@ -10165,7 +10157,7 @@ def cut_result(s, job_id, name, n):
     b = t_get_job({"id": job_id, "session": s, "wait_s": CUT_WAIT})
     if b["status"] in ("starting", "running"):
         return {"status": "running", "job": job_id,
-                "note": "Takes is still working. get_job with wait_s gives the result."}
+                "note": "Cutmark is still working. get_job with wait_s gives the result."}
     if b["status"] != "done":
         raise ValueError("The cut %s: %s" % (b["status"], b.get("error") or "see get_job id=%s." % job_id))
     return cut_view(b["session"], os.path.join(WORK_DIR, "%s-v%d.json" % (name, n)))
@@ -10628,7 +10620,7 @@ def plan_rough(words_by_take, script_text, gap=0.25):
                 x["line"], x["try"] = k, ti
         # Retakes: each line once, from the last try that says most of it (60% of the script words of
         # the best try of that line). The same line in the other tries goes.
-        # A try that stops inside its last line ("Takes is free and", then nothing or "okay so") is no
+        # A try that stops inside its last line ("Cutmark is free and", then nothing or "okay so") is no
         # full try of that line.
         stopped = set()
         for ti, q in enumerate(tries):
@@ -10781,10 +10773,10 @@ def t_rough_cut(a):
         b = t_get_job({"id": job["id"], "session": s, "wait_s": CUT_WAIT})
         if b["status"] in ("starting", "running"):
             return {"status": "running", "job": job["id"],
-                    "note": "Takes is still working. Call get_job with wait_s, then call rough_cut again."}
+                    "note": "Cutmark is still working. Call get_job with wait_s, then call rough_cut again."}
         still = [n for n in takes if not is_ready(words_doc(voice_file(s, voice_take(s, n))))]
         if still:
-            raise ValueError("Takes has no word times for take %d: %s" % (still[0], b.get("error") or "the job %s." % b["status"]))
+            raise ValueError("Cutmark has no word times for take %d: %s" % (still[0], b.get("error") or "the job %s." % b["status"]))
     cuts, words_by_take = read_cuts(s), {}
     for n in takes:
         doc = ensure_onsets(s, voice_take(s, n))
@@ -10800,7 +10792,7 @@ def t_rough_cut(a):
     sp = os.path.join(s, "script.md")
     plan = plan_rough(words_by_take, script_plain(read_text(sp) if os.path.exists(sp) else ""), gap)
     if not plan["cut_list"]:
-        raise ValueError("Takes found no words to keep in take %s." % ", ".join(map(str, takes)))
+        raise ValueError("Cutmark found no words to keep in take %s." % ", ".join(map(str, takes)))
     if len(plan["cut_list"]) > CUT_MAX:
         raise ValueError("The rough cut has %d parts, more than %d. Use a larger gap or fewer takes."
                          % (len(plan["cut_list"]), CUT_MAX))
@@ -10871,7 +10863,7 @@ TRUE_PEAK = -1.0
 LOUDNESS_TARGET = {"normal": -14.0, "quiet": -18.0}
 RENDER_STAGES = {"cut": "Cutting the takes", "steps": "Making the graphics", "picture": "Making the picture",
                  "sound": "Mixing the sound", "check": "Checking the edit"}
-RENDER_DONE = "Ready. Takes checks it before it saves it."
+RENDER_DONE = "Ready. Cutmark checks it before it saves it."
 PRORES = ["-c:v", "prores_ks", "-profile:v", "2", "-pix_fmt", "yuv422p10le"]
 RUN_LOG = None  # the render job's list of every argv it ran (run_ff and render_run add to it)
 LOUD_CACHE = {}  # (path, size, mtime) -> (integrated LUFS, true peak dBTP)
@@ -10889,7 +10881,7 @@ def host_id():
     """A random id of this Mac, saved once: steps of a recipe made on another Mac do not run by themselves."""
     if os.environ.get("TAKES_HOST_ID"):
         return os.environ["TAKES_HOST_ID"]
-    p = os.path.expanduser("~/Library/Application Support/Takes/host-id")
+    p = os.path.expanduser("~/Library/Application Support/Cutmark/host-id")
     try:
         with open(p) as f:
             v = f.read().strip()
@@ -10990,7 +10982,7 @@ def load_recipe(s, rel):
         if not isinstance(r, dict):
             raise ValueError
     except (OSError, ValueError):
-        raise ValueError("Takes cannot read %s. It is left as it is. Fix the file or move it out of the session."
+        raise ValueError("Cutmark cannot read %s. It is left as it is. Fix the file or move it out of the session."
                          % rel)
     return r
 
@@ -11280,7 +11272,7 @@ def take_files(s, r):
 
 
 def fill_recipe(s, r, base=None):
-    """Takes' fields: takes, frame size, voice, style, inputs. warnings: what changed under the base."""
+    """Cutmark' fields: takes, frame size, voice, style, inputs. warnings: what changed under the base."""
     warns = []
     first = None
     takes, keys, chains, srcs = [], {}, {}, []
@@ -11671,8 +11663,8 @@ def render_failed(e):
     elif isinstance(e, OSError) and getattr(e, "errno", None) == 28 or "No space left" in str(e):
         why = "the disk is full"
     else:
-        why = "Takes could not make it (%s)" % str(e)[:100]
-    return "Stopped: %s. Nothing was saved. Ask Takes in the chat to try again." % why
+        why = "Cutmark could not make it (%s)" % str(e)[:100]
+    return "Stopped: %s. Nothing was saved. Ask Cutmark in the chat to try again." % why
 
 
 def lineage_rel(r):
@@ -11771,7 +11763,7 @@ def render_view(s, rid, r):
     mix = r.get("mix") or {}
     if mix.get("lufs") is not None and mix["lufs"] < mix["target"] - 1:
         # No limiter on purpose: a peak holds the whole mix down. A clean voice has its peaks evened out.
-        out["warnings"] = ["The edit is at %g LUFS, not %g: its loudest peaks hold it down (Takes adds no limiter). "
+        out["warnings"] = ["The edit is at %g LUFS, not %g: its loudest peaks hold it down (Cutmark adds no limiter). "
                            "%s" % (mix["lufs"], mix["target"],
                                    "Clean the voice with clean_voice, then render again." if (r.get("voice") or {}).get("source") != "clean"
                                    else "Lower the loudest sound effect, then render again.")]
@@ -11854,7 +11846,7 @@ def start_render(s, r, label, length):
             os.remove(rp)
             raise
         return rid
-    raise ValueError("Takes could not start the render. Try again.")
+    raise ValueError("Cutmark could not start the render. Try again.")
 
 
 def t_render_edit(a):
@@ -12026,7 +12018,7 @@ def video_shape(path):
 
 
 def set_post_media(s, p, rel, cover=None):
-    """A post's media, written by Takes (media_by: takes): publish_edit may move it on later. cover: the
+    """A post's media, written by Cutmark (media_by: takes): publish_edit may move it on later. cover: the
     recipe's cover image, or False to remove it. The text stays."""
     f = post_file(s, p)
     if f is None:
@@ -12217,7 +12209,7 @@ def publish_render(s, a, note):
                 pass
             n = None
     else:
-        raise ValueError("Takes could not find a free version for %s. Try again." % name)
+        raise ValueError("Cutmark could not find a free version for %s. Try again." % name)
     new_rel = os.path.join("edits", "%s-v%d.mp4" % (name, n))
     new_abs = os.path.join(s, new_rel)
     os.utime(new_abs, None)
@@ -12346,7 +12338,7 @@ Every draft run reads this file. Newest lessons go at the top.
 def life_dir():
     if os.environ.get("TAKES_LIFE"):
         return os.environ["TAKES_LIFE"]
-    return os.path.expanduser("~/Documents/Takes Notes")
+    return os.path.expanduser("~/Documents/Cutmark Notes")
 
 
 def comments_dir():
@@ -12838,7 +12830,7 @@ TOOLS = [
      "edited by the user: study these most, declined with reasons, feedback notes, marked best), post URLs and authors "
      "to skip, drafts waiting for a redraft, and the post rules. Call it first on every drafting run.",
      {}, [], t_get_comment_context),
-    ("add_comment_suggestion", "Suggest one LinkedIn comment for the user to review on the Takes Comments board. "
+    ("add_comment_suggestion", "Suggest one LinkedIn comment for the user to review on the Cutmark Comments board. "
      "Never post it yourself. Send 3 variants; each goes through the anti-slop gate: a refusal names the "
      "variants to rewrite; rewrite once or drop the post. One suggestion per post.",
      {"post_url": {"type": "string", "description": "The post's own URL (linkedin.com/feed/update/urn:li:activity:...)."},
@@ -12875,8 +12867,8 @@ TOOLS = [
     ("set_comment_stats", "Save a reading of a posted comment's numbers (about 48 hours after posting).",
      {"id": S, "impressions": {"type": "integer"}, "likes": {"type": "integer"}, "replies": {"type": "integer"}},
      ["id"], t_set_comment_stats),
-    ("list_projects", "List Takes projects and how many sessions each has. Start here.", {}, [], t_list_projects),
-    ("create_project", "Create a project (a folder in the Takes library).", {"name": S}, ["name"], t_create_project),
+    ("list_projects", "List Cutmark projects and how many sessions each has. Start here.", {}, [], t_list_projects),
+    ("create_project", "Create a project (a folder in the Cutmark library).", {"name": S}, ["name"], t_create_project),
     ("list_sessions", "List sessions in a project, newest first, with take and keeper counts.",
      {"project": S}, ["project"], t_list_sessions),
     ("get_session", "Get a session: its id, title, full script, and every take with file path, duration, "
@@ -12887,7 +12879,7 @@ TOOLS = [
      "check_edit state of each newest edit. rules: the rules for the session's next step that this chat has not seen yet; follow them.",
      {"session": SESSION}, ["session"], t_get_session),
     ("create_session", "Create a recording session with a title and the script to read on the teleprompter, "
-     "optionally with variants. Offers it in the Takes app unless open=false (see open_in_app).",
+     "optionally with variants. Offers it in the Cutmark app unless open=false (see open_in_app).",
      {"project": {"type": "string", "description": "Project name. Created if missing. Default Inbox."},
       "title": S, "script": {"type": "string", "description": "Markdown script shown on the teleprompter."},
       "variants": {"type": "array", "items": {"type": "object"}, "description": "Optional [{name, script, note}]."},
@@ -12942,7 +12934,7 @@ TOOLS = [
                       "description": "Optional: every clip or still tried for this shot, in order (paths as for "
                                      "video). The user picks one on the Storyboard tab; video is the one in the video."},
          "image": {"type": "string", "description": "Optional: a sketch you made yourself (PNG or JPG path), "
-                   "used instead of drawing one. For when set_storyboard says Takes has no image key and you "
+                   "used instead of drawing one. For when set_storyboard says Cutmark has no image key and you "
                    "can make images."},
          "redraw": {"type": "boolean"}}}}}, ["session", "shots"], t_set_storyboard),
     ("set_post", "Write the session's post for LinkedIn (default, posts/linkedin.md) or X (platform=x, "
@@ -13039,7 +13031,7 @@ TOOLS = [
                     "description": "Which posts fill a slot. Default [linkedin]."},
       "weeks": {"type": "integer", "description": "How many weeks the Plan board shows, 2 to 12. Default: unchanged."}},
      ["days"], t_set_plan),
-    ("plan_video", "Put a session's video card on a day of the user's Plan board (the calendar in Takes), move "
+    ("plan_video", "Put a session's video card on a day of the user's Plan board (the calendar in Cutmark), move "
      "it to another day, or take it off (day empty). Use it when the user asks you to plan videos; one call per "
      "video. A card shows the session's title and thumbnail; the user drags cards to reorder them. A card covers "
      "that day's posting slot as planned; a post with a time fills it. The board grows to show the card's week. "
@@ -13172,8 +13164,8 @@ TOOLS = [
      ["session"], t_voiceover),
     ("fix_words", "Correct what was said in a take or clip: ElevenLabs says the new words in the voice "
      "(default: The user's default voice, often a clone) with the sentences around them for the same tone, and "
-     "Takes cuts them in at the word edges with the take's cleaned voice when there is one. old = the words "
-     "as said (from the transcript; Takes transcribes the file first when it has no <stem>.words.json), or "
+     "Cutmark cuts them in at the word edges with the take's cleaned voice when there is one. old = the words "
+     "as said (from the transcript; Cutmark transcribes the file first when it has no <stem>.words.json), or "
      "start/end in seconds. Writes generated/<file>-fix-vN.wav, plus an .mp4 with the video when the new "
      "words fit the old time (speed 0.8-1.25x), so the take's times still hold. The lips do not move with "
      "the new words: say so when the fix is on camera.",
@@ -13196,7 +13188,7 @@ TOOLS = [
       "model": {"type": "string", "description": "Default eleven_multilingual_sts_v2."}},
      ["session"], t_change_voice),
     ("higgsfield", "Make or change a video with Higgsfield (Seedance, Kling, Veo and 30+ more video "
-     "models) from inside Takes. Video only: images go to make_image. Returns at once; the job runs in the background and "
+     "models) from inside Cutmark. Video only: images go to make_image. Returns at once; the job runs in the background and "
      "the file lands in <session>/generated/<name>-vN, where the Assets tab shows it. With shot=<id> the "
      "storyboard shot shows 'Generating' and then plays the clip (aspect ratio = the storyboard format, "
      "length = the shot's length, 4-15 s). For a shot, write a real-footage prompt from the shot's do and say "
@@ -13227,10 +13219,10 @@ TOOLS = [
      "Veo, ...) at a price per second of video, no plan. Returns at once; the job runs in the background and the "
      "file lands in <session>/generated/<name>-vN.mp4, where the Assets tab shows it. model: owner/name; leave it "
      "out for the user's default (replicate_status lists the default models, the first is the default; pick another "
-     "of them when it fits better). Takes maps prompt, image (the FIRST FRAME), end_image, video, duration, "
+     "of them when it fits better). Cutmark maps prompt, image (the FIRST FRAME), end_image, video, duration, "
      "aspect_ratio, resolution and audio to the model's own input names; anything else goes in params by the "
      "model's names (call replicate_model first to see its inputs, defaults and allowed values). File inputs, "
-     "in those fields or params, take a session file, a take number or 'sketch' (the shot's sketch); Takes uploads "
+     "in those fields or params, take a session file, a take number or 'sketch' (the shot's sketch); Cutmark uploads "
      "them. With shot=<id> the storyboard shot shows 'Generating' and then plays the clip (aspect ratio = the "
      "storyboard format, length = the shot's length, 4-15 s). For a shot, write a real-footage prompt from the "
      "shot's do and say; never use the sketch as the first frame (the video would look drawn): pass it only to a "
@@ -13479,7 +13471,7 @@ TOOLS = [
      "(picture layers: alpha graphics or b-roll, with at/in/out), music and sfx (file, at, gain_db), steps (commands "
      "that make the layers, run in _edit/<name>/), cover (a thumbnail). Next version: base=<name> and changes (a JSON "
      "merge patch on the newest recipe; a list replaces the whole list; {\"name\": \"hook-vertical\"} starts a new "
-     "line). Takes uses the clean voice once and never uses a finished edit as an input. One render of a name runs "
+     "line). Cutmark uses the clean voice once and never uses a finished edit as an input. One render of a name runs "
      "at a time: to compare two options, give the second a new name. Returns a job; then publish_edit.",
      {"session": SESSION,
       "recipe": {"type": "object", "description": "A whole recipe. For a first version, or to rebuild an edit that "
@@ -13566,14 +13558,14 @@ TOOLS = [
       "thumbnail_prompt": {"type": "string", "description": "A new thumbnail prompt: draws a new version with it."},
       "redraw": {"type": "boolean", "description": "Draw a new version of the thumbnail from its last prompt."}},
      ["id"], t_update_idea),
-    ("open_in_app", "Offer the user a project, session or file (e.g. a new edit) in the Takes app. It never takes "
+    ("open_in_app", "Offer the user a project, session or file (e.g. a new edit) in the Cutmark app. It never takes "
      "focus or plays anything: the session gets a dot and opens only on a click. Once per finished result, not "
      "for drafts or in-between steps.",
      {"path": {"type": "string", "description": "Project name, 'Project/folder', 'Project/folder/edits/x-v2.mp4', or absolute path."}},
      ["path"], t_open_in_app),
-    ("run_job", "Run slow work (a render, Demucs, Whisper, matting, any command over about 30 s) in Takes, "
+    ("run_job", "Run slow work (a render, Demucs, Whisper, matting, any command over about 30 s) in Cutmark, "
      "never as a background Bash job or with sleep. Returns a job id at once. The job outlives the chat and "
-     "Takes, and shows its progress in the session's Jobs row. cmd runs in zsh in the session folder. The "
+     "Cutmark, and shows its progress in the session's Jobs row. cmd runs in zsh in the session folder. The "
      "result's note says how to wait.",
      {"session": SESSION,
       "cmd": {"type": "string", "description": "The shell command. Print 'TAKES_PROGRESS 0.4' lines for a progress bar (ffmpeg and N% lines work too)."},
@@ -13753,8 +13745,8 @@ def dispatch(msg):
         proposed = (msg.get("params") or {}).get("protocolVersion") or PROTOCOL
         v = proposed if proposed == PROTOCOL else PROTOCOL
         return response(id_, {"protocolVersion": v, "capabilities": {"tools": {}},
-                              "serverInfo": {"name": "takes", "version": "0.5"},
-                              "instructions": "Takes is the user's video recorder. Library = projects > sessions > takes. "
+                              "serverInfo": {"name": SERVER_NAME, "version": "0.5"},
+                              "instructions": "Cutmark is the user's local-first video production workspace. Library = projects > sessions > takes. "
                                     "Every tool takes a session's path or its id (get_session); an old path still "
                                     "works after a rename. Cut takes with rough_cut (a first draft: improve it freely) "
                                     "or cut_take by default: they fix the audio offset and frame rate. For what "
@@ -13785,7 +13777,7 @@ def dispatch(msg):
                                     "Slow work (renders, Demucs, Whisper, matting, anything over about 30 s): start it "
                                     "with run_job, never as a background Bash job or with sleep. If it should end within "
                                     "about 2 min, wait with get_job wait_s=50 and go on. Otherwise tell the user in one line "
-                                    "what runs. In the Takes chat, end your turn: Takes sends you a note when "
+                                    "what runs. In the Cutmark chat, end your turn: Cutmark sends you a note when "
                                     "it ends. Elsewhere no note comes: check later with get_job. "
                                     "Videos the user AirDrops from a phone land in ~/Downloads: phone_videos finds them, "
                                     "then import_take with move=true puts each into its session. "
@@ -13863,13 +13855,13 @@ def handle(msg):
 
 
 class MCPHTTPHandler(http.server.BaseHTTPRequestHandler):
-    """Stateless Streamable HTTP in JSON response mode. Takes has no server-to-client requests or
+    """Stateless Streamable HTTP in JSON response mode. Cutmark has no server-to-client requests or
     notifications, so one POST can carry one complete MCP request/response without an SSE session."""
 
-    server_version = "TakesMCP/0.5"
+    server_version = "CutmarkMCP/0.5"
 
     def log_message(self, format_, *args):
-        sys.stderr.write("takes-mcp: " + (format_ % args) + "\n")
+        sys.stderr.write("cutmark-mcp: " + (format_ % args) + "\n")
 
     def cors(self):
         origin = self.headers.get("Origin")
@@ -13913,7 +13905,7 @@ class MCPHTTPHandler(http.server.BaseHTTPRequestHandler):
         if self.reject_origin():
             return
         if self.path == "/":
-            body = b"Takes MCP\n"
+            body = b"Cutmark MCP\n"
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -14005,15 +13997,15 @@ class MCPHTTPHandler(http.server.BaseHTTPRequestHandler):
 
 def http_main(host="127.0.0.1", port=8765, token=None):
     """Serve the same MCP over stateless Streamable HTTP. Default loopback is for MCP Inspector or
-    OpenAI Secure MCP Tunnel. A non-loopback listener requires TAKES_MCP_TOKEN."""
+    OpenAI Secure MCP Tunnel. A non-loopback listener requires CUTMARK_MCP_TOKEN."""
     if host not in ("127.0.0.1", "localhost", "::1") and not token:
-        raise ValueError("TAKES_MCP_TOKEN is required when --http listens beyond localhost")
-    # Several Takes tool helpers keep small process-global caches. Serialize HTTP requests until those
+        raise ValueError("CUTMARK_MCP_TOKEN is required when --http listens beyond localhost")
+    # Several inherited tool helpers keep small process-global caches. Serialize HTTP requests until those
     # caches become request-local so two clients cannot race through one library process.
     server = http.server.HTTPServer((host, port), MCPHTTPHandler)
     server.takes_token = token
     address, actual_port = server.server_address[:2]
-    print("takes-mcp: http://%s:%s/mcp" % (address, actual_port), file=sys.stderr, flush=True)
+    print("cutmark-mcp: http://%s:%s/mcp" % (address, actual_port), file=sys.stderr, flush=True)
     server.serve_forever()
 
 
@@ -14029,9 +14021,9 @@ CORE_TOOLS = {
     # render_edit runs its render as a job and checks it, so run_job and check_edit made room (2026-10-11).
     "open_in_app", "get_job", "cut_take", "rough_cut", "render_edit", "publish_edit",
 }
-CORE_NOTE = (" This agent has Takes' short tool list (for its tool limit): b-roll, voices, AI video, phone videos, script "
+CORE_NOTE = (" This agent has Cutmark's short tool list (for its tool limit): b-roll, voices, AI video, phone videos, script "
              "and post history, changes to the posting plan, styles and performance are not listed. Ask in the "
-             "Takes chat for those.")
+             "Cutmark chat for those.")
 
 
 def core_only():
@@ -14043,11 +14035,12 @@ def shown_tool(name):
 
 
 # ---------- agent setup ----------
-# Takes works with any MCP agent (2026-10-10), not only Claude Code. `takes_mcp.py --setup` adds
-# this server as "takes" to each agent found on this Mac, or points it again at this copy when the
+# Cutmark works with any MCP agent. `cutmark_mcp.py --setup` adds this server as "cutmark" to each
+# agent found on this Mac, or points it again at this copy when the
 # app moved. The app runs `--setup --once` at launch: then an agent gets the server one time only,
-# so a user who removes it keeps it removed (Claude Code always: the Takes chat runs on it).
-# It touches only the "takes" entry. An entry that names no takes_mcp.py, or one that still
+# so a user who removes it keeps it removed (Claude Code always: the Cutmark chat can run on it).
+# It touches only the "cutmark" entry. Existing "takes" entries belong to upstream Takes and are
+# never changed. An entry that names no Cutmark MCP script, or one that still
 # exists, stays as it is: a setup made by hand wins. A config file that is not plain JSON stays too.
 
 # (name, CLI, `mcp add` scope args) for agents with their own `mcp` command.
@@ -14074,13 +14067,13 @@ def agent_entry(name, key, server):
 
 
 def server_scripts(value):
-    """The takes_mcp.py paths an entry (or `mcp get` output) names."""
+    """The Cutmark MCP script paths an entry (or `mcp get` output) names."""
     if isinstance(value, dict):
         return [p for v in value.values() for p in server_scripts(v)]
     if isinstance(value, list):
         return [p for v in value for p in server_scripts(v)]
     if isinstance(value, str):
-        return [w for w in value.split() if w.endswith("takes_mcp.py")]
+        return [w for w in value.split() if w.endswith(("cutmark_mcp.py", "takes_mcp.py"))]
     return []
 
 
@@ -14111,14 +14104,14 @@ def setup_cli(name, cli, scope, server, add):
             return r.returncode == 0, r.stdout + r.stderr
         except (OSError, subprocess.TimeoutExpired) as e:
             return False, str(e)
-    there, out = run("get", "takes")
+    there, out = run("get", SERVER_NAME)
     if there and entry_ok(out):
         return "ok"
     if not there and not add:
         return "left out"
     if there:
-        run("remove", "takes", *scope)
-    ok, out = run("add", "takes", *scope, "--", PYTHON, server)
+        run("remove", SERVER_NAME, *scope)
+    ok, out = run("add", SERVER_NAME, *scope, "--", PYTHON, server)
     if not ok:
         return "failed: " + (out.strip().splitlines() or ["mcp add did not work"])[-1]
     return "updated" if there else "added"
@@ -14140,17 +14133,17 @@ def setup_file(name, paths, key, server, add):
     if servers is not None and not isinstance(servers, dict):
         return "skipped: %s in %s is not a list of servers" % (key, os.path.basename(path))
     servers = servers or {}
-    there = "takes" in servers
-    if there and entry_ok(servers["takes"], name):
+    there = SERVER_NAME in servers
+    if there and entry_ok(servers[SERVER_NAME], name):
         return "ok"
     if not there and not add:
         return "left out"
     if key == "mcp" and not data:
         data["$schema"] = "https://opencode.ai/config.json"
-    servers["takes"] = agent_entry(name, key, server)
+    servers[SERVER_NAME] = agent_entry(name, key, server)
     data[key] = servers
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".takes-tmp"
+    tmp = path + ".cutmark-tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
@@ -14159,8 +14152,8 @@ def setup_file(name, paths, key, server, add):
 
 
 def agents_status(home=None):
-    """Settings › Agents (2026-10-11): each agent Takes knows, whether it is on this Mac, and whether
-    it has the takes server. Reads only; changes nothing."""
+    """Settings › Agents: each agent Cutmark knows, whether it is on this Mac, and whether
+    it has the Cutmark server. Reads only; changes nothing."""
     home = home or os.path.expanduser("~")
     out = []
     for name, cmd, _ in AGENT_CLIS:
@@ -14168,7 +14161,7 @@ def agents_status(home=None):
         connected = False
         if cli:
             try:
-                r = subprocess.run([cli, "mcp", "get", "takes"], capture_output=True, text=True, timeout=30,
+                r = subprocess.run([cli, "mcp", "get", SERVER_NAME], capture_output=True, text=True, timeout=30,
                                    stdin=subprocess.DEVNULL)
                 connected = r.returncode == 0
             except (OSError, subprocess.TimeoutExpired):
@@ -14181,7 +14174,7 @@ def agents_status(home=None):
             try:
                 with open(os.path.join(home, f)) as fh:
                     servers = (json.load(fh) or {}).get(key)
-                connected = isinstance(servers, dict) and "takes" in servers
+                connected = isinstance(servers, dict) and SERVER_NAME in servers
                 break
             except (OSError, ValueError, AttributeError):
                 continue
@@ -14195,7 +14188,7 @@ def setup_agents(server, home=None, once=False, only=None):
     (the Connect button in Settings › Agents)."""
     home = home or os.path.expanduser("~")
     server = os.path.abspath(server)
-    state = os.path.join(home, "Library/Application Support/Takes/agents.json")
+    state = os.path.join(home, "Library/Application Support/Cutmark/agents.json")
     try:
         with open(state) as f:
             done = set(json.load(f))
@@ -14229,7 +14222,7 @@ def main():
         try:
             handle(json.loads(line))
         except Exception as e:
-            sys.stderr.write("takes-mcp: %s\n" % e)
+            sys.stderr.write("cutmark-mcp: %s\n" % e)
 
 
 if __name__ == "__main__":
@@ -14243,7 +14236,7 @@ if __name__ == "__main__":
     elif sys.argv[1:2] == ["--http"]:
         host = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("TAKES_MCP_HOST", "127.0.0.1")
         port = int(sys.argv[3]) if len(sys.argv) > 3 else int(os.environ.get("TAKES_MCP_PORT", "8765"))
-        http_main(host, port, os.environ.get("TAKES_MCP_TOKEN"))
+        http_main(host, port, os.environ.get("CUTMARK_MCP_TOKEN") or os.environ.get("TAKES_MCP_TOKEN"))
     elif sys.argv[1:2] == ["--voice-run"]:
         voice_run(*sys.argv[2:5])
     elif sys.argv[1:2] == ["--take-cut"]:
@@ -14322,7 +14315,7 @@ if __name__ == "__main__":
                 os.remove(sys.argv[3])
             if isinstance(e, SystemExit):
                 raise
-            say("Takes could not cut it: %s" % e)
+            say("Cutmark could not cut it: %s" % e)
             sys.exit(1)
     elif sys.argv[1:2] == ["--render-run"]:  # the render job's command, in the session folder
         os.chdir(sys.argv[2])

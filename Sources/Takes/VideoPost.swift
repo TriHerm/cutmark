@@ -401,7 +401,7 @@ struct VerticalEmpty: View {
                 .foregroundStyle(Theme.faint)
             Text("No vertical edit yet")
                 .font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.ink)
-            Text("Ask Takes for a 9:16 cut.")
+            Text("Ask Cutmark for a 9:16 cut.")
                 .font(.system(size: 12.5)).foregroundStyle(Theme.muted)
         }
         .multilineTextAlignment(.center)

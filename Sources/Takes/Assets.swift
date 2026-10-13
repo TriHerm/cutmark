@@ -805,7 +805,7 @@ struct AssetTile: View, Equatable {
                         HStack(spacing: 4) {
                             if openComments > 0 {
                                 Label("\(openComments)", systemImage: "text.bubble.fill")
-                                    .help("\(openComments) open comment\(openComments == 1 ? "" : "s") for Takes")
+                                    .help("\(openComments) open comment\(openComments == 1 ? "" : "s") for Cutmark")
                             }
                             if !inPost.isEmpty { Text(onPostLabel) }
                             if isCover { Text("Cover") }
@@ -1065,8 +1065,8 @@ struct AssetsEmpty: View {
     @State private var shown = false
 
     private var folders: [(name: String, icon: String, text: String, tint: Color)] {
-        [("edits", "film.stack", "Cut and edited versions from Takes.", Theme.accent),
-         ("thumbnails", "photo.on.rectangle.angled", "Covers for the post, from Takes.", Color(red: 0.55, green: 0.38, blue: 0.95)),
+        [("edits", "film.stack", "Cut and edited versions from Cutmark.", Theme.accent),
+         ("thumbnails", "photo.on.rectangle.angled", "Covers for the post, from Cutmark.", Color(red: 0.55, green: 0.38, blue: 0.95)),
          ("stills", "camera.viewfinder", "Pause a video and press S to keep a frame.", Theme.warn),
          ("assets", "tray.and.arrow.down", "Drop any file on this page.", Theme.live)]
     }
@@ -1075,7 +1075,7 @@ struct AssetsEmpty: View {
         VStack(alignment: .leading, spacing: 26) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Nothing here yet").font(Theme.display(34)).foregroundStyle(Theme.ink)
-                Text("What you and Takes make for this video lands here, sorted by folder.")
+                Text("What you and Cutmark make for this video lands here, sorted by folder.")
                     .font(Theme.sans(14)).foregroundStyle(Theme.muted)
             }
             .arrive(shown)

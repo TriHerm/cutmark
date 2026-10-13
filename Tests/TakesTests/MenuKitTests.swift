@@ -11,7 +11,7 @@ struct MenuKitTests {
             MenuButton("Open", icon: "play") {}
             MenuGroup("Move to project", icon: "folder") {
                 MenuButton("Inbox") {}
-                MenuButton("Takes Launch", checked: true) {}
+                MenuButton("Cutmark Launch", checked: true) {}
             }
             MenuButton("Disabled", enabled: false) {}
             MenuDivider()
@@ -86,7 +86,7 @@ struct MenuKitTests {
                         MenuView("look") { LookPicker() }
                         MenuDivider()
                         MenuButton("Reveal library in Finder", icon: "folder") {}
-                        MenuButton("About Takes", icon: "info.circle") {}
+                        MenuButton("About Cutmark", icon: "info.circle") {}
                     }
                     return b()
                 }, state: logo, width: 264)

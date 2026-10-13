@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">
+  <rect width="1200" height="800" rx="72" fill="#0B0C10"/>
+  <rect x="76" y="76" width="1048" height="648" rx="44" fill="#11131A" stroke="#2A2E3A" stroke-width="2"/>
+  <path d="M216 212h256v76H292v180h-76z" fill="#F7F4EC"/>
+  <path d="M984 588H728v-76h180V332h76z" fill="#F7F4EC"/>
+  <path d="M385 610L814 190" stroke="#FF8A3D" stroke-width="34" stroke-linecap="round"/>
+  <circle cx="600" cy="400" r="98" fill="#0B0C10" stroke="#F7F4EC" stroke-width="18"/>
+  <path d="M560 400h80" stroke="#FF8A3D" stroke-width="16" stroke-linecap="round"/>
+  <text x="600" y="676" text-anchor="middle" fill="#F7F4EC" font-family="-apple-system, BlinkMacSystemFont, Inter, sans-serif" font-size="42" font-weight="600" letter-spacing="7">CUTMARK</text>
+</svg>

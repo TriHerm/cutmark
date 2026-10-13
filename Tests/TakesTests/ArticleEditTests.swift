@@ -16,10 +16,10 @@ import WebKit
     func page(_ md: String) async throws -> (WKWebView, Inbox) {
         let config = WKWebViewConfiguration()
         let inbox = Inbox()
-        config.setURLSchemeHandler(SessionFiles(), forURLScheme: "takes")
+        config.setURLSchemeHandler(SessionFiles(), forURLScheme: "cutmark")
         for n in ArticleView.Coordinator.messages { config.userContentController.add(inbox, name: n) }
         let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 1200), configuration: config)
-        web.loadHTMLString(ArticlePage.html, baseURL: URL(string: "takes://session/"))
+        web.loadHTMLString(ArticlePage.html, baseURL: URL(string: "cutmark://session/"))
         for _ in 0..<40 where !inbox.got.contains(where: { $0.0 == "ready" }) { try await Task.sleep(for: .milliseconds(100)) }
         _ = try await web.evaluateJavaScript("takes.render(\(ArticleView.Coordinator.blocks(md)), {}); 1")
         return (web, inbox)
