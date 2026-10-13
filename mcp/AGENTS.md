@@ -5,7 +5,7 @@ Read the root `AGENTS.md` first. This file adds what is true only in `mcp/`.
 ## The file
 
 `takes_mcp.py` is the source of the whole server: one Python file, standard library only, no
-packages. Keep it that way: the app packages it as `cutmark_mcp.py` and runs it with
+packages. Keep it that way: the app packages it as cutmark_mcp.py and runs it with
 `/usr/bin/python3` (`AgentSetup.swift`).
 `clean_voice.py` and `prepare_take.py` (word times with faster-whisper) are separate because they
 need packages: they run through `uv`, with ffmpeg.

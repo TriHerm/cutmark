@@ -23,7 +23,7 @@ is for agents that work on the Cutmark code.
 | Path | What |
 |---|---|
 | `Sources/Takes/` | The Mac app: SwiftUI, AVFoundation, ScreenCaptureKit. A Swift package, no Xcode project. |
-| `mcp/takes_mcp.py` | Source of the `cutmark` MCP server (packaged as `cutmark_mcp.py`): one Python file, standard library only. |
+| `mcp/takes_mcp.py` | Source of the `cutmark` MCP server (packaged as cutmark_mcp.py): one Python file, standard library only. |
 | `mcp/clean_voice.py`, `mcp/prepare_take.py` | Clean voice and word times for a take. They need packages, so they run through `uv`. |
 | `<session>/_work/` | Clips from `cut_take` and `rough_cut` (working files, hidden on the Assets tab). |
 | `<session>/_edit/` | An edit's sources (`_edit/<name>/`) and `render_edit`'s renders (`_edit/renders/`), hidden on the Assets tab. Each version's recipe sits beside it: `edits/<name>-vN.recipe.json` (`EditRecipe.swift`). |
