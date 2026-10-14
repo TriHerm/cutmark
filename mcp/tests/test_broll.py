@@ -5,13 +5,13 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 
 class Broll(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         self.lib = os.path.join(self.root, "_library", "broll")
         for folder, name in (("1 Desk work", "2023-11 Top View Typing (V).mov"),
                              ("3 Reactions", "2024-11 Skeptical Look (H).mp4"),
@@ -23,7 +23,7 @@ class Broll(unittest.TestCase):
         t.write_meta(self.s, {"title": "Idea", "createdAt": "2026-10-03T00:00:00Z", "named": True, "takes": []})
 
     def tearDown(self):
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
 
     def test_list_and_filter(self):
         clips = t.t_list_broll({})["clips"]

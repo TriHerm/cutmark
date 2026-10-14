@@ -1,5 +1,5 @@
 """The model browser's sheet (2026-10-09): Replicate prices from the model page, Higgsfield credits from
-`generate cost`, settings and inputs in Takes' words, and the user's own clip times. Stand-ins answer."""
+`generate cost`, settings and inputs in Cutmark' words, and the user's own clip times. Stand-ins answer."""
 import json
 import os
 import sys
@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 SCHEMA = {"components": {"schemas": {"Input": {"type": "object", "properties": {
     "prompt": {"type": "string"},
@@ -26,8 +26,8 @@ PAGE = ('<script>{"x": 1, "billingConfig": {"current_tiers": ['
 class Details(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
-        os.environ["TAKES_NO_KEYCHAIN"] = "1"
+        os.environ["CUTMARK_ROOT"] = self.root
+        os.environ["CUTMARK_NO_KEYCHAIN"] = "1"
         os.environ["REPLICATE_API_TOKEN"] = "r8_" + "x" * 37
         self.saved = t.rep_http, None, t.hf_call
         self.calls = []
@@ -43,7 +43,7 @@ class Details(unittest.TestCase):
 
     def tearDown(self):
         t.rep_http, t.hf_call = self.saved[0], self.saved[2]
-        for k in ("TAKES_ROOT", "TAKES_NO_KEYCHAIN", "REPLICATE_API_TOKEN"):
+        for k in ("CUTMARK_ROOT", "CUTMARK_NO_KEYCHAIN", "REPLICATE_API_TOKEN"):
             os.environ.pop(k, None)
 
     def job(self, s, name, **j):

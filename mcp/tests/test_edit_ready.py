@@ -1,6 +1,6 @@
 """Edit-ready takes (2026-10-11): the video clock for every voice WAV, prepared word times, a stable
 session id with old paths, cut_take and rough_cut. Media made with ffmpeg in a temp library; the
-speech model is a stand-in (TAKES_PREP_CMD): no network, no model, no money."""
+speech model is a stand-in (CUTMARK_PREP_CMD): no network, no model, no money."""
 import array
 import importlib.util
 import json
@@ -18,27 +18,27 @@ import unittest
 import wave
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
-SERVER = os.path.join(os.path.dirname(__file__), "..", "takes_mcp.py")
+SERVER = os.path.join(os.path.dirname(__file__), "..", "cutmark_mcp.py")
 # Other test files replace these in their setUp and keep them replaced: take the real ones now.
 REAL = {n: getattr(t, n) for n in ("spawn_detached", "start_job", "start_prepare", "trash", "model_cached",
                                    "take_clock", "ff")}
 
-# Stands in for prepare_take.py: words from TAKES_TEST_WORDS (a JSON file), a log line per run.
+# Stands in for prepare_take.py: words from CUTMARK_TEST_WORDS (a JSON file), a log line per run.
 FAKE = r'''
 import json, os, sys, time
 wav, out = sys.argv[1], sys.argv[2]
-log = os.environ.get("TAKES_TEST_LOG")
+log = os.environ.get("CUTMARK_TEST_LOG")
 if log:
     open(log, "a").write("start %f %s\n" % (time.time(), " ".join(sys.argv[3:])))
-print("TAKES_PROGRESS 0.5", flush=True)
-time.sleep(float(os.environ.get("TAKES_TEST_SLEEP") or 0))
-if os.environ.get("TAKES_TEST_FAIL"):
-    print(os.environ["TAKES_TEST_FAIL"], flush=True)
-    sys.exit(int(os.environ.get("TAKES_TEST_CODE") or 1))
-words = json.load(open(os.environ["TAKES_TEST_WORDS"])) if os.environ.get("TAKES_TEST_WORDS") else []
+print("CUTMARK_PROGRESS 0.5", flush=True)
+time.sleep(float(os.environ.get("CUTMARK_TEST_SLEEP") or 0))
+if os.environ.get("CUTMARK_TEST_FAIL"):
+    print(os.environ["CUTMARK_TEST_FAIL"], flush=True)
+    sys.exit(int(os.environ.get("CUTMARK_TEST_CODE") or 1))
+words = json.load(open(os.environ["CUTMARK_TEST_WORDS"])) if os.environ.get("CUTMARK_TEST_WORDS") else []
 json.dump({"language": "en", "words": words, "sounds": [[9.0, 9.2]]}, open(out, "w"))
 if log:
     open(log, "a").write("end %f\n" % time.time())
@@ -93,10 +93,10 @@ def beep_times(media):
 class Base(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
-        os.environ["TAKES_JOB_TIMEOUT"] = "120"
-        for k in ("TAKES_CHAT", "TAKES_BOARD", "TAKES_TEST_SLEEP", "TAKES_TEST_FAIL", "TAKES_TEST_CODE",
-                  "TAKES_TEST_LOG", "TAKES_TEST_WORDS"):
+        os.environ["CUTMARK_ROOT"] = self.root
+        os.environ["CUTMARK_JOB_TIMEOUT"] = "120"
+        for k in ("CUTMARK_CHAT", "CUTMARK_BOARD", "CUTMARK_TEST_SLEEP", "CUTMARK_TEST_FAIL", "CUTMARK_TEST_CODE",
+                  "CUTMARK_TEST_LOG", "CUTMARK_TEST_WORDS"):
             os.environ.pop(k, None)
         for k, v in REAL.items():
             setattr(t, k, v)
@@ -106,7 +106,7 @@ class Base(unittest.TestCase):
         fake = os.path.join(self.root, ".fake_prepare.py")
         with open(fake, "w") as f:
             f.write(FAKE)
-        os.environ["TAKES_PREP_CMD"] = json.dumps([sys.executable, fake])
+        os.environ["CUTMARK_PREP_CMD"] = json.dumps([sys.executable, fake])
         self.s = self.session("2026-10-11-demo")
 
     def tearDown(self):
@@ -120,8 +120,8 @@ class Base(unittest.TestCase):
                     except OSError:
                         pass
         shutil.rmtree(self.root, ignore_errors=True)
-        for k in ("TAKES_ROOT", "TAKES_JOB_TIMEOUT", "TAKES_PREP_CMD", "TAKES_TEST_SLEEP", "TAKES_TEST_FAIL",
-                  "TAKES_TEST_CODE", "TAKES_TEST_LOG", "TAKES_TEST_WORDS"):
+        for k in ("CUTMARK_ROOT", "CUTMARK_JOB_TIMEOUT", "CUTMARK_PREP_CMD", "CUTMARK_TEST_SLEEP", "CUTMARK_TEST_FAIL",
+                  "CUTMARK_TEST_CODE", "CUTMARK_TEST_LOG", "CUTMARK_TEST_WORDS"):
             os.environ.pop(k, None)
 
     def session(self, name, project="Proj", created="2026-10-11T00:00:00Z", takes=()):
@@ -143,7 +143,7 @@ class Base(unittest.TestCase):
         p = os.path.join(self.root, ".words-%d.json" % len(os.listdir(self.root)))
         with open(p, "w") as f:
             json.dump(words, f)
-        os.environ["TAKES_TEST_WORDS"] = p
+        os.environ["CUTMARK_TEST_WORDS"] = p
 
     def doc(self, f):
         with open(os.path.join(self.s, os.path.splitext(f)[0] + ".words.json")) as fh:
@@ -206,11 +206,11 @@ json.dump({"steps": [], "diagnosis": {}}, open(out[:-4] + ".report.json", "w"))
         f = self.add_take(secs=3)
         fake = os.path.join(self.root, "voice.py")
         open(fake, "w").write(self.FAKE_VOICE)
-        os.environ["TAKES_VOICE_CMD"] = json.dumps([sys.executable, fake])
+        os.environ["CUTMARK_VOICE_CMD"] = json.dumps([sys.executable, fake])
         try:
             t.voice_run(self.s, "1", "camera")
         finally:
-            os.environ.pop("TAKES_VOICE_CMD")
+            os.environ.pop("CUTMARK_VOICE_CMD")
         v = t.read_voice(self.s, "take-01-camera")
         self.assertEqual((v["state"], v["clock"]), ("done", "video"), v.get("error"))
         inputs = open(fake + ".inputs").read().split()
@@ -276,7 +276,7 @@ class Prepare(Base):
         self.apple(f)
         self.words(self.WORDS)
         log = os.path.join(self.root, "log")
-        os.environ["TAKES_TEST_LOG"] = log
+        os.environ["CUTMARK_TEST_LOG"] = log
         self.assertEqual(t.prepare_take(self.s, 1), "done")
         d = self.doc(f)
         self.assertEqual((d["v"], d["clock"]), (2, "video"))
@@ -291,7 +291,7 @@ class Prepare(Base):
         self.apple(f)
         self.words(self.WORDS)
         log = os.path.join(self.root, "log")
-        os.environ["TAKES_TEST_LOG"] = log
+        os.environ["CUTMARK_TEST_LOG"] = log
         t.prepare_take(self.s, 1)
         self.assertEqual(t.prepare_take(self.s, 1), "ready")
         self.assertEqual(open(log).read().count("start"), 1)
@@ -305,7 +305,7 @@ class Prepare(Base):
     def test_apple_words_written_during_whisper_go_under_before(self):
         self.add_take()
         self.words(self.WORDS)
-        os.environ["TAKES_TEST_SLEEP"] = "1.0"
+        os.environ["CUTMARK_TEST_SLEEP"] = "1.0"
         th = threading.Thread(target=t.prepare_take, args=(self.s, 1))
         th.start()
         time.sleep(0.6)
@@ -338,7 +338,7 @@ class Prepare(Base):
     def test_prepare_follows_take_rename(self):
         self.add_take()
         self.words(self.WORDS)
-        os.environ["TAKES_TEST_SLEEP"] = "1.5"
+        os.environ["CUTMARK_TEST_SLEEP"] = "1.5"
         th = threading.Thread(target=t.prepare_take, args=(self.s, 1))
         th.start()
         time.sleep(0.8)
@@ -352,7 +352,7 @@ class Prepare(Base):
         self.add_take(2)
         self.words(self.WORDS)
         log = os.path.join(self.root, "log")
-        env = dict(os.environ, TAKES_TEST_LOG=log, TAKES_TEST_SLEEP="0.6")
+        env = dict(os.environ, CUTMARK_TEST_LOG=log, CUTMARK_TEST_SLEEP="0.6")
         procs = [subprocess.Popen([sys.executable, SERVER, "--prepare-run", self.s, str(n)], cwd=self.s,
                                   env=dict(env, TMPDIR=tempfile.mkdtemp()), stdout=subprocess.PIPE, text=True)
                  for n in (1, 2)]
@@ -403,7 +403,7 @@ class Prepare(Base):
         marker = os.path.join(self.root, ".recording")
         try:
             p = subprocess.Popen([sys.executable, SERVER, "--prepare-run", self.s, "1"], cwd=self.s,
-                                 stdout=subprocess.PIPE, text=True, env=dict(os.environ, TAKES_TEST_LOG=log))
+                                 stdout=subprocess.PIPE, text=True, env=dict(os.environ, CUTMARK_TEST_LOG=log))
             time.sleep(1.0)
             open(marker, "w").write(str(rec.pid))
             os.close(fd)  # the other take ends
@@ -420,9 +420,9 @@ class Prepare(Base):
             rec.kill()
 
     def test_uv_without_network_is_the_download_error(self):
-        # uv stops before prepare_take.py runs (no TAKES_PROGRESS line): offline, one plain error.
+        # uv stops before prepare_take.py runs (no CUTMARK_PROGRESS line): offline, one plain error.
         self.add_take()
-        os.environ["TAKES_PREP_CMD"] = json.dumps([sys.executable, "-c", (
+        os.environ["CUTMARK_PREP_CMD"] = json.dumps([sys.executable, "-c", (
             "print('hint: Packages were unavailable because the network was disabled.'); raise SystemExit(1)")])
         with self.assertRaises(t.PrepareError) as e:
             t.prepare_take(self.s, 1)
@@ -435,8 +435,8 @@ class Prepare(Base):
         self.assertEqual(started, [])
         # A failure inside the script is its own reason, not the download error.
         os.remove(os.path.join(self.root, ".prepare-offline"))
-        os.environ["TAKES_PREP_CMD"] = json.dumps([sys.executable, "-c", (
-            "print('TAKES_PROGRESS 0'); print('prepare_take.py needs a 16-bit WAV.'); raise SystemExit(1)")])
+        os.environ["CUTMARK_PREP_CMD"] = json.dumps([sys.executable, "-c", (
+            "print('CUTMARK_PROGRESS 0'); print('prepare_take.py needs a 16-bit WAV.'); raise SystemExit(1)")])
         with self.assertRaises(t.PrepareError) as e:
             t.prepare_take(self.s, 1)
         self.assertEqual(str(e.exception), "prepare_take.py needs a 16-bit WAV.")
@@ -472,8 +472,8 @@ class Prepare(Base):
 
     def test_download_error_and_offline_marker(self):
         self.add_take()
-        os.environ["TAKES_TEST_FAIL"] = t.DOWNLOAD_ERROR
-        os.environ["TAKES_TEST_CODE"] = "3"
+        os.environ["CUTMARK_TEST_FAIL"] = t.DOWNLOAD_ERROR
+        os.environ["CUTMARK_TEST_CODE"] = "3"
         with self.assertRaises(t.PrepareError) as e:
             t.prepare_take(self.s, 1)
         self.assertEqual(str(e.exception), "Cutmark could not download the speech model. Connect to the internet. "
@@ -482,12 +482,12 @@ class Prepare(Base):
 
     def test_prepare_job_progress_and_reason(self):
         self.add_take()
-        os.environ["TAKES_TEST_FAIL"] = "Take 1 has no sound. Takes cannot find words in it."
+        os.environ["CUTMARK_TEST_FAIL"] = "Take 1 has no sound. Cutmark cannot find words in it."
         t.model_cached = lambda model=None: True
         job = t.start_prepare(self.s, [1])
         b = t.t_get_job({"id": job["id"], "session": self.s, "wait_s": 30})
         self.assertEqual(b["status"], "failed")
-        self.assertEqual(b["error"], "Take 1 has no sound. Takes cannot find words in it.")
+        self.assertEqual(b["error"], "Take 1 has no sound. Cutmark cannot find words in it.")
         self.assertEqual(b["label"], "Finding words in take 1")
         g = t.t_get_session({"session": self.s})["takes"][0]
         self.assertEqual((g["edit_ready"], g["prepare_error"]), (False, b["error"]))
@@ -865,7 +865,7 @@ class Cuts(Base):
     def test_cut_take_running_shape(self):
         t.CUT_WAIT, wait = 0, t.CUT_WAIT
         try:
-            os.environ["TAKES_TEST_SLEEP"] = "2"
+            os.environ["CUTMARK_TEST_SLEEP"] = "2"
             os.remove(os.path.join(self.s, "take-01-camera.words.json")) if os.path.exists(
                 os.path.join(self.s, "take-01-camera.words.json")) else None
             r = t.t_cut_take({"session": self.s, "segments": [{"take": 1, "in": 0.5, "out": 1.5}]})
@@ -914,7 +914,7 @@ class Cuts(Base):
 
     def test_rough_cut_running_shape(self):
         t.CUT_WAIT, wait = 0, t.CUT_WAIT
-        os.environ["TAKES_TEST_SLEEP"] = "3"
+        os.environ["CUTMARK_TEST_SLEEP"] = "3"
         try:
             r = t.t_rough_cut({"session": self.s})
         finally:
@@ -943,11 +943,11 @@ class PlanRough(unittest.TestCase):
         return [c["text"] for c in plan["cut_list"]]
 
     def test_false_start_dropped(self):
-        script = "Takes is free and open source. The link is in the comments."
-        words = say_words("Takes is free and open source the link is the link is in the comments",
+        script = "Cutmark is free and open source. The link is in the comments."
+        words = say_words("Cutmark is free and open source the link is the link is in the comments",
                           pause_at=(9,))
         p = t.plan_rough({1: {"words": words}}, script)
-        self.assertEqual(p["kept_text"], "Takes is free and open source the link is in the comments")
+        self.assertEqual(p["kept_text"], "Cutmark is free and open source the link is in the comments")
         self.assertEqual([(d["text"], d["why"]) for d in p["dropped"]], [("the link is", "retake")])
         self.assertEqual(p["missing"], [])
 
@@ -1018,18 +1018,18 @@ class PlanRough(unittest.TestCase):
         self.assertEqual(p["dropped"], [])
 
     def test_an_um_does_not_make_an_orphan(self):
-        script = "Takes is free and open source."
-        words = say_words("Takes is um free and open source")
+        script = "Cutmark is free and open source."
+        words = say_words("Cutmark is um free and open source")
         words[2]["filler"] = True
         p = t.plan_rough({1: {"words": words}}, script)
-        self.assertEqual(p["kept_text"], "Takes is free and open source")
+        self.assertEqual(p["kept_text"], "Cutmark is free and open source")
 
     def test_a_later_try_that_stops_does_not_win(self):
-        script = "Takes is free and open source. The link is in the comments."
-        words = say_words("Takes is free and open source Takes is free and", pause_at=(6,))
+        script = "Cutmark is free and open source. The link is in the comments."
+        words = say_words("Cutmark is free and open source Cutmark is free and", pause_at=(6,))
         p = t.plan_rough({1: {"words": words}}, script)
-        self.assertEqual(p["kept_text"], "Takes is free and open source")
-        self.assertEqual([(d["text"], d["why"]) for d in p["dropped"]], [("Takes is free and", "retake")])
+        self.assertEqual(p["kept_text"], "Cutmark is free and open source")
+        self.assertEqual([(d["text"], d["why"]) for d in p["dropped"]], [("Cutmark is free and", "retake")])
 
     def test_repeated_two_word_phrase_not_a_retake(self):
         script = "I came and the dog ran. You left and the cat sat."
@@ -1062,10 +1062,10 @@ class PlanRough(unittest.TestCase):
         self.assertEqual(p["missing"], [{"text": "Second line here now.", "said_in": [2]}])
 
     def test_offscript_words_kept(self):
-        script = "Takes is free. It is open source."
-        words = say_words("Takes is free by the way it is open source", pause_at=(3, 6))
+        script = "Cutmark is free. It is open source."
+        words = say_words("Cutmark is free by the way it is open source", pause_at=(3, 6))
         p = t.plan_rough({1: {"words": words}}, script)
-        self.assertEqual(p["kept_text"], "Takes is free by the way it is open source")
+        self.assertEqual(p["kept_text"], "Cutmark is free by the way it is open source")
 
     def test_no_script_repeat_detection(self):
         words = say_words("this is the start this is the start of it", pause_at=(4,))

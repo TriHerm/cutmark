@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 FFPROBE = shutil.which("ffprobe") or "/opt/homebrew/bin/ffprobe"
@@ -34,7 +34,7 @@ def volume(path):
 class Voice(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         self.s = os.path.join(self.root, "Proj", "2026-09-29-voice")
         os.makedirs(self.s)
         subprocess.run([FFMPEG, "-v", "error", "-f", "lavfi", "-i", "sine=f=220:d=2", "-f", "lavfi",
@@ -45,12 +45,12 @@ class Voice(unittest.TestCase):
                                          "startedAt": "2026-09-29T00:00:00Z", "duration": 2}]})
         fake = os.path.join(self.root, "fake.py")
         open(fake, "w").write(FAKE)
-        os.environ["TAKES_VOICE_CMD"] = json.dumps([sys.executable, fake])
+        os.environ["CUTMARK_VOICE_CMD"] = json.dumps([sys.executable, fake])
         self.f = t.voice_files(self.s, "take-01-camera")
 
     def tearDown(self):
         shutil.rmtree(self.root)
-        for k in ("TAKES_ROOT", "TAKES_VOICE_CMD"):
+        for k in ("CUTMARK_ROOT", "CUTMARK_VOICE_CMD"):
             os.environ.pop(k, None)
 
     def test_run_mix_and_settings(self):
@@ -91,7 +91,7 @@ class Voice(unittest.TestCase):
         self.assertEqual(v["strength"], 0.7)
 
     def test_failure_is_reported(self):
-        os.environ["TAKES_VOICE_CMD"] = json.dumps([sys.executable, "-c", "import sys; sys.exit('no model')"])
+        os.environ["CUTMARK_VOICE_CMD"] = json.dumps([sys.executable, "-c", "import sys; sys.exit('no model')"])
         t.voice_run(self.s, "1", "camera")
         v = t.read_voice(self.s, "take-01-camera")
         self.assertEqual(v["state"], "failed")
@@ -107,15 +107,15 @@ class Voice(unittest.TestCase):
 
 
     def test_script_ships_with_the_server(self):
-        # The public copy has no skill folder: the script next to takes_mcp.py must be there.
+        # The public copy has no skill folder: the script next to cutmark_mcp.py must be there.
         here = os.path.dirname(os.path.abspath(t.__file__))
         self.assertTrue(os.path.exists(os.path.join(here, "clean_voice.py")))
-        old = os.environ.pop("TAKES_VOICE_SCRIPT", None)
+        old = os.environ.pop("CUTMARK_VOICE_SCRIPT", None)
         try:
             self.assertTrue(os.path.exists(t.voice_script()))
         finally:
             if old is not None:
-                os.environ["TAKES_VOICE_SCRIPT"] = old
+                os.environ["CUTMARK_VOICE_SCRIPT"] = old
 
 
 if __name__ == "__main__":

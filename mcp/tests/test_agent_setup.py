@@ -1,4 +1,4 @@
-"""--setup: the Cutmark server in every MCP agent on the Mac without replacing upstream Takes."""
+"""--setup: the Cutmark server in every MCP agent on the Mac without replacing other registrations."""
 import json
 import os
 import shutil
@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 
 class AgentSetup(unittest.TestCase):
@@ -46,19 +46,11 @@ class AgentSetup(unittest.TestCase):
         cursor = self.read(".cursor/mcp.json")
         self.assertEqual(list(cursor), ["mcpServers", "z", "a"])
         self.assertEqual(list(cursor["mcpServers"]), ["Pipedream", "cutmark"])
-        self.assertEqual(cursor["mcpServers"]["cutmark"], {"command": "/usr/bin/python3", "args": [self.server], "env": {"TAKES_TOOLS": "core"}})
+        self.assertEqual(cursor["mcpServers"]["cutmark"], {"command": "/usr/bin/python3", "args": [self.server], "env": {"CUTMARK_TOOLS": "core"}})
         self.assertEqual(self.read(".pi/agent/mcp.json")["mcpServers"]["cutmark"]["args"], [self.server])
         oc = self.read(".config/opencode/opencode.json")
         self.assertEqual(oc["mcp"]["cutmark"], {"type": "local", "command": ["/usr/bin/python3", self.server], "enabled": True})
         self.assertIn("$schema", oc)
-
-    def test_keeps_an_existing_takes_server_when_cutmark_is_added(self):
-        takes = {"command": "/usr/bin/python3", "args": ["/Applications/Takes.app/Contents/Resources/takes_mcp.py"]}
-        self.write(".cursor/mcp.json", json.dumps({"mcpServers": {"takes": takes}}))
-        self.assertEqual(self.run_setup(), {"Cursor": "added"})
-        servers = self.read(".cursor/mcp.json")["mcpServers"]
-        self.assertEqual(servers["takes"], takes)
-        self.assertEqual(servers["cutmark"]["args"], [self.server])
 
     def test_agents_not_on_the_mac_are_not_touched(self):
         self.assertEqual(self.run_setup(), {})
@@ -97,9 +89,9 @@ class AgentSetup(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.home, ".cursor/mcp.json")))
 
     def test_a_codex_chat_names_its_own_rules_file(self):
-        saved = {k: os.environ.pop(k, None) for k in ("TAKES_CHAT_ID", "CLAUDE_CODE_SESSION_ID")}
+        saved = {k: os.environ.pop(k, None) for k in ("CUTMARK_CHAT_ID", "CLAUDE_CODE_SESSION_ID")}
         try:
-            os.environ["TAKES_CHAT_ID"] = "chat-codex-0001"
+            os.environ["CUTMARK_CHAT_ID"] = "chat-codex-0001"
             os.environ["CLAUDE_CODE_SESSION_ID"] = "chat-claude-0001"
             self.assertEqual(t.chat_id(), "chat-codex-0001")
         finally:
@@ -132,8 +124,8 @@ class AgentSetup(unittest.TestCase):
     def test_cursor_gets_the_short_tool_list_and_a_choice_of_all_stays(self):
         self.write(".cursor/mcp.json", json.dumps({"mcpServers": {"cutmark": {"command": "/usr/bin/python3", "args": [self.server]}}}))
         self.assertEqual(self.run_setup(once=True), {"Cursor": "updated"})
-        self.assertEqual(self.read(".cursor/mcp.json")["mcpServers"]["cutmark"]["env"], {"TAKES_TOOLS": "core"})
-        self.write(".cursor/mcp.json", json.dumps({"mcpServers": {"cutmark": {"command": "/usr/bin/python3", "args": [self.server], "env": {"TAKES_TOOLS": "all"}}}}))
+        self.assertEqual(self.read(".cursor/mcp.json")["mcpServers"]["cutmark"]["env"], {"CUTMARK_TOOLS": "core"})
+        self.write(".cursor/mcp.json", json.dumps({"mcpServers": {"cutmark": {"command": "/usr/bin/python3", "args": [self.server], "env": {"CUTMARK_TOOLS": "all"}}}}))
         self.assertEqual(self.run_setup(once=True), {"Cursor": "ok"})
 
     def test_antigravity_gets_its_global_config(self):
@@ -145,11 +137,11 @@ class AgentSetup(unittest.TestCase):
         names = {n for n, *_ in t.TOOLS}
         self.assertLessEqual(t.CORE_TOOLS, names)
         self.assertLessEqual(len(t.CORE_TOOLS), 30)
-        os.environ["TAKES_TOOLS"] = "core"
+        os.environ["CUTMARK_TOOLS"] = "core"
         try:
             self.assertEqual({n for n in names if t.shown_tool(n)}, t.CORE_TOOLS)
         finally:
-            os.environ.pop("TAKES_TOOLS")
+            os.environ.pop("CUTMARK_TOOLS")
         self.assertTrue(all(t.shown_tool(n) for n in names))
 
 

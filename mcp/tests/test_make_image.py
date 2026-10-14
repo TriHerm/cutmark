@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 # A stand-in for the OpenAI call: records out, prompt and inputs, writes a PNG, or fails.
 FAKE = r"""
@@ -23,14 +23,14 @@ open(sys.argv[1], "wb").write(b"\x89PNG fake")
 class MakeImage(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         os.environ["IMG_FAKE_DIR"] = self.root
         self.s = os.path.join(self.root, "Proj", "2026-10-06-idea")
         os.makedirs(os.path.join(self.s, "thumbnails"))
         t.write_meta(self.s, {"title": "Idea", "createdAt": "2026-10-06T00:00:00Z", "named": True, "takes": []})
         fake = os.path.join(self.root, "fake_img.py")
         open(fake, "w").write(FAKE)
-        os.environ["TAKES_IMAGE_CMD"] = json.dumps([sys.executable, fake])
+        os.environ["CUTMARK_IMAGE_CMD"] = json.dumps([sys.executable, fake])
         # Gemini stand-in: records (model, out) and writes the file.
         self.gemini = []
         self.real_gemini = t.draw_gemini
@@ -42,7 +42,7 @@ class MakeImage(unittest.TestCase):
 
     def tearDown(self):
         t.draw_gemini = self.real_gemini
-        for k in ("TAKES_ROOT", "TAKES_IMAGE_CMD", "IMG_FAKE_DIR"):
+        for k in ("CUTMARK_ROOT", "CUTMARK_IMAGE_CMD", "IMG_FAKE_DIR"):
             os.environ.pop(k, None)
 
     def args(self):
@@ -70,12 +70,12 @@ class MakeImage(unittest.TestCase):
             t.t_make_image({"session": self.s, "prompt": "x", "images": ["sketch"]})
 
     def test_higgsfield_refuses_images(self):
-        os.environ["TAKES_HIGGSFIELD_CMD"] = json.dumps([sys.executable, "-c", "pass"])
+        os.environ["CUTMARK_HIGGSFIELD_CMD"] = json.dumps([sys.executable, "-c", "pass"])
         try:
             with self.assertRaisesRegex(ValueError, "make_image"):
                 t.t_higgsfield({"session": self.s, "prompt": "a cat", "kind": "image"})
         finally:
-            os.environ.pop("TAKES_HIGGSFIELD_CMD")
+            os.environ.pop("CUTMARK_HIGGSFIELD_CMD")
 
     def models(self, folder):
         return json.load(open(os.path.join(self.s, folder, ".models.json")))

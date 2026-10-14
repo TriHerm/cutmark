@@ -8,17 +8,17 @@ import unittest
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 
 class Base(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
 
     def tearDown(self):
         shutil.rmtree(self.root)
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
 
     def session(self, name, title, status="draft", at=None, p="linkedin"):
         s = os.path.join(self.root, "Proj", name)

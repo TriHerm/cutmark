@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 FAKE = r'''
@@ -22,7 +22,7 @@ print(json.dumps({"name": "drone city at dusk", "summary": "A drone shot over a 
 class SaveBroll(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         self.s = os.path.join(self.root, "Proj", "2026-10-02-broll")
         os.makedirs(self.s)
         subprocess.run([FFMPEG, "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=64x96:d=2", "-y",
@@ -32,11 +32,11 @@ class SaveBroll(unittest.TestCase):
                                          "startedAt": "2026-10-02T00:00:00Z", "duration": 2}]})
         fake = os.path.join(self.root, "fake.py")
         open(fake, "w").write(FAKE)
-        os.environ["TAKES_DESCRIBE_CMD"] = json.dumps([sys.executable, fake])
+        os.environ["CUTMARK_DESCRIBE_CMD"] = json.dumps([sys.executable, fake])
 
     def tearDown(self):
         shutil.rmtree(self.root)
-        for k in ("TAKES_ROOT", "TAKES_DESCRIBE_CMD"):
+        for k in ("CUTMARK_ROOT", "CUTMARK_DESCRIBE_CMD"):
             os.environ.pop(k, None)
 
     def test_save_describe_rename_and_list(self):

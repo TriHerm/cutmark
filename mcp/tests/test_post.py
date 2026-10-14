@@ -6,20 +6,20 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 
 class SetPost(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         self.s = os.path.join(self.root, "Proj", "2026-09-28-test")
         os.makedirs(os.path.join(self.s, "edits"))
         open(os.path.join(self.s, "edits", "cut-v2.mp4"), "w").close()
 
     def tearDown(self):
         shutil.rmtree(self.root)
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
 
     def history(self):
         d = os.path.join(self.s, "posts", "history")
@@ -158,13 +158,13 @@ if __name__ == "__main__":
 class FirstComment(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         self.s = os.path.join(self.root, "Proj", "2026-09-28-test")
         os.makedirs(self.s)
 
     def tearDown(self):
         shutil.rmtree(self.root)
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
 
     def test_set_read_and_post_it_once_live(self):
         t.t_set_post({"session": self.s, "text": "Hook.", "first_comment": "Links: example.com"})

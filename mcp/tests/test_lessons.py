@@ -8,13 +8,13 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 
 class Lessons(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         os.environ["CLAUDE_CODE_SESSION_ID"] = "chat-a-0001"
         t.forget_seen()
         self.s = os.path.join(self.root, "Proj", "2026-10-08-idea")
@@ -30,7 +30,7 @@ class Lessons(unittest.TestCase):
              "by": "user", "at": "2999-01-01T00:00:00.000Z"}]})
 
     def tearDown(self):
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
         t.SEEN.clear()
         shutil.rmtree(self.root, ignore_errors=True)
@@ -254,7 +254,7 @@ class Lessons(unittest.TestCase):
 class Checks(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         self.s = os.path.join(self.root, "Proj", "2026-10-08-idea")
         os.makedirs(os.path.join(self.s, "edits"))
         t.write_meta(self.s, {"title": "Idea", "createdAt": "2026-10-08T00:00:00Z", "named": True, "takes": []})
@@ -265,7 +265,7 @@ class Checks(unittest.TestCase):
                         "-filter_complex", "[1]atrim=0:1.2[s];[0][s][2]concat=n=3:v=0:a=1", self.f], check=True)
 
     def tearDown(self):
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
         shutil.rmtree(self.root, ignore_errors=True)
 
     def test_checks_measure_and_save(self):
@@ -299,7 +299,7 @@ class RulesBySteps(unittest.TestCase):
 
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         os.environ["CLAUDE_CODE_SESSION_ID"] = "chat-a-0001"
         t.forget_seen()
         self.lib = os.path.join(self.root, "_library")
@@ -309,7 +309,7 @@ class RulesBySteps(unittest.TestCase):
         t.write_meta(self.s, {"title": "Post", "createdAt": "2026-10-09T00:00:00Z", "named": True, "takes": []})
 
     def tearDown(self):
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
         t.SEEN.clear()
         shutil.rmtree(self.root, ignore_errors=True)

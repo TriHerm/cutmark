@@ -8,18 +8,18 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 
 class LibraryPaths(unittest.TestCase):
     def setUp(self):
         self.top = tempfile.mkdtemp()
-        self.root = os.path.join(self.top, "Takes")
+        self.root = os.path.join(self.top, "Cutmark")
         self.outside = os.path.join(self.top, "outside")
         os.makedirs(self.outside)
         with open(os.path.join(self.outside, "script.md"), "w") as f:
             f.write("secret")
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         self.s = os.path.join(self.root, "Proj", "2026-10-11-demo")
         os.makedirs(self.s)
         with open(os.path.join(self.s, "session.json"), "w") as f:
@@ -32,7 +32,7 @@ class LibraryPaths(unittest.TestCase):
     def tearDown(self):
         t.trash, t.open_in_app = self._trash, self._open
         shutil.rmtree(self.top)
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
 
     BAD = ("", ".", "..", "Proj", "Proj/..", "Proj/../..", "../outside", "Proj/../../outside")
 
@@ -48,7 +48,7 @@ class LibraryPaths(unittest.TestCase):
         self.assertEqual(self.trashed, [])
         self.assertTrue(os.path.isdir(self.root))
         self.assertTrue(os.path.isdir(self.s))
-        self.assertEqual(sorted(os.listdir(self.top)), ["Takes", "outside"])
+        self.assertEqual(sorted(os.listdir(self.top)), ["Cutmark", "outside"])
 
     def test_bad_project_names_are_refused(self):
         for bad in ("", " ", ".", ".."):
@@ -62,7 +62,7 @@ class LibraryPaths(unittest.TestCase):
         for bad in ("", ".", "..", "Proj/2026-10-11-demo", self.outside):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 t.t_list_sessions({"project": bad})
-        self.assertEqual(sorted(os.listdir(self.top)), ["Takes", "outside"])
+        self.assertEqual(sorted(os.listdir(self.top)), ["Cutmark", "outside"])
         self.assertTrue(os.path.isdir(self.s))
 
     def test_normal_names_keep_working(self):

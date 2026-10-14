@@ -19,14 +19,14 @@ if [[ "${1:-}" == "offline" || "${1:-}" == "chat" || "${1:-}" == "parity" ]]; th
   sleep 1
   SERVER="http://127.0.0.1:$PORT"
   if [[ "$1" == "chat" ]]; then
-    ONLY=(-only-testing:TakesPhoneUITests/ScreensTests/testChatStaysPut)
+    ONLY=(-only-testing:CutmarkPhoneUITests/ScreensTests/testChatStaysPut)
   elif [[ "$1" == "parity" ]]; then
-    ONLY=(-only-testing:TakesPhoneUITests/${2:-ParityTests})
+    ONLY=(-only-testing:CutmarkPhoneUITests/${2:-ParityTests})
   else
-    ONLY=(-only-testing:TakesPhoneUITests/OfflineTests${2:+/$2})
+    ONLY=(-only-testing:CutmarkPhoneUITests/OfflineTests${2:+/$2})
   fi
 fi
-TEST_RUNNER_TAKES_SHOTS="$SHOTS" TEST_RUNNER_TAKES_SERVER="${SERVER:-http://127.0.0.1:8797}" \
-  xcodebuild -project TakesPhone.xcodeproj -scheme TakesPhone -destination 'platform=iOS Simulator,name=iPhone 18 Pro' \
+TEST_RUNNER_CUTMARK_SHOTS="$SHOTS" TEST_RUNNER_CUTMARK_SERVER="${SERVER:-http://127.0.0.1:8797}" \
+  xcodebuild -project CutmarkPhone.xcodeproj -scheme CutmarkPhone -destination 'platform=iOS Simulator,name=iPhone 18 Pro' \
   -derivedDataPath build.noindex CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual ${ONLY[@]+"${ONLY[@]}"} -test-timeouts-enabled YES -maximum-test-execution-time-allowance 400 test -quiet
 echo "Screens in $SHOTS"

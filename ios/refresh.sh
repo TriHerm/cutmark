@@ -1,5 +1,5 @@
 #!/bin/bash
-# Keeps Takes alive on the iPhone with a free Apple ID. A free signing profile stops after 7 days,
+# Keeps Cutmark alive on the iPhone with a free Apple ID. A free signing profile stops after 7 days,
 # so this gets a new one and installs the app again before that. It runs every hour (LaunchAgent);
 # it only builds when the profile has less than 3 days left and the iPhone answers (Wi-Fi or cable).
 #   ./refresh.sh          check now, renew if needed
@@ -9,22 +9,22 @@ set -uo pipefail
 cd "$(dirname "$0")"
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
-BUNDLE=de.marvinaziz.takes.phone
-LABEL=de.marvinaziz.takes.phone-refresh
+BUNDLE=com.triherm.cutmark.phone
+LABEL=com.triherm.cutmark.phone-refresh
 PROFILES="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
 RENEW_DAYS=3
 # When the profile on the iPhone stops (epoch seconds), written after each install.
-STATE="$HOME/Library/Application Support/Takes/phone-app-expires"
+STATE="$HOME/Library/Application Support/Cutmark/phone-app-expires"
 # Why the last renew failed, for the phone to show. Removed after a renew works.
-PROBLEM="$HOME/Library/Application Support/Takes/phone-update/renew.json"
+PROBLEM="$HOME/Library/Application Support/Cutmark/phone-update/renew.json"
 log() { echo "$(date '+%F %T') $*"; }
-notify() { osascript -e "display notification \"$1\" with title \"Takes iPhone app\"" >/dev/null 2>&1 || true; }
+notify() { osascript -e "display notification \"$1\" with title \"Cutmark iPhone app\"" >/dev/null 2>&1 || true; }
 
 if [[ "${1:-}" == "--setup" ]]; then
   # launchd cannot read ~/Documents, so the agent runs the copy that install.sh keeps here.
-  MIRROR="$HOME/Library/Application Support/Takes/phone-src"
+  MIRROR="$HOME/Library/Application Support/Cutmark/phone-src"
   mkdir -p "$MIRROR"
-  rsync -a --delete --exclude build.noindex --exclude TakesPhone.xcodeproj ./ "$MIRROR/"
+  rsync -a --delete --exclude build.noindex --exclude CutmarkPhone.xcodeproj ./ "$MIRROR/"
   P="$HOME/Library/LaunchAgents/$LABEL.plist"
   cat > "$P" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -36,8 +36,8 @@ if [[ "${1:-}" == "--setup" ]]; then
   <key>RunAtLoad</key><true/>
   <key>Nice</key><integer>10</integer>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>$HOME/Library/Logs/takes-phone-refresh.log</string>
-  <key>StandardErrorPath</key><string>$HOME/Library/Logs/takes-phone-refresh.log</string>
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/cutmark-phone-refresh.log</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/cutmark-phone-refresh.log</string>
 </dict></plist>
 EOF
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
@@ -76,7 +76,7 @@ if [[ -z "$DEVICE" ]] || ! xcrun devicectl device info details --device "$DEVICE
   log "iPhone not reachable; profile has ${left}h left. Trying again in an hour."
   # Warn once a day in the last day, at 9 in the morning.
   if (( left >= 0 && left < 24 )) && [[ "$(date +%H)" == "09" ]]; then
-    notify "Takes stops on the iPhone in ${left}h. Put the iPhone on the Mac's Wi-Fi, unlocked."
+    notify "Cutmark stops on the iPhone in ${left}h. Put the iPhone on the Mac's Wi-Fi, unlocked."
   fi
   exit 0
 fi
@@ -95,23 +95,23 @@ fi
 log "Renewing (profile has ${left}h left)."
 # Remove the old profile so Xcode fetches a new 7-day one instead of reusing it.
 for f in ${mine[@]+"${mine[@]}"}; do rm -f "$f"; done
-if DEVICE="$DEVICE" ./install.sh --now >>"$HOME/Library/Logs/takes-phone-refresh.build.log" 2>&1; then
-  exp=$(security cms -D -i build.noindex/Build/Products/Release-iphoneos/Takes.app/embedded.mobileprovision 2>/dev/null | plutil -extract ExpirationDate raw -)
+if DEVICE="$DEVICE" ./install.sh --now >>"$HOME/Library/Logs/cutmark-phone-refresh.build.log" 2>&1; then
+  exp=$(security cms -D -i build.noindex/Build/Products/Release-iphoneos/Cutmark.app/embedded.mobileprovision 2>/dev/null | plutil -extract ExpirationDate raw -)
   mkdir -p "$(dirname "$STATE")"
   date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$exp" +%s > "$STATE"
-  log "Renewed. Takes runs on the iPhone until $exp."
+  log "Renewed. Cutmark runs on the iPhone until $exp."
   rm -f "$PROBLEM"
 else
-  log "Renew failed. See ~/Library/Logs/takes-phone-refresh.build.log"
+  log "Renew failed. See ~/Library/Logs/cutmark-phone-refresh.build.log"
   # Xcode can lose the Apple ID (2026-10-06: two days of silent failures). Say what to do, on the
   # phone's Update row too (PhoneUpdate.swift reads this file), not only in a Mac notification.
-  if tail -40 "$HOME/Library/Logs/takes-phone-refresh.build.log" | grep -q "No Accounts"; then
+  if tail -40 "$HOME/Library/Logs/cutmark-phone-refresh.build.log" | grep -q "No Accounts"; then
     why="Xcode lost your Apple ID. On the Mac: Xcode > Settings > Apple Accounts, remove the account, then add it again."
   else
-    why="The Mac could not renew this app. See takes-phone-refresh.build.log on the Mac."
+    why="The Mac could not renew this app. See cutmark-phone-refresh.build.log on the Mac."
   fi
   stops=$(( $(date +%s) + left * 3600 ))
   mkdir -p "$(dirname "$PROBLEM")"
   python3 -c 'import json,sys; json.dump({"problem": sys.argv[1], "stops": int(sys.argv[2])}, open(sys.argv[3], "w"))' "$why" "$stops" "$PROBLEM"
-  notify "$why Takes stops on the iPhone in ${left}h."
+  notify "$why Cutmark stops on the iPhone in ${left}h."
 fi

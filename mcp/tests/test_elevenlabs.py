@@ -1,4 +1,4 @@
-"""ElevenLabs in Takes: voices, voice-over, fixed words, another voice. A stand-in answers for the API."""
+"""ElevenLabs in Cutmark: voices, voice-over, fixed words, another voice. A stand-in answers for the API."""
 import json
 import os
 import subprocess
@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 FFMPEG = t.find_tool("ffmpeg")
 
@@ -21,8 +21,8 @@ def tone(out, seconds, freq=440):
 class ElevenLabs(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
-        os.environ["TAKES_NO_KEYCHAIN"] = "1"
+        os.environ["CUTMARK_ROOT"] = self.root
+        os.environ["CUTMARK_NO_KEYCHAIN"] = "1"
         self.s = os.path.join(self.root, "Proj", "2026-10-06-idea")
         os.makedirs(self.s)
         # A 4 s take: video plus a tone, with a transcript.
@@ -73,7 +73,7 @@ class ElevenLabs(unittest.TestCase):
 
     def tearDown(self):
         t.eleven_http = self.real
-        for k in ("TAKES_ROOT", "TAKES_NO_KEYCHAIN"):
+        for k in ("CUTMARK_ROOT", "CUTMARK_NO_KEYCHAIN"):
             os.environ.pop(k, None)
 
     def test_without_a_default_voice_it_says_where_to_pick_one(self):

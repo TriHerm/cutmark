@@ -1,4 +1,4 @@
-"""Rules seen, per chat on disk (2026-10-10): each message of a Takes chat is a new MCP process, so
+"""Rules seen, per chat on disk (2026-10-10): each message of a Cutmark chat is a new MCP process, so
 the seen rules live in _library/.rules-seen/<chat>.json, keyed by CLAUDE_CODE_SESSION_ID. Read tools
 show the rules once; write tools refuse once per chat, not once per message."""
 import json
@@ -12,13 +12,13 @@ import unittest
 
 HERE = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, HERE)
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 
 class RulesSeen(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         os.environ["CLAUDE_CODE_SESSION_ID"] = "chat-a-0001"
         t.forget_seen()
         self.s = os.path.join(self.root, "Proj", "2026-10-10-idea")
@@ -26,7 +26,7 @@ class RulesSeen(unittest.TestCase):
         t.write_meta(self.s, {"title": "Idea", "createdAt": "2026-10-10T00:00:00Z", "named": True, "takes": []})
 
     def tearDown(self):
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
         t.SEEN.clear()
         shutil.rmtree(self.root, ignore_errors=True)
@@ -105,7 +105,7 @@ class RulesSeen(unittest.TestCase):
         self.write_script()  # no refusal
         # (d) The second call has no rules.
         self.assertNotIn("rules", t.t_get_session({"session": self.s}))
-        # (b) Takes, no edits: the five edit steps.
+        # (b) Cutmark, no edits: the five edit steps.
         self.with_takes()
         out = t.t_get_session({"session": self.s})
         self.assertEqual(out["rules"]["steps"], t.EDIT_AREAS)
@@ -192,7 +192,7 @@ class RulesSeen(unittest.TestCase):
     def test_two_processes_write_seen(self):
         rules = [{"id": "cut-%d" % i, "area": "cut", "text": "Rule %d." % i} for i in range(1, 9)]
         t.write_lessons({"rules": rules})
-        code = ("import sys; sys.path.insert(0, %r); import takes_mcp as t\n"
+        code = ("import sys; sys.path.insert(0, %r); import cutmark_mcp as t\n"
                 "rules = t.read_lessons()['rules']\n"
                 "for i in range(20):\n"
                 "    t.mark_seen([rules[(i + int(sys.argv[1])) %% len(rules)]])\n" % os.path.abspath(HERE))
@@ -268,12 +268,12 @@ class RulesSeen(unittest.TestCase):
         got = []
         old = t.reply
         t.reply = lambda id_, result=None, error=None: got.append(result)
-        os.environ["TAKES_TOOLS"] = "core"
+        os.environ["CUTMARK_TOOLS"] = "core"
         try:
             t.handle({"id": 1, "method": "initialize", "params": {}})
         finally:
             t.reply = old
-            os.environ.pop("TAKES_TOOLS", None)
+            os.environ.pop("CUTMARK_TOOLS", None)
         index = got[0]["instructions"].split("Tools by step.")[1].split("Ideas:")[0]
         self.assertNotIn("broll", index)
         self.assertIn("check_edit", index)

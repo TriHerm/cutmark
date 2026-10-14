@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 FAKE = "import sys\nopen(sys.argv[-1], 'wb').write(b'\\x89PNG fake')\n"
 
@@ -15,17 +15,17 @@ FAKE = "import sys\nopen(sys.argv[-1], 'wb').write(b'\\x89PNG fake')\n"
 class Storyboard(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         self.s = os.path.join(self.root, "Proj", "2026-10-03-idea")
         os.makedirs(self.s)
         t.write_meta(self.s, {"title": "Idea", "createdAt": "2026-10-03T00:00:00Z", "named": True, "takes": []})
         fake = os.path.join(self.root, "fake.py")
         open(fake, "w").write(FAKE)
-        os.environ["TAKES_SKETCH_CMD"] = json.dumps([sys.executable, fake])
+        os.environ["CUTMARK_SKETCH_CMD"] = json.dumps([sys.executable, fake])
         t.start_sketches = lambda s: None  # tests draw in the foreground
 
     def tearDown(self):
-        for k in ("TAKES_ROOT", "TAKES_SKETCH_CMD"):
+        for k in ("CUTMARK_ROOT", "CUTMARK_SKETCH_CMD"):
             os.environ.pop(k, None)
 
     def test_write_draw_keep_and_redraw(self):
@@ -69,13 +69,13 @@ class Storyboard(unittest.TestCase):
             t.t_set_storyboard({"session": self.s, "shots": shots, "format": "wide"})
 
     def test_a_failed_sketch_says_why(self):
-        os.environ["TAKES_SKETCH_CMD"] = json.dumps([sys.executable, "-c", "import sys; sys.exit('quota')"])
+        os.environ["CUTMARK_SKETCH_CMD"] = json.dumps([sys.executable, "-c", "import sys; sys.exit('quota')"])
         t.t_set_storyboard({"session": self.s, "shots": [{"sketch": "A man."}]})
         t.sketch_run(self.s)
         self.assertEqual(t.read_storyboard(self.s)["shots"][0]["error"], "quota")
 
     def test_no_image_key_draws_nothing_and_tells_the_chat(self):
-        os.environ.pop("TAKES_SKETCH_CMD")
+        os.environ.pop("CUTMARK_SKETCH_CMD")
         none = lambda: None  # noqa: E731
         with mock.patch.object(t, "gemini_key", none), mock.patch.object(t, "openai_key", none), \
                 mock.patch.object(t, "rep_key", none):
@@ -91,7 +91,7 @@ class Storyboard(unittest.TestCase):
             self.assertTrue(d["nokey"])
             self.assertTrue(all("image" not in x for x in d["shots"]))
         # A key now (the test stand-in): Draw clears nokey and draws them.
-        os.environ["TAKES_SKETCH_CMD"] = json.dumps([sys.executable, os.path.join(self.root, "fake.py")])
+        os.environ["CUTMARK_SKETCH_CMD"] = json.dumps([sys.executable, os.path.join(self.root, "fake.py")])
         t.sketch_run(self.s, retry=True)
         d = t.read_storyboard(self.s)
         self.assertNotIn("nokey", d)
@@ -101,7 +101,7 @@ class Storyboard(unittest.TestCase):
         mine = os.path.join(self.root, "mine.png")
         open(mine, "wb").write(b"\x89PNG mine")
         none = lambda: None  # noqa: E731
-        os.environ.pop("TAKES_SKETCH_CMD")
+        os.environ.pop("CUTMARK_SKETCH_CMD")
         with mock.patch.object(t, "gemini_key", none), mock.patch.object(t, "openai_key", none), \
                 mock.patch.object(t, "rep_key", none):
             r = t.t_set_storyboard({"session": self.s, "shots": [{"sketch": "A man.", "image": mine},

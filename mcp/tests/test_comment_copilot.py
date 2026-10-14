@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 # A stand-in for the anti-slop linter: it refuses "fascinating".
 LINT = """import sys
@@ -24,12 +24,12 @@ class CommentCopilot(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
         self.life = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
-        os.environ["TAKES_LIFE"] = self.life
+        os.environ["CUTMARK_ROOT"] = self.root
+        os.environ["CUTMARK_LIFE"] = self.life
         lint = os.path.join(self.root, "lint.py")
         with open(lint, "w") as f:
             f.write(LINT)
-        os.environ["TAKES_LINT"] = lint
+        os.environ["CUTMARK_LINT"] = lint
         # Drafting starts with get_comment_context, which reads the lessons (the rules gate).
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
         t.forget_seen()
@@ -42,7 +42,7 @@ class CommentCopilot(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.root)
         shutil.rmtree(self.life)
-        for k in ("TAKES_ROOT", "TAKES_LIFE", "TAKES_LINT"):
+        for k in ("CUTMARK_ROOT", "CUTMARK_LIFE", "CUTMARK_LINT"):
             os.environ.pop(k, None)
 
     V = ["ngl the naming part is the hard bit", "What did you name the first one?", "We tried this with 40 agents. Names broke first."]

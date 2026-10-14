@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 # A stand-in CLI: records its args, then prints a job like `generate create --wait --json`, or fails.
 FAKE = r"""
@@ -29,20 +29,20 @@ print(json.dumps([{"id": "job1", "status": "completed",
 class Higgsfield(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         os.environ["HF_FAKE_DIR"] = self.root
         self.s = os.path.join(self.root, "Proj", "2026-10-06-idea")
         os.makedirs(self.s)
         t.write_meta(self.s, {"title": "Idea", "createdAt": "2026-10-06T00:00:00Z", "named": True, "takes": []})
         fake = os.path.join(self.root, "fake_hf.py")
         open(fake, "w").write(FAKE)
-        os.environ["TAKES_HIGGSFIELD_CMD"] = json.dumps([sys.executable, fake])
+        os.environ["CUTMARK_HIGGSFIELD_CMD"] = json.dumps([sys.executable, fake])
         self.started = []
         t.start_higgsfield = lambda s, p: self.started.append(p)  # tests run the job in the foreground
         t.start_sketches = lambda s: None
 
     def tearDown(self):
-        for k in ("TAKES_ROOT", "TAKES_HIGGSFIELD_CMD", "HF_FAKE_DIR"):
+        for k in ("CUTMARK_ROOT", "CUTMARK_HIGGSFIELD_CMD", "HF_FAKE_DIR"):
             os.environ.pop(k, None)
 
     def args(self):
@@ -125,7 +125,7 @@ class Higgsfield(unittest.TestCase):
         self.assertEqual(self.started, [])
 
     def test_not_installed(self):
-        os.environ.pop("TAKES_HIGGSFIELD_CMD")
+        os.environ.pop("CUTMARK_HIGGSFIELD_CMD")
         t.higgsfield_cli, real = (lambda: None), t.higgsfield_cli
         try:
             self.assertFalse(t.t_higgsfield_status({})["installed"])

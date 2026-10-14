@@ -1,4 +1,4 @@
-"""search_media: the takes-embed helper answers; a stand-in script plays it here."""
+"""search_media: the cutmark-embed helper answers; a stand-in script plays it here."""
 import json
 import os
 import stat
@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 
 class SearchMedia(unittest.TestCase):
@@ -16,7 +16,7 @@ class SearchMedia(unittest.TestCase):
         self.models = os.path.join(self.dir, "models")
         os.makedirs(os.path.join(self.models, "text-q8"))
         self.args = os.path.join(self.dir, "args.json")
-        self.helper = os.path.join(self.dir, "takes-embed")
+        self.helper = os.path.join(self.dir, "cutmark-embed")
         with open(self.helper, "w") as f:
             f.write("#!/usr/bin/python3\nimport json, sys\n"
                     "json.dump(sys.argv[1:], open(%r, 'w'))\n"
@@ -25,10 +25,10 @@ class SearchMedia(unittest.TestCase):
                     "  {'path': '/r/s/script.md', 'file': 's/script.md', 'kind': 'script', 'start': 0, 'end': 0, 'text': 'Hi', 'score': 0.6, 'rank': 3}],\n"
                     "  'status': {'files': 9}}))\n" % self.args)
         os.chmod(self.helper, os.stat(self.helper).st_mode | stat.S_IEXEC)
-        os.environ.update(TAKES_EMBED=self.helper, TAKES_EMBED_MODELS=self.models, TAKES_ROOT=self.dir)
+        os.environ.update(CUTMARK_EMBED=self.helper, CUTMARK_EMBED_MODELS=self.models, CUTMARK_ROOT=self.dir)
 
     def tearDown(self):
-        for k in ("TAKES_EMBED", "TAKES_EMBED_MODELS"):
+        for k in ("CUTMARK_EMBED", "CUTMARK_EMBED_MODELS"):
             os.environ.pop(k, None)
 
     def test_without_the_model_it_says_so(self):

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 
 class TranscriptWordsTests(unittest.TestCase):
@@ -34,7 +34,7 @@ class TakeTranscriptTests(unittest.TestCase):
     def setUp(self):
         import shutil
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         self.s = os.path.join(self.root, "Proj", "2026-10-08-test")
         os.makedirs(self.s)
         takes = [{"number": 1, "kind": "camera", "file": "take-01-camera.mov", "startedAt": "2026-10-08T10:00:00Z"},
@@ -48,7 +48,7 @@ class TakeTranscriptTests(unittest.TestCase):
             json.dump({"words": [{"word": "Hello", "start": 0.1, "end": 0.4}, {"word": "there", "start": 0.4, "end": 0.7}],
                        "source": "apple en_US"}, f)
         self.addCleanup(shutil.rmtree, self.root)
-        self.addCleanup(os.environ.pop, "TAKES_ROOT", None)
+        self.addCleanup(os.environ.pop, "CUTMARK_ROOT", None)
 
     def test_get_session_says_what_each_take_says(self):
         takes = t.t_get_session({"session": self.s})["takes"]

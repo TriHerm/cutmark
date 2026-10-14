@@ -1,16 +1,16 @@
-"""Word times for one take: Takes runs it when it saves a take, and before a cut (2026-10-11). Free,
+"""Word times for one take: Cutmark runs it when it saves a take, and before a cut (2026-10-11). Free,
 on this Mac, no key: faster-whisper (model "small", about 500 MB, downloaded once).
 
   uv run -q --python 3.11 --with faster-whisper --with numpy prepare_take.py IN.wav OUT.json \
-      [--language en] [--hints "Takes,Acme"] [--model small]
+      [--language en] [--hints "Cutmark,Acme"] [--model small]
 
-IN is a 16 kHz mono 16-bit WAV on the take's video clock (takes_mcp.extract_voice). OUT gets
+IN is a 16 kHz mono 16-bit WAV on the take's video clock (cutmark_mcp.extract_voice). OUT gets
 {"language", "words": [{"word", "start", "end"}], "sounds": [[start, end], ...]} in seconds of IN.
 Whisper puts a word's edges in the pauses around it: each edge then moves to the sound (10 ms
 loudness frames), and a word after a pause starts at its voice onset. "sounds" are voiced
 stretches no word covers (a breath, a click, a cough).
 
-Progress: "TAKES_PROGRESS 0.4" lines (the Jobs row reads them); the first comes at once, so Takes
+Progress: "CUTMARK_PROGRESS 0.4" lines (the Jobs row reads them); the first comes at once, so Cutmark
 knows uv got the packages. A failure ends with one plain line
 that says what to do (the Jobs row shows the last line): exit 3 when the model did not download.
 """
@@ -19,8 +19,8 @@ import json
 import sys
 import wave
 
-DOWNLOAD_ERROR = ("Takes could not download the speech model. Connect to the internet. "
-                  "Takes tries again at the next cut.")
+DOWNLOAD_ERROR = ("Cutmark could not download the speech model. Connect to the internet. "
+                  "Cutmark tries again at the next cut.")
 HOP = 0.01          # seconds per loudness frame
 VOICED_DB = 10.0    # a frame this far over the quiet floor (20th percentile) is voiced
 SNAP_MAX = 0.3      # an edge moves at most this far, and at most half the word
@@ -46,7 +46,7 @@ def cached(model):
 
 
 def read_wav(path):
-    import numpy as np  # here, not at the top: takes_mcp imports onsets() without numpy
+    import numpy as np  # here, not at the top: cutmark_mcp imports onsets() without numpy
     with wave.open(path, "rb") as w:
         sr, n, width, ch = w.getframerate(), w.getnframes(), w.getsampwidth(), w.getnchannels()
         raw = w.readframes(n)
@@ -142,7 +142,7 @@ def main():
     p.add_argument("--hints", default="")
     p.add_argument("--model", default="small")
     a = p.parse_args()
-    say("TAKES_PROGRESS 0")  # the script runs: uv got its packages
+    say("CUTMARK_PROGRESS 0")  # the script runs: uv got its packages
     x, sr = read_wav(a.inp)
     if not cached(a.model):
         say("Gets the speech model (one time, about 500 MB).")
@@ -167,14 +167,14 @@ def main():
             t = (w.word or "").strip()
             if t:
                 words.append({"word": t, "start": float(w.start), "end": float(max(w.end, w.start))})
-        say("TAKES_PROGRESS %.3f" % min(1.0, float(seg.end) / total))
+        say("CUTMARK_PROGRESS %.3f" % min(1.0, float(seg.end) / total))
     voiced = voiced_frames(x, sr)
     words = onsets(snap(words, voiced), voiced)
     for w in words:
         w["start"], w["end"] = round(float(w["start"]), 3), round(float(w["end"]), 3)
     with open(a.out, "w") as f:
         json.dump({"language": info.language, "words": words, "sounds": sounds(words, voiced)}, f)
-    say("TAKES_PROGRESS 1")
+    say("CUTMARK_PROGRESS 1")
 
 
 if __name__ == "__main__":

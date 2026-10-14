@@ -5,10 +5,10 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 NAMES = ("GEMINI_API_KEY", "GOOGLE_AI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY",
-         "REPLICATE_API_TOKEN", "ELEVENLABS_API_KEY", "TAKES_NO_KEYCHAIN")
+         "REPLICATE_API_TOKEN", "ELEVENLABS_API_KEY", "CUTMARK_NO_KEYCHAIN")
 
 
 class GeminiKey(unittest.TestCase):
@@ -46,7 +46,7 @@ class GeminiKey(unittest.TestCase):
     def test_cutmark_config_wins_and_legacy_is_a_fallback_for_all_aux_readers(self):
         self.env("GEMINI_API_KEY=legacy-g\nOPENAI_API_KEY=legacy-o\nREPLICATE_API_TOKEN=legacy-r\nELEVENLABS_API_KEY=legacy-e\n", cutmark=False)
         self.env("GEMINI_API_KEY=cutmark-g\nOPENAI_API_KEY=cutmark-o\nREPLICATE_API_TOKEN=cutmark-r\nELEVENLABS_API_KEY=cutmark-e\n")
-        os.environ["TAKES_NO_KEYCHAIN"] = "1"
+        os.environ["CUTMARK_NO_KEYCHAIN"] = "1"
         self.assertEqual(t.gemini_key(), "cutmark-g")
         self.assertEqual(t.openai_key(), "cutmark-o")
         self.assertEqual(t.rep_key(), "cutmark-r")

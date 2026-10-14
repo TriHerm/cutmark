@@ -19,7 +19,7 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/cutmark-dmg.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 ditto "$APP" "$tmp/Cutmark.app"
 cp LICENSE "$tmp/LICENSE"
-cp NOTICE.md "$tmp/NOTICE.md"
+cp THIRD_PARTY_NOTICES.md "$tmp/THIRD_PARTY_NOTICES.md"
 ln -s /Applications "$tmp/Applications"
 
 mkdir -p "$(dirname "$OUT")"

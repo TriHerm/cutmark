@@ -15,7 +15,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 from test_edit_ready import FFMPEG, ff, flash_take  # noqa: E402
 
 REAL = {n: getattr(t, n) for n in ("spawn_detached", "start_job", "trash", "take_clock", "open_in_app",
@@ -54,10 +54,10 @@ def rgb_at(path, sec):
 class Base(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
-        os.environ["TAKES_JOB_TIMEOUT"] = "300"
-        os.environ["TAKES_HOST_ID"] = "this-mac"
-        for k in ("TAKES_CHAT", "TAKES_BOARD", "CLAUDE_CODE_SESSION_ID", "TAKES_STEP_TIMEOUT"):
+        os.environ["CUTMARK_ROOT"] = self.root
+        os.environ["CUTMARK_JOB_TIMEOUT"] = "300"
+        os.environ["CUTMARK_HOST_ID"] = "this-mac"
+        for k in ("CUTMARK_CHAT", "CUTMARK_BOARD", "CLAUDE_CODE_SESSION_ID", "CUTMARK_STEP_TIMEOUT"):
             os.environ.pop(k, None)
         for k, v in REAL.items():
             setattr(t, k, v)
@@ -80,7 +80,7 @@ class Base(unittest.TestCase):
                 except OSError:
                     pass
         shutil.rmtree(self.root, ignore_errors=True)
-        for k in ("TAKES_ROOT", "TAKES_JOB_TIMEOUT", "TAKES_HOST_ID", "TAKES_STEP_TIMEOUT"):
+        for k in ("CUTMARK_ROOT", "CUTMARK_JOB_TIMEOUT", "CUTMARK_HOST_ID", "CUTMARK_STEP_TIMEOUT"):
             os.environ.pop(k, None)
 
     def add_take(self, n=1, secs=6, kind="camera", **kw):
@@ -211,7 +211,7 @@ class Pure(Base):
         refused(dict(ok, steps=[{"run": "npx hyperframes render"}]), "not a shell line")
         refused(dict(ok, steps=[{"run": ["x"], "makes": ["../../evil.mov"]}]), "must be inside")
         refused(dict(ok, cut=[{"take": 1, "in": 2, "out": 60}]), "Give 0 <= in < out")
-        outside = os.path.join(tempfile.gettempdir(), "takes-outside-%d.wav" % os.getpid())
+        outside = os.path.join(tempfile.gettempdir(), "cutmark-outside-%d.wav" % os.getpid())
         ff("-f", "lavfi", "-i", "sine=d=1", outside)
         try:
             refused(dict(ok, sfx=[{"file": outside, "at": 1}]), "Copy it into the session or the library first")
@@ -649,9 +649,9 @@ class Publish(Base):
         cover = self.thumb()
         t.write_post_file(self.s, {}, "LinkedIn text\n", "linkedin")
         t.write_post_file(self.s, {"media": "edits/hook-v1.mp4"}, "X text\n", "x")  # starred by the user
-        t.write_post_file(self.s, {"media": "edits/hook-vertical-v1.mp4", "media_by": "takes",
+        t.write_post_file(self.s, {"media": "edits/hook-vertical-v1.mp4", "media_by": "cutmark",
                                    "cover_from": "edits/a.mp4", "cover_video": "edits/b.mp4"}, "Tall\n", "vertical")
-        t.write_post_file(self.s, {"media": "edits/hook-v1.mp4", "media_by": "takes", "cover_from": "edits/hook-v0.mp4",
+        t.write_post_file(self.s, {"media": "edits/hook-v1.mp4", "media_by": "cutmark", "cover_from": "edits/hook-v0.mp4",
                                    "cover_video": "edits/hook-v1.mp4", "cover": "thumbnails/old.png"}, "Wide\n", "youtube")
         rid = self.fake_render(size="160x90", extra={"cover": {"image": cover, "seconds": 0.1}})
         out = t.t_publish_edit({"session": self.s, "render": rid, "note": "x", "go_back": True})
@@ -661,7 +661,7 @@ class Publish(Base):
         self.assertEqual(out["posts"]["vertical"], "edits/hook-vertical-v1.mp4 (kept: other shape)")
         self.assertEqual(out["posts"]["youtube"], "edits/hook-v2.mp4")
         li, _ = t.post_file(self.s, "linkedin")
-        self.assertEqual((li["media"], li["media_by"], li["cover"]), ("edits/hook-v2.mp4", "takes", cover))
+        self.assertEqual((li["media"], li["media_by"], li["cover"]), ("edits/hook-v2.mp4", "cutmark", cover))
         x, text = t.post_file(self.s, "x")
         self.assertEqual((x["media"], x.get("media_by"), text), ("edits/hook-v1.mp4", None, "X text\n"))
         yt, _ = t.post_file(self.s, "youtube")
@@ -707,9 +707,9 @@ class Publish(Base):
     def test_set_post_marks_its_pick(self):
         self.clip("edits/hook-v1.mp4")
         t.t_set_post({"session": self.s, "text": "Hi", "media": "edits/hook-v1.mp4"})
-        self.assertEqual(t.post_file(self.s)[0]["media_by"], "takes")
+        self.assertEqual(t.post_file(self.s)[0]["media_by"], "cutmark")
         t.t_set_post({"session": self.s, "text": "Hi again"})
-        self.assertEqual(t.post_file(self.s)[0]["media_by"], "takes")
+        self.assertEqual(t.post_file(self.s)[0]["media_by"], "cutmark")
 
     def test_replies_resolve_with_the_new_version(self):
         self.clip("edits/hook-v1.mp4")
@@ -800,7 +800,7 @@ class Render(Base):
         self.assertEqual(v1["music"][0]["file"], song)
         self.assertEqual(v1["takes"][0]["take"], 1)
         self.assertTrue(any("libx264" in c for c in v1["commands"]))
-        # The next version: change one value; only that value and Takes' own fields differ.
+        # The next version: change one value; only that value and Cutmark' own fields differ.
         entry = dict(v1["music"][0], gain_db=-21)
         r2 = self.render(base="hook", changes={"music": [entry]})
         self.assertEqual(r2["changed"], {"music[0].gain_db": [-18, -21]})
@@ -879,7 +879,7 @@ class Render(Base):
 
     def test_a_step_that_hangs_is_stopped(self):
         self.add_take()
-        os.environ["TAKES_STEP_TIMEOUT"] = "1"
+        os.environ["CUTMARK_STEP_TIMEOUT"] = "1"
         r = t.t_render_edit({"session": self.s, "wait_s": 120, "recipe": {
             "name": "hook", "cut": self.CUT, "steps": [{"run": [sys.executable, "-c", "import time; time.sleep(30)"]}]}})
         self.assertEqual(r["status"], "failed")

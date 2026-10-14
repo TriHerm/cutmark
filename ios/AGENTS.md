@@ -4,18 +4,18 @@ Read the root `AGENTS.md` first. This file adds what is true only in `ios/`.
 
 ## What it is
 
-`TakesPhone/` is a SwiftUI app with no packages. It holds no library of its own: it talks to the
-Mac over HTTPS on Tailscale (`API.swift`). The Mac side is `Sources/Takes/Phone.swift`,
+`CutmarkPhone/` is a SwiftUI app with no packages. It holds no library of its own: it talks to the
+Mac over HTTPS on Tailscale (`API.swift`). The Mac side is `Sources/Cutmark/Phone.swift`,
 `PhoneHTTP.swift` and the other `Phone*.swift` files. A change to a route changes both sides.
 
-- **The phone copies the Mac.** Same look, same words, same order. Draw Takes's own controls
+- **The phone copies the Mac.** Same look, same words, same order. Draw Cutmark's own controls
   (`Panel.swift` for menus and confirms), never stock iOS menus, alerts or cards.
 - **Changes wait when the Mac is away.** `Outbox.swift` keeps them and sends them later.
 - **Face ID guards the token** (`Vault.swift`).
 
 ## Build and project
 
-- `project.yml` is the source. XcodeGen makes `TakesPhone.xcodeproj` from it. Change
+- `project.yml` is the source. XcodeGen makes `CutmarkPhone.xcodeproj` from it. Change
   `project.yml`, not the project. The scripts run `xcodegen generate` for you.
 - The scripts use full Xcode (`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`).
 - `install.sh` builds and stages: the phone shows Update, and the tap installs it. Use

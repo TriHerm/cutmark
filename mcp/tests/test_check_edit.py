@@ -12,7 +12,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 import check_media as m  # noqa: E402
 
 FFMPEG = t.find_tool("ffmpeg") and t.find_tool("ffprobe")
@@ -50,7 +50,7 @@ class CheckEdit(Base):
     @classmethod
     def setUpClass(cls):
         cls.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = cls.root
+        os.environ["CUTMARK_ROOT"] = cls.root
         cls.s = cls.make_session("2026-10-11-check")
         cls.words, script, cls.sent = m.make_take(cls.s)
         with open(os.path.join(cls.s, "script.md"), "w") as f:
@@ -65,11 +65,11 @@ class CheckEdit(Base):
 
     @classmethod
     def tearDownClass(cls):
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
         shutil.rmtree(cls.root, ignore_errors=True)
 
     def setUp(self):
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
 
     def gap_after(self, i):
         """The middle of the pause after take word i."""
@@ -87,9 +87,9 @@ class CheckEdit(Base):
         built = [x for x in r["results"] if "check" in x]
         self.assertEqual([x["check"] for x in built], ["streams", "av_sync", "frozen_video", "band_balance", "echo",
                                                      "picture_drift", "framing", "words", "regression"])
-        # framing skips only where Takes.app's face finder is not built.
+        # framing skips only where Cutmark.app's face finder is not built.
         self.assertEqual([x for x in built if x["pass"] is not True
-                          and not (x["check"] == "framing" and "takes-faces" in x.get("skip", ""))], [])
+                          and not (x["check"] == "framing" and "cutmark-faces" in x.get("skip", ""))], [])
         self.assertTrue(r["passed"])
         self.assertIn("Every check passes", r["note"])
 
@@ -238,7 +238,7 @@ class CheckEdit(Base):
         s = self.make_session("2026-10-11-say")
         aiff = os.path.join(s, "voice.aiff")
         subprocess.run(["say", "-o", aiff, "This is a test of the voice check. It should hear the high tones go. "
-                        "Takes compares the edit with the take, word for word, and finds what changed. "
+                        "Cutmark compares the edit with the take, word for word, and finds what changed. "
                         "A voice that lost its highs sounds dull and far away."], check=True)
         m.ff("-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30,eq=contrast=0.3:brightness=-0.3:saturation=0.4",
              "-i", aiff, "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000",
@@ -667,7 +667,7 @@ class CheckEdit(Base):
         for text in seen + [t.NO_SOURCE, t.OUT_OF_TIME]:
             self.assertNotIn("The user", text)
 
-    @unittest.skipUnless(os.environ.get("TAKES_SLOW_TESTS") == "1", "set TAKES_SLOW_TESTS=1 for the timing test")
+    @unittest.skipUnless(os.environ.get("CUTMARK_SLOW_TESTS") == "1", "set CUTMARK_SLOW_TESTS=1 for the timing test")
     def test_timing_3min_edit(self):
         s = self.make_session("2026-10-11-timing")
         m.make_take(s, seconds=600.0, picture="testsrc2=size=3840x2160:rate=30")
@@ -693,7 +693,7 @@ class Regression(Base):
     @classmethod
     def setUpClass(cls):
         cls.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = cls.root
+        os.environ["CUTMARK_ROOT"] = cls.root
         cls.s = cls.make_session("2026-10-11-reg")
         m.make_take(cls.s, seconds=16.0)
         take_meta(cls.s, [{"number": 1, "kind": "camera", "file": "take-01-camera.mov", "keeper": True}])
@@ -737,11 +737,11 @@ class Regression(Base):
 
     @classmethod
     def tearDownClass(cls):
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
         shutil.rmtree(cls.root, ignore_errors=True)
 
     def setUp(self):
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
 
     def test_regression_reverted_fails(self):
         r, by = self.run_check("hook-v3.mp4")
@@ -785,7 +785,7 @@ class Reframe(Base):
     @classmethod
     def setUpClass(cls):
         cls.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = cls.root
+        os.environ["CUTMARK_ROOT"] = cls.root
         cls.v = cls.make_session("2026-10-11-vertical")
         m.make_take(cls.v, seconds=12.0, picture="testsrc2=size=1080x1920:rate=30")
         take_meta(cls.v, [{"number": 1, "kind": "camera", "file": "take-01-camera.mov", "keeper": True}])
@@ -796,11 +796,11 @@ class Reframe(Base):
 
     @classmethod
     def tearDownClass(cls):
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
         shutil.rmtree(cls.root, ignore_errors=True)
 
     def setUp(self):
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
 
     def pd(self, s, name, vf=None):
         if not os.path.exists(os.path.join(s, "edits", name)):
@@ -858,7 +858,7 @@ class CutRegression(Base):
     @classmethod
     def setUpClass(cls):
         cls.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = cls.root
+        os.environ["CUTMARK_ROOT"] = cls.root
         cls.s = cls.make_session("2026-10-11-cut")
         cls.words, _, _ = m.make_take(cls.s, seconds=20.0)
         take_meta(cls.s, [{"number": 1, "kind": "camera", "file": "take-01-camera.mov", "keeper": True}])
@@ -891,11 +891,11 @@ class CutRegression(Base):
 
     @classmethod
     def tearDownClass(cls):
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
         shutil.rmtree(cls.root, ignore_errors=True)
 
     def setUp(self):
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
 
     def test_cut_part_back_fails(self):
         r, by = self.run_check("hic-v3.mp4")
@@ -948,13 +948,13 @@ class CutRegression(Base):
 class Notes(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         self.s = os.path.join(self.root, "P", "2026-10-11-n")
         os.makedirs(os.path.join(self.s, "edits"))
         take_meta(self.s, [])
 
     def tearDown(self):
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
         shutil.rmtree(self.root, ignore_errors=True)
 
     def test_no_take_skips_and_no_rule_note_stays(self):

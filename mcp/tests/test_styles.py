@@ -7,13 +7,13 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 
 class Styles(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         self.s = os.path.join(self.root, "Proj", "2026-10-02-test")
         os.makedirs(os.path.join(self.s, "edits"))
         open(os.path.join(self.s, "edits", "cut-v1.mp4"), "w").close()
@@ -22,7 +22,7 @@ class Styles(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.root)
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
 
     def test_session_pick_wins_over_project(self):
         t.t_create_style({"name": "Bold", "description": "Big yellow type", "source": "https://example.com/p"})

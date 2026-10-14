@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 
@@ -16,7 +16,7 @@ FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 class Music(unittest.TestCase):
     def setUp(self):
         self.root, self.src = tempfile.mkdtemp(), tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"], os.environ["TAKES_SOUND_SOURCE"] = self.root, self.src
+        os.environ["CUTMARK_ROOT"], os.environ["CUTMARK_SOUND_SOURCE"] = self.root, self.src
         self.s = os.path.join(self.root, "Proj", "2026-09-28-test")
         os.makedirs(self.s)
         os.makedirs(os.path.join(self.src, "Music"))
@@ -31,7 +31,7 @@ class Music(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.root)
         shutil.rmtree(self.src)
-        for k in ("TAKES_ROOT", "TAKES_SOUND_SOURCE"):
+        for k in ("CUTMARK_ROOT", "CUTMARK_SOUND_SOURCE"):
             os.environ.pop(k, None)
 
     def test_copies_lists_and_tags(self):

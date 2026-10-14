@@ -13,12 +13,12 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 # Other test files replace these in their setUp and keep them replaced: take the real ones now.
 REAL = {n: getattr(t, n) for n in ("start_higgsfield", "start_replicate", "start_sketches", "spawn_detached",
                                    "rep_http", "rep_download", "video_size")}
-SERVER = os.path.join(os.path.dirname(__file__), "..", "takes_mcp.py")
+SERVER = os.path.join(os.path.dirname(__file__), "..", "cutmark_mcp.py")
 
 
 def ago(**kw):
@@ -38,10 +38,10 @@ def descendants(pid):
 class Jobs(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
-        os.environ["TAKES_JOB_TIMEOUT"] = "5"
-        os.environ["TAKES_JOB_LOG_MAX"] = "4096"
-        for k in ("TAKES_CHAT", "TAKES_BOARD"):
+        os.environ["CUTMARK_ROOT"] = self.root
+        os.environ["CUTMARK_JOB_TIMEOUT"] = "5"
+        os.environ["CUTMARK_JOB_LOG_MAX"] = "4096"
+        for k in ("CUTMARK_CHAT", "CUTMARK_BOARD"):
             os.environ.pop(k, None)
         for k, v in REAL.items():
             setattr(t, k, v)
@@ -61,7 +61,7 @@ class Jobs(unittest.TestCase):
                         pass
         time.sleep(0.2)
         shutil.rmtree(self.root, ignore_errors=True)
-        for k in ("TAKES_ROOT", "TAKES_JOB_TIMEOUT", "TAKES_JOB_LOG_MAX", "TAKES_CHAT", "TAKES_BOARD"):
+        for k in ("CUTMARK_ROOT", "CUTMARK_JOB_TIMEOUT", "CUTMARK_JOB_LOG_MAX", "CUTMARK_CHAT", "CUTMARK_BOARD"):
             os.environ.pop(k, None)
 
     def session(self, name):
@@ -133,7 +133,7 @@ class Jobs(unittest.TestCase):
 
     def test_job_survives_its_starter(self):
         # A child Python stands in for the MCP server: it starts the job and exits at once.
-        code = ("import sys; sys.path.insert(0, %r); import takes_mcp as t; "
+        code = ("import sys; sys.path.insert(0, %r); import cutmark_mcp as t; "
                 "print(t.t_run_job({'session': %r, 'cmd': 'sleep 0.5; printf x > edits/a-v1.mp4', "
                 "'outputs': ['edits/a-v1.mp4'], 'label': 'Render'})['job'])") % (os.path.dirname(SERVER), self.s)
         job = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=os.environ).stdout.strip()
@@ -149,9 +149,9 @@ class Jobs(unittest.TestCase):
         return self.raw(json.loads(res["content"][0]["text"])["job"])
 
     def test_chat_env_reaches_the_mcp(self):
-        env = dict(os.environ, TAKES_CHAT="1")
+        env = dict(os.environ, CUTMARK_CHAT="1")
         self.assertTrue(self.call_server(env)["from_chat"])
-        self.assertFalse(self.call_server(dict(env, TAKES_BOARD="styles"))["from_chat"])  # a board chat
+        self.assertFalse(self.call_server(dict(env, CUTMARK_BOARD="styles"))["from_chat"])  # a board chat
         self.assertFalse(self.call_server(dict(os.environ))["from_chat"])  # a terminal agent
 
     def test_progress_lines(self):
@@ -160,7 +160,7 @@ class Jobs(unittest.TestCase):
             for x in lines:
                 out.append(t.job_progress(x, state))
             return out
-        self.assertEqual(run(["TAKES_PROGRESS 0.4", "TAKES_PROGRESS 55%"]), [0.4, 0.55])
+        self.assertEqual(run(["CUTMARK_PROGRESS 0.4", "CUTMARK_PROGRESS 55%"]), [0.4, 0.55])
         self.assertEqual(run(["frame 30/120", "60/120 frames"]), [0.25, 0.5])
         self.assertEqual(run(["Downloading 45%"]), [0.45])
         ff = run(["  Duration: 00:01:40.00, start: 0.000000", "frame=  612 fps= 31 time=00:00:20.00 bitrate=1"],
@@ -213,14 +213,14 @@ class Jobs(unittest.TestCase):
         self.assertEqual(out["error"], "It ended but did not write edits/a-v1.mp4.")
 
     def test_stop_kills_the_whole_group(self):
-        mark = "takes-test-%d" % os.getpid()
+        mark = "cutmark-test-%d" % os.getpid()
         r = self.run_job("sleep 60 & exec -a %s sleep 60; wait" % mark)
         time.sleep(0.8)
         t0 = time.time()
         out = t.t_stop_job({"id": r["job"]})
         self.assertLess(time.time() - t0, 8)
         self.assertEqual(out["status"], "stopped")
-        self.assertEqual(out["stopped_by"], "takes")
+        self.assertEqual(out["stopped_by"], "cutmark")
         time.sleep(0.3)
         self.assertEqual(subprocess.run(["pgrep", "-f", mark], capture_output=True).returncode, 1)
         self.assertEqual(t.t_stop_job({"id": r["job"]})["note"], "It already ended.")
@@ -248,7 +248,7 @@ class Jobs(unittest.TestCase):
             os.kill(int(pid), signal.SIGTERM)
 
     def test_timeout(self):
-        os.environ["TAKES_JOB_TIMEOUT"] = "1"
+        os.environ["CUTMARK_JOB_TIMEOUT"] = "1"
         out = self.wait(self.run_job("sleep 30")["job"])
         self.assertEqual(out["status"], "failed")
         self.assertIn("ran over 1 s", out["error"])
@@ -301,13 +301,13 @@ class Jobs(unittest.TestCase):
         r = t.t_run_job({"session": "Launch/2026-10-10-demo", "cmd": "true", "outputs": [], "label": "x"})
         self.assertEqual(t.t_get_job({"id": r["job"], "wait_s": 10})["status"], "done")
 
-    def test_note_promises_a_note_only_in_the_takes_chat(self):
+    def test_note_promises_a_note_only_in_the_cutmark_chat(self):
         r = self.run_job("true")
         self.assertNotIn("sends you a note", r["note"])
         self.assertIn("check later with get_job id=%s" % r["job"], r["note"])
-        os.environ["TAKES_CHAT"] = "1"
+        os.environ["CUTMARK_CHAT"] = "1"
         self.assertIn("Cutmark sends you a note when it ends", self.run_job("true")["note"])
-        os.environ["TAKES_BOARD"] = "styles"
+        os.environ["CUTMARK_BOARD"] = "styles"
         self.assertNotIn("sends you a note", self.run_job("true")["note"])
 
     def test_bad_wait_and_bad_job_file(self):
@@ -403,8 +403,8 @@ class Jobs(unittest.TestCase):
         fake = os.path.join(root, "fake_hf.py")
         open(fake, "w").write("import json, os\nout = os.path.join(%r, 'r.mp4')\nopen(out, 'wb').write(b'mp4')\n"
                               "print(json.dumps({'url': 'file://' + out}))\n" % root)
-        os.environ["TAKES_HIGGSFIELD_CMD"] = json.dumps([sys.executable, fake])
-        os.environ["TAKES_CHAT"] = "1"
+        os.environ["CUTMARK_HIGGSFIELD_CMD"] = json.dumps([sys.executable, fake])
+        os.environ["CUTMARK_CHAT"] = "1"
         started = []
         t.start_higgsfield = lambda s, p: started.append(p)
         try:
@@ -415,14 +415,14 @@ class Jobs(unittest.TestCase):
             self.assertTrue(job["from_chat"])
             t.higgsfield_run(self.s, started[0])
         finally:
-            os.environ.pop("TAKES_HIGGSFIELD_CMD")
+            os.environ.pop("CUTMARK_HIGGSFIELD_CMD")
         self.assertEqual(open(os.path.join(self.s, r["file"]), "rb").read(), b"mp4")
         self.assertFalse(os.path.exists(started[0][:-5] + ".lock"))
         out = t.t_get_job({"id": r["job"]})
         self.assertEqual((out["status"], out["type"], out["label"]), ("done", "generate", "Seedance 2.5 clip"))
 
     def test_replicate_run_still_attaches(self):
-        os.environ["TAKES_NO_KEYCHAIN"] = "1"
+        os.environ["CUTMARK_NO_KEYCHAIN"] = "1"
         os.environ["REPLICATE_API_TOKEN"] = "r8_" + "x" * 37
         schema = {"components": {"schemas": {"Input": {"type": "object", "properties": {"prompt": {"type": "string"}}}}}}
 
@@ -440,7 +440,7 @@ class Jobs(unittest.TestCase):
             r = t.t_replicate({"session": self.s, "prompt": "A desk.", "model": "bytedance/seedance-2.5"})
             t.replicate_run(self.s, started[0], poll=0)
         finally:
-            os.environ.pop("TAKES_NO_KEYCHAIN")
+            os.environ.pop("CUTMARK_NO_KEYCHAIN")
             os.environ.pop("REPLICATE_API_TOKEN")
         job = json.load(open(started[0]))
         self.assertEqual((job["kind"], job["status"], job["label"]), ("video", "done", "Seedance 2.5 clip"))
@@ -499,7 +499,7 @@ class Jobs(unittest.TestCase):
             os.environ.pop("CLAUDE_CODE_SESSION_ID")
         self.assertTrue(env["PATH"].startswith("/opt/homebrew/bin:/usr/local/bin"))
         self.assertFalse(any(k.startswith(("CLAUDECODE", "CLAUDE_CODE_")) for k in env))
-        self.assertEqual((env["TAKES_JOB_ID"], env["TAKES_SESSION"]), ("job-ffffff", self.s))
+        self.assertEqual((env["CUTMARK_JOB_ID"], env["CUTMARK_SESSION"]), ("job-ffffff", self.s))
 
     def test_corrupt_job_file_is_left_alone(self):
         os.makedirs(t.jobs_dir(self.s))

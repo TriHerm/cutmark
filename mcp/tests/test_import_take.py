@@ -1,4 +1,4 @@
-"""import_take: recordings made outside Takes become real takes (no hand-edited session.json)."""
+"""import_take: recordings made outside Cutmark become real takes (no hand-edited session.json)."""
 import json
 import os
 import shutil
@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 
@@ -21,7 +21,7 @@ def clip(path, secs=1):
 class ImportTake(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         self.s = os.path.join(self.root, "Proj", "2026-09-27-test")
         os.makedirs(self.s)
         self.out = tempfile.mkdtemp()
@@ -32,7 +32,7 @@ class ImportTake(unittest.TestCase):
         t.start_prepare = self.start_prepare
         shutil.rmtree(self.root)
         shutil.rmtree(self.out)
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
 
     def meta(self):
         with open(os.path.join(self.s, "session.json")) as f:

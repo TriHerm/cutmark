@@ -7,21 +7,21 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 
 @unittest.skipUnless(t.BLOG, "the blog is private: the public copy has no article platform")
 class ArticleTests(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         self.s = os.path.join(self.root, "P", "2026-10-04-a")
         os.makedirs(self.s)
         t.write_meta(self.s, {"title": "A", "createdAt": "2026-10-04T10:00:00Z", "takes": []})
 
     def tearDown(self):
         shutil.rmtree(self.root)
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
 
     def test_no_article_without_blog(self):
         """With the blog off (the public copy) the platform is gone from the tools and get_session."""

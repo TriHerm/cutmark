@@ -17,7 +17,7 @@ state = {"script": "The first line of the script.\n\nThe second paragraph.", "co
 
 
 def message(index, text, role="claude"):
-    return {"id": str(uuid.uuid5(uuid.NAMESPACE_URL, "takes-scroll-%d" % index)),
+    return {"id": str(uuid.uuid5(uuid.NAMESPACE_URL, "cutmark-scroll-%d" % index)),
             "role": role, "text": text, "done": False}
 
 session = {"id": SID, "title": "Offline video", "project": "Tests", "created": NOW, "updated": NOW,
@@ -175,7 +175,7 @@ class H(BaseHTTPRequestHandler):
             state["chat_revision"] += 1
             return self.send({"ok": True})
         if p == "/test/chat/busy":
-            # Takes works: a message from the phone waits in the queue (2026-10-10).
+            # Cutmark works: a message from the phone waits in the queue (2026-10-10).
             state["chat"] = {"running": True, "messages": [message(1, "Cut the intro", role="user")], "queued": []}
             state["chat_revision"] += 1
             return self.send({"ok": True})
@@ -346,7 +346,7 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/update" and state.get("files"):
             return self.send({"renew": "Xcode lost your Apple ID. On the Mac: Xcode > Settings > Apple Accounts, sign in. The app stops in 30 h."})
         if p == "/api/ping":
-            return self.send({"ok": "takes"})
+            return self.send({"ok": "cutmark"})
         if p == "/api/pair":
             self.body()
             return self.send({"token": "test-token"})

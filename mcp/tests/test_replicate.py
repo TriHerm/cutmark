@@ -1,4 +1,4 @@
-"""Replicate: Takes' words map to the model's own inputs, files upload, the clip lands in generated/ and on its shot.
+"""Replicate: Cutmark' words map to the model's own inputs, files upload, the clip lands in generated/ and on its shot.
 A stand-in answers for the API."""
 import json
 import os
@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 # Like bytedance/seedance-2.5's schema: enums sit in their own schemas behind allOf.
 SCHEMA = {"components": {"schemas": {
@@ -28,8 +28,8 @@ SCHEMA = {"components": {"schemas": {
 class Replicate(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
-        os.environ["TAKES_NO_KEYCHAIN"] = "1"
+        os.environ["CUTMARK_ROOT"] = self.root
+        os.environ["CUTMARK_NO_KEYCHAIN"] = "1"
         os.environ["REPLICATE_API_TOKEN"] = "r8_" + "x" * 37
         self.s = os.path.join(self.root, "Proj", "2026-10-09-idea")
         os.makedirs(self.s)
@@ -64,7 +64,7 @@ class Replicate(unittest.TestCase):
 
     def tearDown(self):
         t.rep_http, t.start_replicate, t.rep_download = self.real_http, self.real_start, self.real_download
-        for k in ("TAKES_ROOT", "TAKES_NO_KEYCHAIN", "REPLICATE_API_TOKEN"):
+        for k in ("CUTMARK_ROOT", "CUTMARK_NO_KEYCHAIN", "REPLICATE_API_TOKEN"):
             os.environ.pop(k, None)
 
     def run_job(self):

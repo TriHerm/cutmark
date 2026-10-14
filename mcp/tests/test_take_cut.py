@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 
@@ -16,7 +16,7 @@ FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 class TakeCut(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         self.s = os.path.join(self.root, "Proj", "2026-10-03-shot")
         os.makedirs(os.path.join(self.s, "storyboard"))
         subprocess.run([FFMPEG, "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=64x96:d=4", "-y",
@@ -28,11 +28,11 @@ class TakeCut(unittest.TestCase):
                   open(os.path.join(self.s, "storyboard", "storyboard.json"), "w"))
         fake = os.path.join(self.root, "fake.py")
         open(fake, "w").write('import json\nprint(json.dumps({"start": 1.2, "end": 9.5, "clean": True, "why": "second try"}))\n')
-        os.environ["TAKES_DESCRIBE_CMD"] = json.dumps([sys.executable, fake])
+        os.environ["CUTMARK_DESCRIBE_CMD"] = json.dumps([sys.executable, fake])
 
     def tearDown(self):
         shutil.rmtree(self.root)
-        for k in ("TAKES_ROOT", "TAKES_DESCRIBE_CMD"):
+        for k in ("CUTMARK_ROOT", "CUTMARK_DESCRIBE_CMD"):
             os.environ.pop(k, None)
 
     def test_cut_is_kept_within_the_take(self):
@@ -59,7 +59,7 @@ class TakeCut(unittest.TestCase):
             t.t_set_best_cut({"session": self.s, "take": 1, "start": 5, "end": 6, "why": "x"})
 
     def test_failure_is_written(self):
-        os.environ["TAKES_DESCRIBE_CMD"] = json.dumps(["/usr/bin/false"])
+        os.environ["CUTMARK_DESCRIBE_CMD"] = json.dumps(["/usr/bin/false"])
         t.take_cut(self.s, "1")
         self.assertEqual(t.read_cuts(self.s)["1"]["state"], "failed")
 

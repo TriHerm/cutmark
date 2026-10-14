@@ -1,6 +1,6 @@
 import Foundation
 
-// Runs without UIKit: swiftc TakesPhone/ChatScrollState.swift tests/ChatScrollStateTests.swift.
+// Runs without UIKit: swiftc CutmarkPhone/ChatScrollState.swift tests/ChatScrollStateTests.swift.
 @main
 struct ChatScrollStateTests {
     static func main() {

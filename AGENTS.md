@@ -1,6 +1,6 @@
 # Cutmark: notes for agents
 
-Cutmark is a macOS video-production app built on the MIT-licensed Takes foundation. The user writes
+Cutmark is a macOS video-production app by TriHerm Labs and Fernando Abishai. The user writes
 a script, records takes, and gets edits and posts with the agent they choose. Claude Code, Codex,
 pi and opencode can run the in-app chat; compatible clients use the `cutmark` MCP server. This file
 is for agents that work on the Cutmark code.
@@ -10,8 +10,8 @@ is for agents that work on the Cutmark code.
 1. **Agents that change this repo** (you, now): read this file.
 2. **Agents that use Cutmark** (the Cutmark chat or another connected agent) to storyboard, edit
    or post. They run outside this repo, so they never read this file. They learn Cutmark from:
-   - the MCP server's `instructions` and each tool's description, in `mcp/takes_mcp.py`;
-   - the context the chat adds to each run, in `Sources/Takes/Chat.swift` and `ChatRefs.swift`;
+   - the MCP server's `instructions` and each tool's description, in `mcp/cutmark_mcp.py`;
+   - the context the chat adds to each run, in `Sources/Cutmark/Chat.swift` and `ChatRefs.swift`;
    - the skills (see [Skills](#skills)).
 
    To change how those agents work, change one of these three. Put each fact in one place: a
@@ -22,13 +22,13 @@ is for agents that work on the Cutmark code.
 
 | Path | What |
 |---|---|
-| `Sources/Takes/` | The Mac app: SwiftUI, AVFoundation, ScreenCaptureKit. A Swift package, no Xcode project. |
-| `mcp/takes_mcp.py` | Source of the `cutmark` MCP server (packaged as cutmark_mcp.py): one Python file, standard library only. |
+| `Sources/Cutmark/` | The Mac app: SwiftUI, AVFoundation, ScreenCaptureKit. A Swift package, no Xcode project. |
+| `mcp/cutmark_mcp.py` | Source of the `cutmark` MCP server (packaged as cutmark_mcp.py): one Python file, standard library only. |
 | `mcp/clean_voice.py`, `mcp/prepare_take.py` | Clean voice and word times for a take. They need packages, so they run through `uv`. |
 | `<session>/_work/` | Clips from `cut_take` and `rough_cut` (working files, hidden on the Assets tab). |
 | `<session>/_edit/` | An edit's sources (`_edit/<name>/`) and `render_edit`'s renders (`_edit/renders/`), hidden on the Assets tab. Each version's recipe sits beside it: `edits/<name>-vN.recipe.json` (`EditRecipe.swift`). |
 | `mcp/tests/` | The server's tests (`unittest`). |
-| `Tests/TakesTests/` | The app's tests (Swift Testing). |
+| `Tests/CutmarkTests/` | The app's tests (Swift Testing). |
 | `ios/` | Inherited iPhone companion source. It is not part of the Cutmark v0.1.0 release. |
 | `assets/` | Icon, fonts, brand kit. |
 | `build.sh`, `test.sh` | Build and test. |
@@ -36,7 +36,7 @@ is for agents that work on the Cutmark code.
 Two folders have their own `AGENTS.md`: `ios/AGENTS.md` (the iPhone app) and `mcp/AGENTS.md`
 (the server). Read it before you change that folder.
 
-Where things are in `Sources/Takes/`. This is a map of areas, not a list of every file: find the
+Where things are in `Sources/Cutmark/`. This is a map of areas, not a list of every file: find the
 rest with `grep`. Most files start with a comment that says what they are for.
 
 | Area | Start here |
@@ -85,7 +85,7 @@ workflow it describes.
 ## How to work here
 
 **Worktrees.** Put your worktree in your scratchpad or temp directory:
-`git worktree add "$TMPDIR/takes-<task>" origin/main`. This keeps the user's coding folder clean.
+`git worktree add "$TMPDIR/cutmark-<task>" origin/main`. This keeps the user's coding folder clean.
 When your work is merged or dropped, remove it (`git worktree remove <path>`) and delete its
 branch (`git branch -d <branch>`). Remove a worktree you did not create only when it is clean,
 no process runs in it, and its branch is merged into `origin/main`.
@@ -96,7 +96,7 @@ with `cp -c`: an APFS clone takes no space until one side changes. On 2026-10-11
 held 65 GB of the user's disk.
 
 **Agents.** Cutmark must work with Claude Code, Codex, pi or opencode, whichever the user has. A feature
-that asks an agent goes through `Agents.run(AgentRequest(...))` in `Sources/Takes/Agents/`; never
+that asks an agent goes through `Agents.run(AgentRequest(...))` in `Sources/Cutmark/Agents/`; never
 start a provider CLI yourself. A new need (a tool, an output shape) goes in
 `AgentRequest` and in each adapter. The chat runs through a `ChatAdapter` per agent
 (`Agents/ChatAdapters.swift`: its arguments, and how its output lines become messages); `Chat.swift`
@@ -118,7 +118,7 @@ the user chooses which provider to install; Cutmark never silently chooses Claud
 3. `git push origin HEAD:main`.
 4. `./build.sh install`. It installs only what is on `origin/main`, and while Cutmark runs it
    stages the build. The user starts it with the Update button in the sidebar, when the chats are
-   done. The inherited iPhone companion is not part of the Cutmark v0.1.0 release.
+   done. The iPhone companion is not part of the Cutmark v0.1.0 release.
    Never quit, restart or swap `Cutmark.app` yourself, and never leave a script that does it later:
    you run inside Cutmark, so quitting it stops this work and every other chat with it.
 
@@ -130,10 +130,9 @@ while a page reads its data: draw nothing, then let the parts arrive. The helper
 `ToggleChip`, the Feedback board's `RuleSwitch`), not stock macOS pickers, switches,
 bordered text fields or Swift Charts defaults.
 
-**Menus and panels.** Every menu uses Cutmark's menu kit in `MenuKit.swift` (internal type names such
-as `TakesMenuButton` are retained from upstream for now). Use `TakesMenuButton` for a click menu,
-`.takesContextMenu` for right-click, `.takesPopover` for a panel, `TakesSwitch` for two to four
-choices and `TakesConfirm` in a `.sheet` for a question. Never `Menu`, `.contextMenu`, `.popover`,
+**Menus and panels.** Every menu uses Cutmark's menu kit in `MenuKit.swift`. Use `CutmarkMenuButton` for a click menu,
+`.cutmarkContextMenu` for right-click, `.cutmarkPopover` for a panel, `CutmarkSwitch` for two to four
+choices and `CutmarkConfirm` in a `.sheet` for a question. Never `Menu`, `.contextMenu`, `.popover`,
 a segmented or pop-up `Picker`, `.alert` or `NSAlert`. Rows: a group opens in place (`MenuGroup`);
 a red danger row goes last, after a divider; the picked row has a check. The same thing in two
 menus (a ⋯ menu and its right-click menu) uses one row builder, so both keep one order. Stays
@@ -146,7 +145,7 @@ the chat process say "the chat". Text in the app uses short sentences in the act
 ## Tests
 
 `./test.sh` runs the server tests (`mcp/tests/`, `unittest`), then the app tests
-(`Tests/TakesTests/`, Swift Testing). `./test.sh --filter Storyboard` runs fewer. When a test
+(`Tests/CutmarkTests/`, Swift Testing). `./test.sh --filter Storyboard` runs fewer. When a test
 cannot find `Testing`, set `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`.
 
 **What needs a test**

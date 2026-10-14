@@ -7,20 +7,20 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 
 class Ideas(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
-        os.environ["TAKES_IDEA_THUMBS"] = "0"
+        os.environ["CUTMARK_ROOT"] = self.root
+        os.environ["CUTMARK_IDEA_THUMBS"] = "0"
         self.dir = os.path.join(self.root, "_library", "ideas")
 
     def tearDown(self):
-        os.environ.pop("TAKES_ROOT", None)
-        os.environ.pop("TAKES_IDEA_THUMBS", None)
-        os.environ.pop("TAKES_IMAGE_CMD", None)
+        os.environ.pop("CUTMARK_ROOT", None)
+        os.environ.pop("CUTMARK_IDEA_THUMBS", None)
+        os.environ.pop("CUTMARK_IMAGE_CMD", None)
         shutil.rmtree(self.root, ignore_errors=True)
 
     def read(self, name):
@@ -84,7 +84,7 @@ class Ideas(unittest.TestCase):
         self.assertEqual(t.idea_index(t.all_ideas()).count("## Exploring (1)"), 1)
 
     def test_index_matches_the_apps(self):
-        # Tests/TakesTests/Private/IdeasTests.swift checks the app against the same file.
+        # Tests/CutmarkTests/Private/IdeasTests.swift checks the app against the same file.
         def i(id_, title, status, created, tags):
             return {"id": id_, "title": title, "status": status, "created": created, "tags": tags}
         ideas = [i("board", "Ideas board", "doing", "2026-10-09 10:00", []), i("old", "Old", "new", "", []),
@@ -100,14 +100,14 @@ class Ideas(unittest.TestCase):
         self.assertIn("note", out)  # no photos of him yet
         self.assertEqual(t.idea_json(".prompts.json"), {"walk-videos": "The user on a trail."})
         # Without photos it does not draw, and says why.
-        os.environ.pop("TAKES_IDEA_THUMBS")
+        os.environ.pop("CUTMARK_IDEA_THUMBS")
         self.assertFalse(t.start_idea_thumb("walk-videos"))
         self.assertEqual(t.idea_thumb_state("walk-videos"), "nophotos")
         os.makedirs(t.me_dir())
         with open(os.path.join(t.me_dir(), "me.jpg"), "wb") as f:
             f.write(b"not really a photo")
         seen = os.path.join(self.root, "seen.txt")
-        os.environ["TAKES_IMAGE_CMD"] = json.dumps([sys.executable, "-c",
+        os.environ["CUTMARK_IMAGE_CMD"] = json.dumps([sys.executable, "-c",
             "import sys; open(sys.argv[1], 'wb').write(b'png'); open(%r, 'w').write(sys.argv[2] + '|' + str(len(sys.argv) - 3))" % seen])
         t.idea_thumb_run("walk-videos")
         self.assertEqual(t.idea_thumb("walk-videos"), "thumbnails/walk-videos-v1.png")
@@ -126,7 +126,7 @@ class Ideas(unittest.TestCase):
         t.t_add_idea({"title": "Broken"})
         os.makedirs(t.me_dir())
         open(os.path.join(t.me_dir(), "me.png"), "wb").close()
-        os.environ["TAKES_IMAGE_CMD"] = json.dumps([sys.executable, "-c", "import sys; sys.exit('no credit')"])
+        os.environ["CUTMARK_IMAGE_CMD"] = json.dumps([sys.executable, "-c", "import sys; sys.exit('no credit')"])
         t.idea_thumb_run("broken")
         self.assertEqual(t.idea_thumb_state("broken"), "error: GPT Image 2.5 Sunburst: no credit GPT Image 2.5 Flare: no credit")
         self.assertEqual(t.idea_out(t.read_idea(t.idea_path("broken")))["thumbnail_state"][:6], "error:")

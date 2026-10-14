@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 
@@ -23,7 +23,7 @@ def clip(path, *meta):
 class PhoneVideos(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        os.environ["TAKES_ROOT"] = self.root
+        os.environ["CUTMARK_ROOT"] = self.root
         s = os.path.join(self.root, "Proj", "2026-09-30-ai-pay")
         os.makedirs(s)
         with open(os.path.join(s, "session.json"), "w") as f:
@@ -35,7 +35,7 @@ class PhoneVideos(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.root)
         shutil.rmtree(self.dl)
-        os.environ.pop("TAKES_ROOT", None)
+        os.environ.pop("CUTMARK_ROOT", None)
 
     def test_finds_airdrop_and_iphone_videos_only(self):
         clip(os.path.join(self.dl, "IMG_0001.MOV"), "com.apple.quicktime.model=iPhone 17 Pro",

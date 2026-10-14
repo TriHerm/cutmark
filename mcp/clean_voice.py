@@ -1,4 +1,4 @@
-"""Clean a recorded voice for a video (Takes runs it for the Voice button and the clean_voice tool). Diagnoses the recording first, then picks the steps.
+"""Clean a recorded voice for a video (Cutmark runs it for the Voice button and the clean_voice tool). Diagnoses the recording first, then picks the steps.
 
   uv run --python 3.11 --with clearvoice --with soundfile --with numpy \
     clean_voice.py IN OUT.wav [options]

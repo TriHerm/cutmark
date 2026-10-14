@@ -1,4 +1,4 @@
-"""The Takes MCP can use Streamable HTTP as well as stdio, for ChatGPT/tunnels (2026-10-13)."""
+"""The Cutmark MCP can use Streamable HTTP as well as stdio, for ChatGPT/tunnels (2026-10-13)."""
 import http.client
 import json
 import os
@@ -7,13 +7,13 @@ import threading
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import takes_mcp as t  # noqa: E402
+import cutmark_mcp as t  # noqa: E402
 
 
 class HTTPTransportTests(unittest.TestCase):
     def setUp(self):
         self.server = t.http.server.HTTPServer(("127.0.0.1", 0), t.MCPHTTPHandler)
-        self.server.takes_token = "test-secret"
+        self.server.cutmark_token = "test-secret"
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
@@ -63,7 +63,7 @@ class HTTPTransportTests(unittest.TestCase):
         self.assertEqual(out["result"]["protocolVersion"], t.PROTOCOL)
 
     def test_initialize_resets_in_memory_rule_state_for_clients_without_a_chat_id(self):
-        saved = {k: os.environ.pop(k, None) for k in ("TAKES_CHAT_ID", "CLAUDE_CODE_SESSION_ID")}
+        saved = {k: os.environ.pop(k, None) for k in ("CUTMARK_CHAT_ID", "CLAUDE_CODE_SESSION_ID")}
         try:
             t.SEEN[None] = {"rules": {"rule-1": "hash"}, "comments": None}
             status, _, _ = self.post({"jsonrpc": "2.0", "id": 1, "method": "initialize",

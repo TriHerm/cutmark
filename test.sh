@@ -12,8 +12,8 @@ source scripts/test-queue.sh
 if [[ -n "$FULL" ]]; then queue_wait; fi
 # Its own temp folder, removed when the run ends (2026-10-11). The MCP tests make folders with
 # mkdtemp and leave them: 88,000 piled up in a week, some with copies of whole libraries.
-RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/takes-test.XXXXXX")"
-takes_on_exit "$RUN_TMP"
+RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/cutmark-test.XXXXXX")"
+cutmark_on_exit "$RUN_TMP"
 export TMPDIR="$RUN_TMP/"
 # The tree this run tests, to remember when it passes. Only the private repo: the public copy has no git.
 TREE=""
@@ -37,7 +37,7 @@ run() {
 # Tests that time real playback, web views or streamed output. Beside 250 parallel tests the Mac is
 # too busy for their timing, and they failed the public release (2026-10-06) though each passes
 # alone. A full run leaves them out, then runs them by themselves, one at a time.
-TIMED='aSteerShowsNoErrorAndGoesOn|theNextArticleUsesALoadedPage|theHiddenDockedChatSkipsStreamedWords|effectPlaysAtItsSecond|resetWhileRunningKeepsTheNewAsk|watcherSeesAWrite|aSlowAgentStopsAtItsTime|newDraftReplacesTheTextWhileTyping|aCodexConversationStartsAThreadAndResumesIt|aPiConversationKeepsItsIDAndTellsTheTakesServer|installsThePackOnceAndOpensItOnItsEdit'
+TIMED='aSteerShowsNoErrorAndGoesOn|theNextArticleUsesALoadedPage|theHiddenDockedChatSkipsStreamedWords|effectPlaysAtItsSecond|resetWhileRunningKeepsTheNewAsk|watcherSeesAWrite|aSlowAgentStopsAtItsTime|newDraftReplacesTheTextWhileTyping|aCodexConversationStartsAThreadAndResumesIt|aPiConversationKeepsItsIDAndTellsTheCutmarkServer|installsThePackOnceAndOpensItOnItsEdit'
 if [[ -z "$FULL" ]]; then
   run "$@"
 else
@@ -53,7 +53,7 @@ else
   fi
   # A full run also builds and tests the public copy (2026-10-08): code that uses a private
   # plugin passes here and fails there. Only the private repo has the script.
-  if [[ -f scripts/public/check-public-build.sh && "${TAKES_SKIP_PUBLIC:-}" != 1 ]]; then
+  if [[ -f scripts/public/check-public-build.sh && "${CUTMARK_SKIP_PUBLIC:-}" != 1 ]]; then
     echo "The public copy..."
     scripts/public/check-public-build.sh
     # Every check passed on this tree: build.sh install does not run them again.
