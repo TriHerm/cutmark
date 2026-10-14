@@ -1,0 +1,44 @@
+name: CutmarkPhone
+options:
+  bundleIdPrefix: com.triherm
+  deploymentTarget:
+    iOS: "18.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: ${CUTMARK_TEAM}
+    CODE_SIGN_STYLE: Automatic
+targets:
+  CutmarkPhone:
+    type: application
+    platform: iOS
+    sources: [CutmarkPhone]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.triherm.cutmark.phone
+        PRODUCT_NAME: Cutmark
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_FILE: CutmarkPhone/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+  CutmarkPhoneUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [CutmarkPhoneUITests]
+    dependencies:
+      - target: CutmarkPhone
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.triherm.cutmark.phone.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: CutmarkPhone
+schemes:
+  CutmarkPhone:
+    build:
+      targets:
+        CutmarkPhone: all
+        CutmarkPhoneUITests: [test]
+    test:
+      targets: [CutmarkPhoneUITests]

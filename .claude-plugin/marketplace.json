@@ -1,0 +1,11 @@
+{
+  "name": "cutmark",
+  "owner": { "name": "TriHerm Labs", "url": "https://github.com/TriHerm" },
+  "plugins": [
+    {
+      "name": "cutmark",
+      "source": "./",
+      "description": "Storyboard and edit talking-head videos with the Cutmark Mac app."
+    }
+  ]
+}

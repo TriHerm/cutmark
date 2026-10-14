@@ -1,0 +1,9 @@
+.build/
+build.noindex/
+build/
+build.noindex/
+.DS_Store
+__pycache__/
+embed/.build-xcode/
+embed/.build/
+embed/.build-xcode.log

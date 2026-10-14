@@ -1,0 +1,183 @@
+#!/bin/bash
+# Build Cutmark.app from the internal Cutmark Swift target. `./build.sh install` copies it to
+# ~/Applications and opens it, or stages it so Cutmark shows Update in its sidebar.
+set -euo pipefail
+cd "$(dirname "$0")"
+# Several agents build Cutmark from their own worktrees, and each install replaces the last one
+# (2026-10-04: a branch build dropped a feature that was on main). So install only main as it
+# is on GitHub: commit, merge origin/main, push HEAD:main, then install. Each install is then
+# all of main at that time, and a later one never drops work. `./build.sh` alone builds anything.
+if [[ "${1:-}" == "install" && "${ANY_BRANCH:-}" != 1 ]]; then
+  git fetch -q origin main
+  # The same commit as the Cutmark that runs or waits: an Update with nothing in it (2026-10-11).
+  for have in ~/Applications/Cutmark.app ~/Applications/.cutmark-update.noindex/Cutmark.app; do
+    was="$(/usr/libexec/PlistBuddy -c 'Print :BuildStamp' "$have/Contents/Info.plist" 2>/dev/null | cut -d' ' -f1)" || was=""
+    if [[ -n "$was" && "$was" == "$(git rev-parse --short HEAD)" && "${FRESH_INSTALL:-}" != 1 ]]; then
+      echo "Nothing new to stage: Cutmark already has $was (installed or waiting as the update)."
+      exit 0
+    fi
+  done
+  if ! git diff --quiet HEAD -- Sources mcp assets Package.swift Info.plist build.sh; then
+    echo "Not installed: commit your changes first (install builds only what is on main)." >&2; exit 1
+  fi
+  if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
+    if git merge-base --is-ancestor origin/main HEAD; then
+      echo "Not installed: push first (git push origin HEAD:main), then install." >&2
+    else
+      echo "Not installed: origin/main has commits you don't. git merge origin/main, test, push HEAD:main, then install." >&2
+    fi
+    exit 1
+  fi
+fi
+# The public copy must build and pass too: it leaves the Private folders out, and a release failed
+# when a test used private code (2026-10-08). test.sh checks it after a full run; with the tests
+# skipped, an install still checks it. Only the private repo has the check.
+if [[ "${1:-}" == "install" && "${SKIP_TESTS:-}" == 1 && -f scripts/public/check-public-build.sh ]]; then
+  scripts/public/check-public-build.sh || exit 1
+fi
+# Tests first, so a regression never reaches ~/Applications. SKIP_TESTS=1 skips them. A full
+# ./test.sh that passed on this exact tree (here or in another worktree) counts: the same run
+# twice took 10 more minutes (2026-10-11).
+source scripts/test-queue.sh
+if [[ "${SKIP_TESTS:-}" == 1 ]]; then :
+elif passed_has "$(tree_now)"; then echo "Tests passed on this tree already: not run again."
+else ./test.sh --quiet
+fi
+swift build -c release
+# A .noindex folder: Spotlight skips it, so macOS never registers this copy and never opens it
+# in place of ~/Applications/Cutmark.app (old copies kept opening, 2026-10-01).
+APP=build.noindex/Cutmark.app
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp .build/release/Cutmark "$APP/Contents/MacOS/Cutmark"
+cp .build/release/cutmark-faces "$APP/Contents/MacOS/cutmark-faces"
+cp mcp/cutmark_mcp.py "$APP/Contents/Resources/cutmark_mcp.py"
+cp mcp/clean_voice.py "$APP/Contents/Resources/clean_voice.py"
+cp mcp/prepare_take.py "$APP/Contents/Resources/prepare_take.py"
+cp assets/Cutmark.icns "$APP/Contents/Resources/Cutmark.icns"
+mkdir -p "$APP/Contents/Resources/Fonts" && cp assets/fonts/*.ttf "$APP/Contents/Resources/Fonts/"
+# The fonts' licenses (SIL OFL) must go with every copy of the fonts.
+mkdir -p "$APP/Contents/Resources/Licenses" && cp assets/fonts/*-OFL.txt "$APP/Contents/Resources/Licenses/"
+# Ship Cutmark's license and the third-party notices required by bundled source and dependencies.
+cp LICENSE "$APP/Contents/Resources/Licenses/CUTMARK-LICENSE.txt"
+cp THIRD_PARTY_NOTICES.md "$APP/Contents/Resources/Licenses/THIRD-PARTY-NOTICES.md"
+mkdir -p "$APP/Contents/Resources/Onboarding" && cp assets/onboarding/cutmark-intro.jpg "$APP/Contents/Resources/Onboarding/"
+mkdir -p "$APP/Contents/Resources/Article"
+mkdir -p "$APP/Contents/Resources/Agents" && cp assets/agents/*.svg assets/agents/*.png "$APP/Contents/Resources/Agents/"
+mkdir -p "$APP/Contents/Resources/Brand" && cp assets/brand/cutmark-mascot-512.png "$APP/Contents/Resources/Brand/mascot.png" && cp assets/brand/cutmark-mascot-body-512.png "$APP/Contents/Resources/Brand/mascot-body.png"
+cp Info.plist "$APP/Contents/Info.plist"
+# The search helper (embed/, ⌘K by meaning). MLX needs Xcode and its Metal toolchain, which
+# `swift build` and the Command Line Tools lack. Without them Cutmark still builds, and ⌘K matches
+# file names and transcripts only. The model itself is never in the app: Cutmark downloads it.
+XCODE="${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null || true)}"
+if [[ -d embed && -d "$XCODE" ]] && DEVELOPER_DIR="$XCODE" xcrun metal --version >/dev/null 2>&1; then
+  (cd embed && DEVELOPER_DIR="$XCODE" xcodebuild -quiet -scheme CutmarkEmbed -configuration Release \
+    -destination 'platform=macOS,arch=arm64' -derivedDataPath .build-xcode build > .build-xcode.log 2>&1) \
+    || { tail -30 embed/.build-xcode.log; echo "The search helper did not build (embed/.build-xcode.log)." >&2; exit 1; }
+  E=embed/.build-xcode/Build/Products/Release
+  cp "$E/cutmark-embed" "$APP/Contents/MacOS/cutmark-embed"
+  for b in "$E"/*.bundle; do cp -R "$b" "$APP/Contents/Resources/"; done
+  mkdir -p "$APP/Contents/Resources/Licenses/cutmark-embed" && cp embed/licenses/* "$APP/Contents/Resources/Licenses/cutmark-embed/"
+else
+  echo "No Xcode Metal toolchain: Cutmark builds without search by meaning (xcodebuild -downloadComponent MetalToolchain)."
+fi
+# Skills for Claude Code that the app installs at launch (the public copy ships them in skills/).
+[[ -d skills ]] && cp -R skills "$APP/Contents/Resources/skills"
+# Default styles, copied into the library at launch (StyleLib.seed). Only what a style needs.
+if [[ -d styles ]]; then
+  mkdir -p "$APP/Contents/Resources/styles"
+  rsync -a --exclude 'snapshots/' --exclude 'renders/' --exclude 'footage.mp4' --exclude 'node_modules/' styles/ "$APP/Contents/Resources/styles/"
+fi
+# The skills the Skills plugin offers (private for now): Cutmark's own and those in plugins/skills.
+if [[ -d plugins/skills ]]; then
+  mkdir -p "$APP/Contents/Resources/plugin-skills"
+  for d in scripts/public/skills/*/ plugins/skills/*/; do [[ -f "$d/SKILL.md" ]] && cp -R "${d%/}" "$APP/Contents/Resources/plugin-skills/"; done
+fi
+# The stamp tells a running Cutmark that a staged build is new; the changes go in the Update tooltip.
+INSTALLED="$HOME/Applications/Cutmark.app"
+STAMP="$(git rev-parse --short HEAD)$(git diff --quiet HEAD -- Sources Package.swift 2>/dev/null || echo +) $(date '+%b %-d %H:%M')"
+WAS="$(/usr/libexec/PlistBuddy -c 'Print :BuildStamp' "$INSTALLED/Contents/Info.plist" 2>/dev/null | cut -d' ' -f1 | tr -d +)" || WAS=""
+if [[ -n "$WAS" ]] && git cat-file -e "$WAS^{commit}" 2>/dev/null; then
+  CHANGES="$(git log -8 --format=%s "$WAS..HEAD")"  # -8, not | head: pipefail stops on git's SIGPIPE
+else
+  CHANGES="$(git log -1 --format=%s)"
+fi
+# The same commits in full for the What's new panel: no merges, no co-author lines.
+if [[ -n "$WAS" ]] && git cat-file -e "$WAS^{commit}" 2>/dev/null; then RANGE="$WAS..HEAD"; else RANGE="-1"; fi
+git log --no-merges -40 --format='%h%x1f%cI%x1f%s%x1f%b%x1e' $RANGE | python3 -c '
+import json, sys
+out = []
+for rec in sys.stdin.read().split("\x1e"):
+    f = rec.strip("\n").split("\x1f")
+    if len(f) < 4: continue
+    body = "\n".join(l for l in f[3].splitlines() if not l.startswith("Co-Authored-By")).strip()
+    out.append({"hash": f[0], "date": f[1], "subject": f[2], "body": body})
+json.dump(out, sys.stdout, ensure_ascii=False)' > "$APP/Contents/Resources/changes.json"
+plutil -insert BuildStamp -string "$STAMP" "$APP/Contents/Info.plist"
+# The version comes from git: the newest commit's date and the commit count (scripts/version.sh).
+read -r VERSION BUILD <<< "$(scripts/version.sh)"
+if [[ -n "${BUILD:-}" ]]; then
+  plutil -replace CFBundleShortVersionString -string "$VERSION" "$APP/Contents/Info.plist"
+  plutil -replace CFBundleVersion -string "$BUILD" "$APP/Contents/Info.plist"
+fi
+plutil -insert BuildChanges -string "$CHANGES" "$APP/Contents/Info.plist"
+# A GitHub release sets CUTMARK_RELEASE: the tag lets Cutmark find newer releases (Updater.swift).
+if [[ -n "${CUTMARK_RELEASE:-}" ]]; then
+  plutil -insert ReleaseTag -string "$CUTMARK_RELEASE" "$APP/Contents/Info.plist"
+fi
+# The repo Cutmark > Release to GitHub releases from (only where the release script exists).
+if [[ -x scripts/public/release.sh ]]; then
+  plutil -insert ReleaseRepo -string "$(git worktree list --porcelain | sed -n 1p | cut -d' ' -f2-)" "$APP/Contents/Info.plist"
+fi
+# Strip the symbols before signing (2026-10-12): Cutmark goes from 37.5 to 12.6 MB and the DMG gets
+# 2 MB smaller. The dSYM keeps the names for crash reports. After signing, a strip breaks the signature.
+dsymutil .build/release/Cutmark -o build.noindex/Cutmark.dSYM 2>/dev/null || true
+strip -x "$APP/Contents/MacOS/Cutmark" "$APP/Contents/MacOS/cutmark-faces"
+# A stable certificate keeps camera, mic and screen permissions across installs (scripts/setup-signing.sh).
+# Without it, fall back to ad-hoc signing, and macOS asks for the permissions again after each install.
+KC="$HOME/Library/Keychains/cutmark-signing.keychain-db"
+if [[ "${CUTMARK_ADHOC_SIGN:-}" != 1 && -f "$KC" && -f "$HOME/.config/cutmark/keychain-pass" ]]; then
+  security unlock-keychain -p "$(cat "$HOME/.config/cutmark/keychain-pass")" "$KC"
+  [[ -f "$APP/Contents/MacOS/cutmark-embed" ]] && codesign --force --sign "Cutmark Local Signing" --keychain "$KC" --identifier com.triherm.cutmark.embed "$APP/Contents/MacOS/cutmark-embed"
+  codesign --force --sign "Cutmark Local Signing" --keychain "$KC" --identifier com.triherm.cutmark.faces "$APP/Contents/MacOS/cutmark-faces"
+  codesign --force --sign "Cutmark Local Signing" --keychain "$KC" --identifier com.triherm.cutmark "$APP"
+else
+  echo "Using ad-hoc signing."
+  [[ -f "$APP/Contents/MacOS/cutmark-embed" ]] && codesign --force --sign - --identifier com.triherm.cutmark.embed "$APP/Contents/MacOS/cutmark-embed"
+  codesign --force --sign - --identifier com.triherm.cutmark.faces "$APP/Contents/MacOS/cutmark-faces"
+  codesign --force --sign - --identifier com.triherm.cutmark "$APP"
+fi
+codesign --verify --deep --strict "$APP"
+echo "Built $APP"
+if [[ "${1:-}" == "install" ]]; then
+  # Once Cutmark is installed, always stage: never decide by "is it running?". That check failed
+  # silently twice (pgrep sees nothing from agent shells; pipefail broke ps | grep -q) and the
+  # install overwrote the running app with no Update row (2026-10-06). A staged build waits for
+  # the Update click whether Cutmark is open now or opens later. FRESH_INSTALL=1 copies directly.
+  if [[ -d ~/Applications/Cutmark.app && "${FRESH_INSTALL:-}" != 1 ]]; then
+    # Never quit Cutmark for the user: stage the build, and Cutmark shows Update in its sidebar.
+    # Copy beside the slot, then rename, so Cutmark never reads a half-copied build.
+    STAGE="$HOME/Applications/.cutmark-update.noindex"
+    # A slower agent's older main must not replace a newer staged build.
+    STAGED="$(/usr/libexec/PlistBuddy -c 'Print :BuildStamp' "$STAGE/Cutmark.app/Contents/Info.plist" 2>/dev/null | cut -d' ' -f1 | tr -d +)" || STAGED=""
+    if [[ -n "$STAGED" && "${ANY_BRANCH:-}" != 1 ]] && git cat-file -e "$STAGED^{commit}" 2>/dev/null \
+       && ! git merge-base --is-ancestor "$STAGED" HEAD; then
+      echo "Not staged: the staged build ($STAGED) has commits this one doesn't. git merge origin/main, push, then install." >&2; exit 1
+    fi
+    mkdir -p "$STAGE"
+    rm -rf "$STAGE/incoming.app"
+    cp -R "$APP" "$STAGE/incoming.app"
+    rm -rf "$STAGE/Cutmark.app"
+    mv "$STAGE/incoming.app" "$STAGE/Cutmark.app"
+    echo "Staged $STAMP: Cutmark shows Update in its sidebar; the user clicks it when ready."
+    exit 0
+  fi
+  mkdir -p ~/Applications
+  rm -rf ~/Applications/Cutmark.app ~/Applications/.cutmark-update.noindex/Cutmark.app
+  cp -R "$APP" ~/Applications/Cutmark.app
+  open -g ~/Applications/Cutmark.app
+  echo "Installed ~/Applications/Cutmark.app"
+  # The Cutmark MCP server in each agent on this Mac (Claude Code, Codex, Cursor, …), pointing at the
+  # installed copy (stable path). Once per agent: one the user removed stays removed.
+  /usr/bin/python3 "$HOME/Applications/Cutmark.app/Contents/Resources/cutmark_mcp.py" --setup --once
+fi
