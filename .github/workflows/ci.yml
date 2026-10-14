@@ -21,3 +21,8 @@ jobs:
         env:
           CUTMARK_CI_SERIAL_SWIFT: '1'
         run: ./test.sh --quiet
+      - name: Build Cutmark.app
+        env:
+          CUTMARK_ADHOC_SIGN: '1'
+          SKIP_TESTS: '1'
+        run: ./build.sh
