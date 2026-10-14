@@ -9,18 +9,26 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: xcode-27
+  test:
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Select Xcode 26.3
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
       - name: Ensure ffmpeg
         run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
       - name: Test
         env:
           CUTMARK_CI_SERIAL_SWIFT: '1'
         run: ./test.sh --quiet
+
+  release:
+    needs: test
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Build Cutmark.app
         env:
           CUTMARK_RELEASE: ${{ github.ref_name }}
