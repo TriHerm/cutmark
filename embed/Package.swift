@@ -1,4 +1,4 @@
-// swift-tools-version: 6.2
+// swift-tools-version: 6.3
 // takes-embed: the on-device search engine for Takes (EmbeddingGemma 2 on MLX).
 // Built with xcodebuild by build.sh (`swift build` cannot compile MLX's Metal shaders) and shipped
 // inside Takes.app. The model weights are not in the app: Takes downloads them in the background.
