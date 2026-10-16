@@ -191,6 +191,27 @@ struct OpenCodeRunTests {
         await until { !chat.running && chat.messages.count >= 3 }
         #expect(chat.messages.contains { $0.role == .error && $0.text.contains("provider failed after tool step") })
     }
+
+    @Test func anOutlivingChildCannotHoldTheChatOpenOrLoseItsFinalLine() async throws {
+        defer { cleanup() }
+        let script = dir.appending(path: "opencode")
+        try """
+        #!/bin/bash
+        cat >/dev/null
+        sleep 4 &
+        echo '{"type":"step_start","sessionID":"ses-child","part":{"type":"step-start"}}'
+        echo '{"type":"text","sessionID":"ses-child","part":{"type":"text","text":"Done before child"}}'
+        echo '{"type":"step_finish","sessionID":"ses-child","part":{"type":"step-finish","tokens":{"input":5,"output":1}}}'
+        exit 0
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        let chat = ClaudeChat(session: session)
+        chat.switchAgent(to: .opencode, remember: false)
+        chat.send("Try it", title: "Test", onStage: nil)
+        try? await Task.sleep(for: .seconds(1))
+        #expect(!chat.running, "a child that inherits the pipe must not keep the turn open")
+        #expect(chat.messages.map(\.text) == ["Try it", "Done before child"])
+    }
 }
 
 /// A fake codex: saves its arguments and the ask, starts a thread, answers.

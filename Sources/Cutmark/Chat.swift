@@ -136,6 +136,32 @@ final class StreamLines: @unchecked Sendable {
     }
 }
 
+/// Coordinates FileHandle readability callbacks with process termination. The callback must consume
+/// `availableData` before it returns or Foundation may immediately invoke it again for the same
+/// readable fd. The lock makes the read + delivery enqueue atomic with the final nonblocking drain;
+/// callbacks that were already scheduled when termination begins see `closing` and do nothing because
+/// the drain already consumed everything that was still in the pipes.
+private final class PipeReadGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var closing = false
+
+    func read(_ handle: FileHandle, deliver: (Data) -> Void) {
+        lock.withLock {
+            guard !closing else { return }
+            let data = handle.availableData
+            if !data.isEmpty { deliver(data) }
+        }
+    }
+
+    func beginClose() -> Bool {
+        lock.withLock {
+            guard !closing else { return false }
+            closing = true
+            return true
+        }
+    }
+}
+
 /// Turns the agent CLI's output lines into chat messages. Pure, so tests can feed it lines. What each
 /// line means is the agent's own (ChatAdapter in Agents/ChatAdapters.swift).
 struct ChatParser {
@@ -785,29 +811,44 @@ final class ClaudeChat {
         // Lines are cut and big tool results shrunk here, on the pipe's thread; the main thread
         // only parses what the chat shows (2026-10-03).
         let lines = StreamLines()
+        // stdout/stderr callbacks and Process.terminationHandler run on unrelated threads. Consume
+        // each readability event before its callback returns, then serialize delivery with the final
+        // drain so finish cannot overtake already-read JSONL or stderr (2026-10-16).
+        let pipeDelivery = DispatchQueue(label: "cutmark.chat.pipe-delivery")
+        let pipeGate = PipeReadGate()
         self.lines = lines
         output.fileHandleForReading.readabilityHandler = { [weak self] h in
-            let d = h.availableData
-            guard !d.isEmpty else { return }
-            let got = lines.feed(d)
-            DispatchQueue.main.async { if self?.generation == gen { self?.take(got) } }
+            pipeGate.read(h) { data in
+                pipeDelivery.async {
+                    let got = lines.feed(data)
+                    DispatchQueue.main.async { if self?.generation == gen { self?.take(got) } }
+                }
+            }
         }
         errors.fileHandleForReading.readabilityHandler = { [weak self] h in
-            let d = h.availableData
-            guard !d.isEmpty else { return }
-            DispatchQueue.main.async { if self?.generation == gen { self?.stderr.append(d) } }
+            pipeGate.read(h) { data in
+                pipeDelivery.async {
+                    DispatchQueue.main.async { if self?.generation == gen { self?.stderr.append(data) } }
+                }
+            }
         }
         p.terminationHandler = { [weak self] proc in
+            let status = proc.terminationStatus, reason = proc.terminationReason
+            guard pipeGate.beginClose() else { return }
             output.fileHandleForReading.readabilityHandler = nil
             errors.fileHandleForReading.readabilityHandler = nil
             // What is left, without waiting for the end of the pipe: a tool's child that outlives
             // Claude keeps the pipe open, and waiting for it kept the chat "working" (2026-10-03).
-            let rest = lines.feed(Self.drain(output.fileHandleForReading))
-            let status = proc.terminationStatus, reason = proc.terminationReason
-            DispatchQueue.main.async {
-                guard let self, self.generation == gen else { return }
-                if !rest.isEmpty { self.take(rest) }
-                self.finish(status: status, killed: reason == .uncaughtSignal)
+            let outputRest = Self.drain(output.fileHandleForReading)
+            let errorRest = Self.drain(errors.fileHandleForReading)
+            pipeDelivery.async {
+                let rest = lines.feed(outputRest)
+                DispatchQueue.main.async {
+                    guard let self, self.generation == gen else { return }
+                    if !rest.isEmpty { self.take(rest) }
+                    if !errorRest.isEmpty { self.stderr.append(errorRest) }
+                    self.finish(status: status, killed: reason == .uncaughtSignal)
+                }
             }
         }
         do { try p.run() } catch {
