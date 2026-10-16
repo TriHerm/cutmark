@@ -17,14 +17,14 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Select Xcode 26.3
         run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
       - name: Ensure ffmpeg
         run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
       - name: Restore MCP test timings
         continue-on-error: true
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/Library/Caches/cutmark-mcp-test-times.json
           key: cutmark-mcp-times-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
@@ -42,7 +42,7 @@ jobs:
     runs-on: xcode-27
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build Cutmark.app
         env:
           CUTMARK_ADHOC_SIGN: '1'
