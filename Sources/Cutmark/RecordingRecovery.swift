@@ -95,6 +95,22 @@ enum RecordingRecovery {
         return max(saved, pending, disk) + 1
     }
 
+    /// Human-readable confirmation after a crash recovery. Keep the wording short enough for the
+    /// stage toast; the files and session metadata remain the source of truth.
+    static func notice(number: Int, kinds: [TakeKind]) -> String {
+        let hasCamera = kinds.contains { $0 == .camera }
+        let hasScreen = kinds.contains { $0 == .screen }
+        let media: String
+        if hasCamera && hasScreen {
+            media = "camera + screen"
+        } else if hasScreen {
+            media = "screen"
+        } else {
+            media = "camera"
+        }
+        return "Recovered interrupted Take \(number) · \(media)"
+    }
+
     /// Sessions with an unfinished recording claim. Only runs at launch, so a two-level scan is cheap.
     static func sessions(in root: URL) -> [URL] {
         let fm = FileManager.default

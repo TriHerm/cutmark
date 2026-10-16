@@ -108,4 +108,10 @@ struct RecordingRecoveryTests {
                                          script: nil, hook: nil, shot: nil))
         #expect(!RecordingRecovery.started(in: missing, number: 1, camera: Date(), screen: nil))
     }
+
+    @Test func recoveryNoticeSaysWhatSurvived() {
+        #expect(RecordingRecovery.notice(number: 3, kinds: [.camera, .screen]) == "Recovered interrupted Take 3 · camera + screen")
+        #expect(RecordingRecovery.notice(number: 4, kinds: [.screen]) == "Recovered interrupted Take 4 · screen")
+        #expect(RecordingRecovery.notice(number: 5, kinds: [.camera]) == "Recovered interrupted Take 5 · camera")
+    }
 }

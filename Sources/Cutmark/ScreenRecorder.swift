@@ -1,5 +1,6 @@
 import AVFoundation
 import AppKit
+import CoreGraphics
 import ScreenCaptureKit
 
 /// One display into its own .mov (HEVC, 60fps, cursor on, mic included for waveform sync).
@@ -24,6 +25,15 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         super.init()
         let saved = UserDefaults.standard.integer(forKey: "display")
         displayID = saved == 0 ? nil : CGDirectDisplayID(saved)
+    }
+
+    /// Ask for Screen Recording permission before the camera wakes up or the countdown begins.
+    /// Without this preflight, a denied permission only surfaced after "3, 2, 1", which made a
+    /// failed take look like a recorder failure instead of a macOS privacy setting.
+    @MainActor
+    static func ensureCapturePermission() -> Bool {
+        if CGPreflightScreenCaptureAccess() { return true }
+        return CGRequestScreenCaptureAccess()
     }
 
     @MainActor
