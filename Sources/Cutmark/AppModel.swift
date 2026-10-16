@@ -78,7 +78,13 @@ final class AppModel {
     var stageAspect: CGFloat = 16.0 / 9.0
     /// The notch's quick tour runs: the main window goes dark, so the eye goes to the notch.
     var notchTour = false
-    var phase: Phase = .idle { didSet { if phase != oldValue { holdCamera() } } }
+    var phase: Phase = .idle {
+        didSet {
+            guard phase != oldValue else { return }
+            holdCamera()
+            if !Self.testing { syncCaptureControls() }
+        }
+    }
     var error: String?
     var naming = false
     var scrolling = false {
@@ -170,6 +176,9 @@ final class AppModel {
     var commentMode = false
     /// The review player in the post preview, so C, Space and ←/→ reach it there too.
     @ObservationIgnored weak var postReview: PostReview?
+    /// While Camera + Screen records, a non-activating strip stays reachable even when another app
+    /// is frontmost. Lazily created so tests and camera-only sessions never make an extra window.
+    @ObservationIgnored private var captureControls: CaptureControlPanel?
     var sessionsToggle = 0
     /// Back and forward (Navigation.swift).
     var trail = NavTrail()
@@ -595,8 +604,30 @@ final class AppModel {
         }
     }
 
+    private func syncCaptureControls() {
+        let show: Bool
+        switch phase {
+        case .recording, .finishing: show = mode == .cameraScreen
+        default: show = false
+        }
+        if show {
+            if captureControls == nil { captureControls = CaptureControlPanel(app: self) }
+            captureControls?.present(displayID: screen.displayID)
+        } else {
+            captureControls?.dismiss()
+        }
+    }
+
     private func start() async {
         error = nil
+        if mode == .cameraScreen, !ScreenRecorder.ensureCapturePermission() {
+            error = "Allow Cutmark in System Settings → Privacy & Security → Screen & System Audio Recording, then try again."
+            return
+        }
+        if let problem = RecordingPreflight.problem(for: library.current?.url ?? library.root) {
+            error = problem
+            return
+        }
         guard let doc = library.current ?? library.createSession() else { return }
         doc.flushScript()
         doc.snapshotDirty()
@@ -720,6 +751,7 @@ final class AppModel {
         guard !library.isRecording else { return }
         let root = library.root
         var changed = false
+        var recovered: [(number: Int, kinds: [TakeKind])] = []
         for session in RecordingRecovery.sessions(in: root) {
             guard !library.isRecording, library.root == root else { return }
             let doc = library.current?.url == session ? library.current! : SessionDoc(url: session)
@@ -745,10 +777,18 @@ final class AppModel {
                 if doc.addCutmark(takes) {
                     RecordingRecovery.clear(session, number: journal.number)
                     changed = true
+                    recovered.append((journal.number, takes.map(\.kind)))
                 }
             }
         }
-        if changed { library.reload() }
+        if changed {
+            library.reload()
+            if recovered.count == 1, let item = recovered.first {
+                show(toast: RecordingRecovery.notice(number: item.number, kinds: item.kinds))
+            } else if recovered.count > 1 {
+                show(toast: "Recovered \(recovered.count) interrupted takes")
+            }
+        }
     }
 
     private static func duration(_ url: URL) async -> Double? {
