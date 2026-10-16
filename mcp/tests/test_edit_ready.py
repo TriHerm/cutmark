@@ -90,6 +90,38 @@ def beep_times(media):
     return out
 
 
+class OutputWatcher:
+    """Read a subprocess' stdout in the background and wait for exact observable states."""
+    def __init__(self, process):
+        self.process = process
+        self.lines = []
+        self.changed = threading.Condition()
+        self.reader = threading.Thread(target=self._read, daemon=True)
+        self.reader.start()
+
+    def _read(self):
+        for line in self.process.stdout:
+            with self.changed:
+                self.lines.append(line)
+                self.changed.notify_all()
+
+    def wait_for(self, text, timeout=30):
+        deadline = time.monotonic() + timeout
+        with self.changed:
+            while text not in "".join(self.lines):
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise AssertionError("Timed out waiting for %r; got %r" % (text, "".join(self.lines)))
+                self.changed.wait(left)
+        return "".join(self.lines)
+
+    def finish(self, timeout=30):
+        self.process.wait(timeout=timeout)
+        self.reader.join(timeout=1)
+        self.process.stdout.close()
+        return "".join(self.lines)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
@@ -367,27 +399,33 @@ class Prepare(Base):
     def test_prepare_waits_for_recording(self):
         self.add_take()
         self.words(self.WORDS)
-        t.PREP_WAIT_S, wait = 0.2, t.PREP_WAIT_S
         rec = subprocess.Popen(["sleep", "30"])
         marker = os.path.join(self.root, ".recording")
-        open(marker, "w").write(str(rec.pid))
+        with open(marker, "w") as f:
+            f.write(str(rec.pid))
+        p = None
         try:
             p = subprocess.Popen([sys.executable, SERVER, "--prepare-run", self.s, "1"], cwd=self.s,
                                  stdout=subprocess.PIPE, text=True, env=dict(os.environ))
-            time.sleep(1.5)
+            out = OutputWatcher(p)
+            out.wait_for("Waits for the recording to end.")
             self.assertIsNone(p.poll(), "it waits while the take records")
             self.assertFalse(os.path.exists(os.path.join(self.s, "take-01-camera.words.json")))
             os.remove(marker)
-            out = p.communicate(timeout=30)[0]
-            self.assertIn("Waits for the recording to end.", out)
+            text = out.finish(timeout=30)
+            self.assertIn("Waits for the recording to end.", text)
             self.assertTrue(os.path.exists(os.path.join(self.s, "take-01-camera.words.json")))
             # A marker of a dead app is stale.
-            open(marker, "w").write("999999")
+            with open(marker, "w") as f:
+                f.write("999999")
             os.remove(os.path.join(self.s, "take-01-camera.words.json"))
             self.assertEqual(t.prepare_take(self.s, 1), "done")
         finally:
-            t.PREP_WAIT_S = wait
+            if p is not None and p.poll() is None:
+                p.kill()
+                p.wait(timeout=5)
             rec.kill()
+            rec.wait(timeout=5)
 
     def test_prepare_waits_for_recording_after_the_lock(self):
         # Another take's Whisper holds the lock; a take starts to record before it ends.
@@ -395,29 +433,37 @@ class Prepare(Base):
         self.add_take()
         self.words(self.WORDS)
         log = os.path.join(self.root, "log")
-        t.PREP_WAIT_S, wait = 0.2, t.PREP_WAIT_S
         fd = os.open(os.path.join(self.root, ".prepare.lock"), os.O_RDWR | os.O_CREAT, 0o644)
         fcntl.flock(fd, fcntl.LOCK_EX)
         os.pwrite(fd, b"7 2026-10-11-other", 0)
         rec = subprocess.Popen(["sleep", "30"])
         marker = os.path.join(self.root, ".recording")
+        p = None
         try:
             p = subprocess.Popen([sys.executable, SERVER, "--prepare-run", self.s, "1"], cwd=self.s,
                                  stdout=subprocess.PIPE, text=True, env=dict(os.environ, CUTMARK_TEST_LOG=log))
-            time.sleep(1.0)
-            open(marker, "w").write(str(rec.pid))
+            out = OutputWatcher(p)
+            out.wait_for("Waits for take 7 of 2026-10-11-other.")
+            with open(marker, "w") as f:
+                f.write(str(rec.pid))
             os.close(fd)  # the other take ends
-            time.sleep(1.5)
+            fd = -1
+            out.wait_for("Waits for the recording to end.")
             self.assertIsNone(p.poll(), "it waits while the take records")
             self.assertFalse(os.path.exists(log), "Whisper ran while a take recorded")
             os.remove(marker)
-            out = p.communicate(timeout=30)[0]
-            self.assertIn("Waits for take 7 of 2026-10-11-other.", out)
-            self.assertIn("Waits for the recording to end.", out)
+            text = out.finish(timeout=30)
+            self.assertIn("Waits for take 7 of 2026-10-11-other.", text)
+            self.assertIn("Waits for the recording to end.", text)
             self.assertTrue(os.path.exists(log))
         finally:
-            t.PREP_WAIT_S = wait
+            if fd >= 0:
+                os.close(fd)
+            if p is not None and p.poll() is None:
+                p.kill()
+                p.wait(timeout=5)
             rec.kill()
+            rec.wait(timeout=5)
 
     def test_uv_without_network_is_the_download_error(self):
         # uv stops before prepare_take.py runs (no CUTMARK_PROGRESS line): offline, one plain error.
