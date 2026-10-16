@@ -9,4 +9,8 @@ struct CameraBitrateTests {
         #expect(CameraRecorder.bitrate(CMVideoDimensions(width: 1920, height: 1080)) == 20_000_000)
         #expect(CameraRecorder.bitrate(CMVideoDimensions(width: 3840, height: 2160)) == 80_000_000)
     }
+
+    @Test func recordingFragmentsBoundTheCrashTail() {
+        #expect(CameraRecorder.fragmentSeconds == 2)
+    }
 }

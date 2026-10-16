@@ -288,6 +288,7 @@ final class AppModel {
         Task { await camera.boot() }
         if !Self.testing {
             Store.markRecording(library.root, false)  // a marker a crash left behind
+            Task { [weak self] in await self?.recoverInterruptedRecordings() }
             if Features.phone {
                 phone = PhoneServer(app: self)
                 phone?.start()
@@ -629,15 +630,29 @@ final class AppModel {
         let camURL = doc.url.appending(path: "take-\(nn)-camera.mov")
         let screenURL = mode == .cameraScreen ? doc.url.appending(path: "take-\(nn)-screen.mov") : nil
         let micID = camera.audioID
+        let script = doc.activeDraft == "main" ? nil : doc.draftName(doc.activeDraft)
+        let hook = shot == nil ? HookStore.current(doc.activeText, HookStore.read(doc.url).hooks)?.text : nil
+        let shotID = shot?.id
+        guard RecordingRecovery.begin(in: doc.url, number: n, camera: camURL, screen: screenURL,
+                                      script: script, hook: hook, shot: shotID) else {
+            error = "Cutmark could not prepare crash recovery for this take. Check that the session folder is writable, then record again."
+            library.isRecording = false
+            Store.markRecording(library.root, false)
+            phase = .idle
+            return
+        }
         do {
             async let camStart = camera.startRecording(to: camURL)
             var screenStart: Date?
             if let screenURL { screenStart = try await screen.startRecording(to: screenURL, micID: micID) }
             let cs = try await camStart
+            if !RecordingRecovery.started(in: doc.url, number: n, camera: cs, screen: screenStart) {
+                // The original claim is still on disk. The take remains recoverable, but a crash may
+                // lose the exact sub-second camera/screen offset, so say so without stopping the take.
+                self.error = "Cutmark is recording, but it could not save exact crash-recovery timing for this take."
+            }
             pending = Pending(doc: doc, number: n, cam: camURL, camStart: cs, screen: screenURL, screenStart: screenStart,
-                              script: doc.activeDraft == "main" ? nil : doc.draftName(doc.activeDraft),
-                              hook: shot == nil ? HookStore.current(doc.activeText, HookStore.read(doc.url).hooks)?.text : nil,
-                              shot: shot?.id)
+                              script: script, hook: hook, shot: shotID)
             phase = .recording(Date())
             for h in Plugins.recordHooks { h.take(TakeMoment(session: doc.url, number: n, started: cs)) }
             if autoScroll && Plugins.recordStage(doc.url) == nil { scrolling = true }
@@ -646,6 +661,7 @@ final class AppModel {
             await camera.stopRecording()
             await screen.stopRecording()
             for u in [camURL, screenURL].compactMap({ $0 }) { try? FileManager.default.removeItem(at: u) }
+            RecordingRecovery.clear(doc.url, number: n)
             library.isRecording = false
             Store.markRecording(library.root, false)
             phase = .idle
@@ -682,15 +698,57 @@ final class AppModel {
             takes.append(Take(number: p.number, kind: .screen, file: s.lastPathComponent,
                               startedAt: ss, duration: await Self.duration(s), script: p.script, hook: p.hook, shot: p.shot))
         }
-        p.doc.addCutmark(takes)
-        if p.shot != nil { p.doc.fileShotTake(p.number) }
+        let recorded = p.doc.addCutmark(takes)
+        if recorded {
+            RecordingRecovery.clear(p.doc.url, number: p.number)
+            if p.shot != nil { p.doc.fileShotTake(p.number) }
+        } else {
+            error = "The take is on disk, but Cutmark could not update the session. It will try to recover it next time Cutmark opens."
+        }
         pending = nil
         library.isRecording = false
         phase = .idle
         library.loadSessions()
-        autoName(p.doc)
+        if recorded { autoName(p.doc) }
         endShot()
-        FirstTake.shared.afterTake(p.doc, number: p.number, library: library)
+        if recorded { FirstTake.shared.afterTake(p.doc, number: p.number, library: library) }
+    }
+
+    /// A crash can happen after AVFoundation finalized a movie but before session.json got the take.
+    /// Attach only files AVFoundation says are playable; an unfinalized claim stays for later recovery.
+    private func recoverInterruptedRecordings() async {
+        guard !library.isRecording else { return }
+        let root = library.root
+        var changed = false
+        for session in RecordingRecovery.sessions(in: root) {
+            guard !library.isRecording, library.root == root else { return }
+            let doc = library.current?.url == session ? library.current! : SessionDoc(url: session)
+            for journal in RecordingRecovery.journals(in: session) {
+                guard !library.isRecording, library.root == root else { return }
+                if doc.meta.takes.contains(where: { $0.number == journal.number }) {
+                    RecordingRecovery.clear(session, number: journal.number)
+                    continue
+                }
+                let takes = await RecordingRecovery.recoverableTakes(in: session, journal: journal, meta: doc.meta)
+                guard !library.isRecording, library.root == root else { return }
+                guard !takes.isEmpty else { continue }
+                // The probe above can take long enough for the MCP server or another editor to change
+                // session.json. Re-read it unconditionally before appending the recovered take, never
+                // write the pre-await snapshot over newer metadata (mtime alone is not the lock).
+                guard var latest = Store.readMeta(session) else { continue }
+                if latest.id == nil { latest.id = doc.meta.id }
+                if latest != doc.meta { doc.meta = latest }
+                if doc.meta.takes.contains(where: { $0.number == journal.number }) {
+                    RecordingRecovery.clear(session, number: journal.number)
+                    continue
+                }
+                if doc.addCutmark(takes) {
+                    RecordingRecovery.clear(session, number: journal.number)
+                    changed = true
+                }
+            }
+        }
+        if changed { library.reload() }
     }
 
     private static func duration(_ url: URL) async -> Double? {

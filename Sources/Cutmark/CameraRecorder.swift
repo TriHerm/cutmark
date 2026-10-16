@@ -68,9 +68,14 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
 
     /// HEVC bitrate for a 1080p take (bits per second). Scaled by pixel count for other sizes.
     static let bitrate1080 = 20_000_000
+    /// Keep the movie recoverable in short pieces if Cutmark or macOS stops during a take. The
+    /// AVCaptureMovieFileOutput default is much longer; two seconds bounds the unfinished tail while
+    /// preserving the same final .mov file and the existing prompter/camera pipeline.
+    static let fragmentSeconds: Double = 2
 
     override init() {
         super.init()
+        output.movieFragmentInterval = CMTime(seconds: Self.fragmentSeconds, preferredTimescale: 600)
         let d = UserDefaults.standard
         orientation = Orientation(rawValue: d.string(forKey: "orientation") ?? "") ?? .horizontal
         for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {

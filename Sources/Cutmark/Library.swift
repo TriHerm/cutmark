@@ -298,7 +298,7 @@ final class SessionDoc {
     }
 
     var projectName: String { url.deletingLastPathComponent().lastPathComponent }
-    var nextTakeNumber: Int { (meta.takes.map(\.number).max() ?? 0) + 1 }
+    var nextTakeNumber: Int { RecordingRecovery.nextTakeNumber(in: url, meta: meta) }
 
     var takeGroups: [(number: Int, takes: [Take])] {
         Dictionary(grouping: meta.takes, by: \.number)
@@ -317,10 +317,16 @@ final class SessionDoc {
 
     func fileURL(_ take: Take) -> URL { url.appending(path: take.file) }
 
-    func save() {
-        try? Store.encoder.encode(meta).write(to: url.appending(path: "session.json"))
+    @discardableResult
+    func save() -> Bool {
+        do {
+            try Store.encoder.encode(meta).write(to: url.appending(path: "session.json"), options: .atomic)
+        } catch {
+            return false
+        }
         try? manifest().write(to: url.appending(path: "SESSION.md"), atomically: true, encoding: .utf8)
         metaStamp = Store.modified(url.appending(path: "session.json"))
+        return true
     }
 
     func flushScript() {
@@ -371,14 +377,16 @@ final class SessionDoc {
         }
     }
 
-    func addCutmark(_ takes: [Take]) {
+    @discardableResult
+    func addCutmark(_ takes: [Take]) -> Bool {
         meta.takes.append(contentsOf: takes)
-        save()
+        guard save() else { return false }
         for t in Transcripts.voiceCutmark(takes) {
             Transcripts.shared.add(fileURL(t))
             // Word times on the video clock for the cut (faster-whisper): a job in the Jobs row.
             _ = Voice.launcher(["--prepare", url.path, String(t.number)])
         }
+        return true
     }
 
     /// A take just recorded for a storyboard shot: named after the shot ("Hook 1: I do my
