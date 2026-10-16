@@ -6,35 +6,58 @@ on:
       - 'v*.*.*'
 
 permissions:
-  contents: write
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  test:
-    runs-on: macos-15
+  verify-ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
     steps:
-      - uses: actions/checkout@v4
-      - name: Select Xcode 26.3
-        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
-      - name: Ensure ffmpeg
-        run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
-      - name: Test
+      - name: Require successful CI for this commit
         env:
-          CUTMARK_CI_SERIAL_SWIFT: '1'
-        run: ./test.sh --quiet
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --commit "$GITHUB_SHA" \
+            --workflow CI \
+            --event push \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId // empty')"
+          if [[ -z "$run_id" ]]; then
+            echo "::error::Release requires a successful CI run on $GITHUB_SHA. Wait for CI on main to pass, then re-run this workflow."
+            exit 1
+          fi
+          echo "Reusing successful CI run $run_id for $GITHUB_SHA."
 
   release:
-    needs: test
+    needs: verify-ci
     runs-on: xcode-27
+    timeout-minutes: 20
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Ensure Metal toolchain
+        run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
       - name: Build Cutmark.app
         env:
           CUTMARK_RELEASE: ${{ github.ref_name }}
           CUTMARK_ADHOC_SIGN: '1'
+          CUTMARK_REQUIRE_EMBED: '1'
           SKIP_TESTS: '1'
         run: ./build.sh
+      - name: Verify semantic search helper
+        run: test -x build.noindex/Cutmark.app/Contents/MacOS/cutmark-embed
       - name: Package Cutmark.dmg
         run: ./scripts/package-dmg.sh
       - name: Verify release artifact

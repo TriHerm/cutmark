@@ -5,7 +5,7 @@ Each worker process runs one chunk of a few tests from one class, so module glob
 changes cannot leak into a later chunk. The slowest chunks of the last run go first
 (~/Library/Caches/cutmark-mcp-test-times.json), so no long chunk starts last.
 
-    python3 mcp/tests/run_parallel.py [-j N]
+    python3 mcp/tests/run_parallel.py [-j N] [--fail-fast]
 """
 import argparse
 import json
@@ -58,7 +58,11 @@ def run(ids):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-j", type=int, default=max(2, min(8, (os.cpu_count() or 4) // 2)))
-    j = ap.parse_args().j
+    ap.add_argument("--fail-fast", action="store_true",
+                    help="stop remaining chunks after the first failed chunk")
+    args = ap.parse_args()
+    j = args.j
+    fail_fast = args.fail_fast
     sys.path.insert(0, HERE)
     todo, broken = chunks()
     try:
@@ -66,24 +70,61 @@ def main():
             last = json.load(f)
     except (OSError, ValueError):
         last = {}
-    todo.sort(key=lambda ids: -last.get(ids[0], 1.0))
+    # A cached run knows which chunks are slow. A brand-new chunk should still run first: it is the
+    # most likely place for a fresh regression, and otherwise fail-fast could leave it until the end.
+    unknown = max(last.values(), default=1.0) + 1.0
+    todo.sort(key=lambda ids: -last.get(ids[0], unknown))
     start = time.time()
     ran = skipped = 0
     bad, times = list(broken), {}
     # A fresh interpreter per chunk. Several test modules patch cutmark_mcp globals in setUp; reusing
     # a worker for a later module made the result depend on chunk scheduling.
-    with mp.get_context("spawn").Pool(j, maxtasksperchild=1) as pool:
-        for ids, n, s, b, took in pool.imap_unordered(run, todo):
-            ran += n
-            skipped += s
-            bad += b
-            times[ids[0]] = round(took, 2)
-    try:
-        os.makedirs(os.path.dirname(TIMES), exist_ok=True)
-        with open(TIMES, "w") as f:
-            json.dump(times, f)
-    except OSError:
-        pass
+    if not (fail_fast and bad):
+        with mp.get_context("spawn").Pool(j, maxtasksperchild=1) as pool:
+            if not fail_fast:
+                results = pool.imap_unordered(run, todo)
+                for ids, n, s, b, took in results:
+                    ran += n
+                    skipped += s
+                    bad += b
+                    times[ids[0]] = round(took, 2)
+            else:
+                remaining = iter(todo)
+                pending = []
+
+                def submit_one():
+                    try:
+                        ids = next(remaining)
+                    except StopIteration:
+                        return False
+                    pending.append(pool.apply_async(run, (ids,)))
+                    return True
+
+                for _ in range(j):
+                    if not submit_one():
+                        break
+                stop = False
+                while pending:
+                    ready = next((i for i, result in enumerate(pending) if result.ready()), None)
+                    if ready is None:
+                        time.sleep(0.02)
+                        continue
+                    ids, n, s, b, took = pending.pop(ready).get()
+                    ran += n
+                    skipped += s
+                    bad += b
+                    times[ids[0]] = round(took, 2)
+                    if b:
+                        stop = True
+                    if not stop:
+                        submit_one()
+    if not (fail_fast and bad):
+        try:
+            os.makedirs(os.path.dirname(TIMES), exist_ok=True)
+            with open(TIMES, "w") as f:
+                json.dump(times, f)
+        except OSError:
+            pass
     for tid, tb in bad:
         print("=" * 70 + f"\nFAIL: {tid}\n" + "-" * 70 + f"\n{tb}", file=sys.stderr)
     took = time.time() - start

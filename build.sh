@@ -79,6 +79,10 @@ if [[ -d embed && -d "$XCODE" ]] && DEVELOPER_DIR="$XCODE" xcrun metal --version
   for b in "$E"/*.bundle; do cp -R "$b" "$APP/Contents/Resources/"; done
   mkdir -p "$APP/Contents/Resources/Licenses/cutmark-embed" && cp embed/licenses/* "$APP/Contents/Resources/Licenses/cutmark-embed/"
 else
+  if [[ "${CUTMARK_REQUIRE_EMBED:-}" == 1 ]]; then
+    echo "Cutmark release requires the semantic-search helper, but the Xcode Metal toolchain is unavailable." >&2
+    exit 1
+  fi
   echo "No Xcode Metal toolchain: Cutmark builds without search by meaning (xcodebuild -downloadComponent MetalToolchain)."
 fi
 # Skills for Claude Code that the app installs at launch (the public copy ships them in skills/).

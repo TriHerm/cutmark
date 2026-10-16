@@ -8,23 +8,39 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: macos-15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Select Xcode 26.3
         run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
       - name: Ensure ffmpeg
         run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+      - name: Restore MCP test timings
+        continue-on-error: true
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/cutmark-mcp-test-times.json
+          key: cutmark-mcp-times-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          restore-keys: |
+            cutmark-mcp-times-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Test
         env:
+          CUTMARK_MCP_JOBS: '4'
+          CUTMARK_MCP_FAIL_FAST: '1'
           CUTMARK_CI_SERIAL_SWIFT: '1'
         run: ./test.sh --quiet
 
   build:
     needs: test
     runs-on: xcode-27
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Build Cutmark.app

@@ -101,7 +101,7 @@ Provider CLIs continue to own their own login and model configuration.
 
 ## Development and releases
 
-CI runs the Python MCP suite and Swift tests on macOS. Tags matching `v*` run the release workflow, build `Cutmark.app`, package `Cutmark.dmg`, verify the artifact, and create a GitHub Release.
+CI runs the Python MCP suite and Swift tests on macOS. Tags matching `v*` reuse the successful CI result for the same commit, then build `Cutmark.app`, package `Cutmark.dmg`, verify the artifact, and create a GitHub Release. Create the tag after CI on `main` is green; an early tag fails quickly and can be re-run after CI finishes.
 
 The iPhone companion source is branded as Cutmark but is not part of the current macOS release path.
 

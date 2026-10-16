@@ -21,7 +21,10 @@ if [[ -n "$FULL" && -f scripts/public/check-public-build.sh ]]; then TREE="$(tre
 # Without the Claude chat id: a suite started inside a Claude session must not write seen-rules files
 # (2026-10-10). Tests that need an id set it themselves.
 # In parallel processes: one by one they took 280 s (mcp/tests/run_parallel.py).
-env -u CLAUDE_CODE_SESSION_ID python3 mcp/tests/run_parallel.py || { echo "MCP tests failed"; exit 1; }
+MCP_ARGS=()
+[[ -n "${CUTMARK_MCP_JOBS:-}" ]] && MCP_ARGS+=(-j "$CUTMARK_MCP_JOBS")
+[[ "${CUTMARK_MCP_FAIL_FAST:-}" == 1 ]] && MCP_ARGS+=(--fail-fast)
+env -u CLAUDE_CODE_SESSION_ID python3 mcp/tests/run_parallel.py "${MCP_ARGS[@]}" || { echo "MCP tests failed"; exit 1; }
 DEV=/Library/Developer/CommandLineTools/Library/Developer
 run() {
   local selected
