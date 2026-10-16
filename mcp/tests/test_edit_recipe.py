@@ -238,6 +238,26 @@ class Pure(Base):
             t.shutil.disk_usage = real
         self.assertRegex(str(e.exception), r"Not enough free disk: this render needs about \d+ [MG]B, 1 MB is free\.")
 
+    def test_edit_time_map_handles_multiple_sources_reuse_and_lead(self):
+        cut = [
+            {"take": 2, "kind": "screen", "in": 5.0, "out": 7.0},
+            {"take": 1, "kind": "camera", "in": 1.0, "out": 4.0},
+            {"take": 2, "kind": "screen", "in": 5.5, "out": 6.5},
+        ]
+        m = t.edit_time_map(cut, lead=0.1)
+        self.assertEqual([(x["take"], x["kind"]) for x in m["spans"]], [(2, "screen"), (1, "camera"), (2, "screen")])
+        self.assertEqual([round(x["at"], 3) for x in m["spans"]], [0.1, 2.1, 5.1])
+        self.assertAlmostEqual(m["duration"], 6.1)
+        # The same source moment may intentionally appear more than once in an edit.
+        self.assertEqual([round(x, 3) for x in t.source_to_outputs(m, 2, "screen", 6.0)], [1.1, 5.6])
+        self.assertEqual(t.output_to_source(m, 3.1), (1, "camera", 2.0))
+        self.assertEqual(t.output_to_source(m, 2.1), (1, "camera", 1.0))  # a cut boundary belongs to the next span
+        self.assertEqual(t.source_to_outputs(m, 2, "screen", 7.0), [])
+        self.assertIsNone(t.output_to_source(m, 0.05))
+        rounded = t.edit_time_map([{"take": 1, "kind": "camera", "in": 1.0, "out": 1.0333, "len": 2 / 30.0}])
+        self.assertAlmostEqual(rounded["spans"][0]["out"], 1.0 + 2 / 30.0)
+        self.assertAlmostEqual(t.span_source_to_output(rounded["spans"][0], 1.0 + 2 / 30.0), 2 / 30.0)
+
     def test_render_plan_is_pure_and_the_voice_goes_in_once(self):
         self.add_take()
         song = self.music()

@@ -11534,22 +11534,82 @@ def run_step(x, timeout):
         raise RenderStop("the graphics step failed")
 
 
+def edit_time_map(cut, lead=0.0):
+    """One source↔output clock for a Cutmark edit.
+
+    A source is a (take, kind) pair, because one edit may reorder ranges from several camera/screen
+    files. `lead` is output-only time before the first source (today, a baked cover). `rate` is kept
+    internal for now: recipes still accept the legacy cut shape, but the map is ready for a later
+    speed segment without teaching transcripts/comments a second clock.
+    """
+    at = float(lead)
+    spans = []
+    for i, g in enumerate(cut):
+        a = float(g["in"])
+        declared_out = float(g.get("out", a + float(g.get("len") or 0)))
+        source_len = float(g.get("len") if g.get("len") is not None else declared_out - a)
+        # render_cut also enforces its frame-rounded `len`; after endpoint rounding that can be one
+        # frame longer than the intermediate `out`. The timeline describes the media actually kept.
+        b = a + source_len
+        rate = float(g.get("rate") or 1.0)
+        if rate <= 0:
+            raise ValueError("timeline rate must be greater than zero")
+        duration = source_len / rate
+        spans.append({"index": i, "take": g["take"], "kind": g["kind"], "in": a, "out": b,
+                      "at": at, "end": at + duration, "rate": rate})
+        at += duration
+    return {"lead": float(lead), "spans": spans, "duration": at}
+
+
+def span_source_to_output(span_, source_time):
+    """Output seconds for one moment inside a specific timeline span."""
+    t = float(source_time)
+    if not span_["in"] <= t <= span_["out"]:
+        return None
+    return span_["at"] + (min(t, span_["out"]) - span_["in"]) / span_["rate"]
+
+
+def source_to_outputs(timeline, take, kind, source_time):
+    """Every output occurrence of a source moment (a source range may be reused in one edit)."""
+    t = float(source_time)
+    out = []
+    spans = timeline["spans"]
+    for i, p in enumerate(spans):
+        contains = p["in"] <= t < p["out"] or (i == len(spans) - 1 and t == p["out"])
+        if p["take"] == take and p["kind"] == kind and contains:
+            out.append(span_source_to_output(p, t))
+    return out
+
+
+def output_to_source(timeline, output_time):
+    """(take, kind, source seconds) for one output moment; None for output-only lead time."""
+    t = float(output_time)
+    spans = timeline["spans"]
+    for i, p in enumerate(spans):
+        if p["at"] <= t < p["end"] or (i == len(spans) - 1 and t == p["end"]):
+            return p["take"], p["kind"], min(p["out"], p["in"] + (t - p["at"]) * p["rate"])
+    return None
+
+
 def render_words(s, r, cut, lead):
     """The final edit's words, from the takes' word times, and made_from for check_edit."""
-    at, ws, made = lead, [], []
-    for g in cut:
+    timeline = edit_time_map(cut, lead)
+    ws, made = [], []
+    for g, span_ in zip(cut, timeline["spans"]):
         doc = words_doc(os.path.join(s, voice_take(s, g["take"], g["kind"])["file"])) or {}
         for w in doc.get("words") or [] if is_ready(doc) else []:
             if w["end"] > g["in"] and w["start"] < g["in"] + g["len"]:
-                e = {"word": w["word"], "start": round(at + max(w["start"], g["in"]) - g["in"], 3),
-                     "end": round(at + min(w["end"], g["in"] + g["len"]) - g["in"], 3)}
+                a = span_source_to_output(span_, max(w["start"], g["in"]))
+                b = span_source_to_output(span_, min(w["end"], g["in"] + g["len"]))
+                if a is None or b is None:
+                    continue
+                e = {"word": w["word"], "start": round(a, 3), "end": round(b, 3)}
                 if w.get("filler"):
                     e["filler"] = True
                 ws.append(e)
         made.append({"take": g["take"], "kind": g["kind"], "in": g["in"], "out": round(g["in"] + g["len"], 4),
-                     "at": round(at, 4)})
-        at += g["len"]
-    return {"v": 2, "clock": "video", "source": "render_edit", "fps": r["frame"]["fps"], "duration": round(at, 3),
+                     "at": round(span_["at"], 4)})
+    return {"v": 2, "clock": "video", "source": "render_edit", "fps": r["frame"]["fps"], "duration": round(timeline["duration"], 3),
             "words": ws, "made_from": {"session_id": session_id(s), "cut": made}}
 
 
