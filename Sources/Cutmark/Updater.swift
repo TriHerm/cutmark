@@ -233,6 +233,7 @@ final class Updater {
         mnt="$0/mnt"; trap 'hdiutil detach -quiet "$mnt" 2>/dev/null || true' EXIT
         hdiutil verify -quiet "$1"
         if [ -n "$5" ]; then
+          xcrun stapler validate "$1" >/dev/null 2>&1
           spctl --assess --type open --context context:primary-signature "$1" >/dev/null 2>&1
         fi
         hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mnt" "$1"
