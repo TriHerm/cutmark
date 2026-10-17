@@ -28,6 +28,15 @@ struct EditTimeMap: Equatable {
         var outputDuration: Double { outputEnd - outputStart }
     }
 
+    struct MappedRange: Equatable {
+        let spanIndex: Int
+        let sourceIn: Double
+        let sourceOut: Double
+        let outputIn: Double
+        let outputOut: Double
+        let rate: Double
+    }
+
     let lead: Double
     let spans: [Span]
     let duration: Double
@@ -56,6 +65,27 @@ struct EditTimeMap: Equatable {
             let contains = span.sourceIn <= time && (time < span.sourceOut || (i == spans.count - 1 && time == span.sourceOut))
             guard span.source == source, contains else { return nil }
             return span.outputStart + (min(time, span.sourceOut) - span.sourceIn) / span.rate
+        }
+    }
+
+    /// Every intersection of one source interval with this edit. Each returned range belongs to one
+    /// timeline span, so reused source ranges never cross-pair their start/end occurrences. Source and
+    /// output intervals are half-open; a cut simply removes the part that does not intersect a span.
+    func outputRanges(source: Source, in sourceIn: Double, out sourceOut: Double) -> [MappedRange] {
+        guard sourceOut > sourceIn else { return [] }
+        return spans.compactMap { span in
+            guard span.source == source else { return nil }
+            let a = max(sourceIn, span.sourceIn)
+            let b = min(sourceOut, span.sourceOut)
+            guard b > a else { return nil }
+            return MappedRange(
+                spanIndex: span.index,
+                sourceIn: a,
+                sourceOut: b,
+                outputIn: span.outputStart + (a - span.sourceIn) / span.rate,
+                outputOut: span.outputStart + (b - span.sourceIn) / span.rate,
+                rate: span.rate
+            )
         }
     }
 
