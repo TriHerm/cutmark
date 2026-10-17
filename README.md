@@ -27,7 +27,7 @@ The first-run setup can guide you through missing dependencies. No AI provider i
 
 Download `Cutmark.dmg` from the latest GitHub release, open it, and copy `Cutmark.app` to Applications.
 
-The current latest public release, Cutmark 0.1.1, is ad-hoc signed and is not notarized. On first launch, macOS may require **System Settings → Privacy & Security → Open Anyway**. The repository's production release path for the next release requires Developer ID signing and Apple notarization.
+The current latest public release, Cutmark 0.2.0, uses the same ad-hoc signing channel as 0.1.1 and is not notarized. On first launch, macOS may require **System Settings → Privacy & Security → Open Anyway**. The repository also has a protected Developer ID + Apple notarization path for future production-signed releases once Apple credentials are configured.
 
 ## Build from source
 
@@ -104,7 +104,7 @@ Provider CLIs continue to own their own login and model configuration.
 
 CI runs the Python MCP suite and Swift tests on macOS. Tags matching `v*` reuse the successful CI result for the same commit, then build `Cutmark.app`, package `Cutmark.dmg`, verify the artifact, and create a GitHub Release. Create the tag after CI on `main` is green; an early tag fails quickly and can be re-run after CI finishes.
 
-Production tags also require the protected `production-release` GitHub environment with the Apple Developer ID and notarization credentials described in [`docs/releasing.md`](docs/releasing.md). Production signing is fail-closed; it does not fall back to an ad-hoc public artifact when credentials or notarization are unavailable.
+The protected production workflow uses the `production-release` GitHub environment with the Apple Developer ID and notarization credentials described in [`docs/releasing.md`](docs/releasing.md). Production signing is fail-closed; it does not fall back to an ad-hoc artifact when credentials or notarization are unavailable. Cutmark 0.2.0 was intentionally published through the legacy ad-hoc channel instead of weakening that production gate.
 
 The iPhone companion source is branded as Cutmark but is not part of the current macOS release path.
 
