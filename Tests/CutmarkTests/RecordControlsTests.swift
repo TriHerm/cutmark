@@ -46,4 +46,44 @@ struct RecordControlsTests {
         #expect(abs(roundTrip.x - saved.x) < 0.0001)
         #expect(abs(roundTrip.y - saved.y) < 0.0001)
     }
+
+    @Test func screenPreviewRespectsPrompterAndStageEdges() {
+        let stage = CGSize(width: 900, height: 600)
+        let preview = CGSize(width: 250, height: 150)
+        let topRight = ScreenPreviewPlacement.point(normalized: CGPoint(x: 1, y: 0), stage: stage,
+                                                     control: preview, topInset: 96)
+        #expect(topRight.x == 757)
+        #expect(topRight.y == 189)
+
+        let bottomLeft = ScreenPreviewPlacement.clamped(point: CGPoint(x: -100, y: 900), stage: stage,
+                                                        control: preview, topInset: 96)
+        #expect(bottomLeft.x == 143)
+        #expect(bottomLeft.y == 507)
+    }
+
+    @Test func screenPreviewPositionSurvivesResizeAndSmallStage() {
+        let stage = CGSize(width: 900, height: 600)
+        let preview = CGSize(width: 250, height: 150)
+        let saved = CGPoint(x: 0.28, y: 0.72)
+        let point = ScreenPreviewPlacement.point(normalized: saved, stage: stage,
+                                                  control: preview, topInset: 96)
+        let restored = ScreenPreviewPlacement.normalized(point: point, stage: stage,
+                                                          control: preview, topInset: 96)
+        #expect(abs(restored.x - saved.x) < 0.0001)
+        #expect(abs(restored.y - saved.y) < 0.0001)
+
+        // A low stage cannot reserve the full prompter inset; keep the preview visible.
+        let compact = CGSize(width: 380, height: 240)
+        let compactPreview = CGSize(width: 180, height: 160)
+        let clamped = ScreenPreviewPlacement.point(normalized: CGPoint(x: 1, y: 0), stage: compact,
+                                                   control: compactPreview, topInset: 90)
+        #expect(clamped.x + compactPreview.width / 2 <= compact.width - 18)
+        #expect(clamped.y - compactPreview.height / 2 >= 18)
+        #expect(clamped.y + compactPreview.height / 2 <= compact.height - 18)
+
+        let portraitWidth = ScreenPreviewPlacement.width(stage: compact, aspect: 9.0 / 16.0)
+        #expect(portraitWidth < 180)
+        #expect(portraitWidth / (9.0 / 16.0) + 28 + 36 <= compact.height)
+        #expect(ScreenPreviewPlacement.width(stage: stage, aspect: 16.0 / 9.0) == 260)
+    }
 }

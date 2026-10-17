@@ -985,6 +985,7 @@ struct DetailView: View {
     @ObservedObject var camera: CameraRecorder
     @ObservedObject var screen: ScreenRecorder
     @AppStorage("rightTab") private var rightTab = "script"
+    @AppStorage("screenPreviewVisible") private var screenPreviewVisible = true
     @Environment(\.colorScheme) private var scheme
     /// The full-window tabs opened in this session so far. They stay mounted.
     @State private var opened = KeptTabs()
@@ -1031,7 +1032,7 @@ struct DetailView: View {
     /// warming/countdown so the real recording owns ScreenCaptureKit by itself.
     private var screenPreviewWanted: Bool {
         recordOnly && cover == nil && app.mode == .cameraScreen && !app.isRecording
-            && library.selectedSessions.count <= 1
+            && library.selectedSessions.count <= 1 && screenPreviewVisible
     }
 
     /// Record with one session open, a script in it, and no welcome card over it: the notch opens
@@ -1059,6 +1060,13 @@ struct DetailView: View {
         .onChange(of: notchRecord, initial: true) { _, on in NotchPanel.shared.follow(record: on, app) }
         .onChange(of: screenPreviewWanted, initial: true) { _, on in screen.setPreviewing(on) }
         .onChange(of: screen.displayID) { _, _ in if screenPreviewWanted { screen.setPreviewing(true) } }
+        .onChange(of: screen.displays) { _, _ in
+            if screenPreviewWanted {
+                // A detached display may reconnect without changing its saved selection.
+                screen.setPreviewing(false)
+                screen.setPreviewing(true)
+            }
+        }
         // A take that ran on while you left Record: the notch goes once it ends.
         .onChange(of: app.isRecording) { _, _ in NotchPanel.shared.follow(record: notchRecord, app) }
         // Another board (Plugins, Performance…) replaces this view: the notch goes too.
@@ -1188,20 +1196,11 @@ struct DetailView: View {
                         // Removing its layer while the session stops or starts deadlocks AVFoundation.
                         CameraCard(camera: camera, doc: library.current, corner: plugged?.camera, accessory: stageButtons)
                         if screenPreviewWanted {
-                            VStack {
-                                HStack {
-                                    Spacer()
-                                    ScreenPreviewCard(
-                                        feed: screen.preview,
-                                        displayName: screen.displays.first { $0.id == screen.displayID }?.name ?? "Display"
-                                    )
-                                    .frame(width: min(260, max(180, stageSize.width * 0.34)))
-                                }
-                                Spacer()
-                            }
-                            .padding(.top, max(60, notchReach + 12))
-                            .padding(.trailing, 18)
-                            .allowsHitTesting(false)
+                            ScreenPreviewFloating(
+                                feed: screen.preview,
+                                displayName: screen.displays.first { $0.id == screen.displayID }?.name ?? "Display",
+                                topInset: max(60, notchReach + 12)
+                            )
                             .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
                         }
                         if app.preview != nil {
@@ -1511,11 +1510,100 @@ private struct StageHoverBar: ViewModifier {
     }
 }
 
+/// An independent view keeps screenshot updates and drag state out of the whole Record stage.
+private struct ScreenPreviewFloating: View {
+    @ObservedObject var feed: ScreenPreviewFeed
+    let displayName: String
+    let topInset: CGFloat
+    @AppStorage("screenPreviewVisible") private var visible = true
+    @AppStorage("screenPreviewX") private var savedX = 1.0
+    @AppStorage("screenPreviewY") private var savedY = 0.0
+    @State private var cardSize = CGSize(width: 240, height: 170)
+    @State private var dragOrigin: CGPoint?
+    @State private var dragPoint: CGPoint?
+
+    var body: some View {
+        GeometryReader { stage in
+            let aspect = feed.image.map { CGFloat($0.width) / max(1, CGFloat($0.height)) } ?? 16.0 / 10.0
+            let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
+            let resting = ScreenPreviewPlacement.point(normalized: saved, stage: stage.size,
+                                                       control: cardSize, topInset: topInset)
+            ScreenPreviewCard(feed: feed, displayName: displayName, onHide: { visible = false }) { translation, ended in
+                move(translation: translation, ended: ended, stage: stage.size)
+            }
+            .frame(width: ScreenPreviewPlacement.width(stage: stage.size, aspect: aspect))
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                if size.width > 0, size.height > 0, size != cardSize { cardSize = size }
+            }
+            .position(dragPoint ?? resting)
+        }
+    }
+
+    private func move(translation: CGSize, ended: Bool, stage: CGSize) {
+        let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
+        let base = dragOrigin ?? ScreenPreviewPlacement.point(normalized: saved, stage: stage,
+                                                               control: cardSize, topInset: topInset)
+        if dragOrigin == nil { dragOrigin = base }
+        let proposed = CGPoint(x: base.x + translation.width, y: base.y + translation.height)
+        let final = ScreenPreviewPlacement.clamped(point: proposed, stage: stage, control: cardSize,
+                                                   topInset: topInset)
+        if ended {
+            let normalized = ScreenPreviewPlacement.normalized(point: final, stage: stage, control: cardSize,
+                                                                 topInset: topInset)
+            savedX = Double(normalized.x)
+            savedY = Double(normalized.y)
+            dragOrigin = nil
+            dragPoint = nil
+        } else {
+            dragPoint = final
+        }
+    }
+}
+
+/// Reserve space for the prompter while keeping the whole preview inside a resized stage.
+struct ScreenPreviewPlacement {
+    /// Portrait displays need a narrower card in a short stage, not a clipped thumbnail.
+    static func width(stage: CGSize, aspect: CGFloat) -> CGFloat {
+        let preferred = min(260, max(180, stage.width * 0.34))
+        let fitsHeight = max(70, (stage.height - 36 - 28) * max(0.1, aspect))
+        return min(preferred, fitsHeight, max(70, stage.width - 36))
+    }
+
+    private static func region(stage: CGSize, control: CGSize, topInset: CGFloat, margin: CGFloat) -> (CGSize, CGFloat) {
+        let top = min(max(0, topInset), max(0, stage.height - control.height - 2 * margin))
+        return (CGSize(width: stage.width, height: max(0, stage.height - top)), top)
+    }
+
+    static func point(normalized: CGPoint, stage: CGSize, control: CGSize, topInset: CGFloat,
+                      margin: CGFloat = 18) -> CGPoint {
+        let (size, top) = region(stage: stage, control: control, topInset: topInset, margin: margin)
+        let p = RecordPillPlacement.point(normalized: normalized, stage: size, control: control, margin: margin)
+        return CGPoint(x: p.x, y: p.y + top)
+    }
+
+    static func clamped(point: CGPoint, stage: CGSize, control: CGSize, topInset: CGFloat,
+                        margin: CGFloat = 18) -> CGPoint {
+        let (size, top) = region(stage: stage, control: control, topInset: topInset, margin: margin)
+        let p = RecordPillPlacement.clamped(point: CGPoint(x: point.x, y: point.y - top),
+                                            stage: size, control: control, margin: margin)
+        return CGPoint(x: p.x, y: p.y + top)
+    }
+
+    static func normalized(point: CGPoint, stage: CGSize, control: CGSize, topInset: CGFloat,
+                           margin: CGFloat = 18) -> CGPoint {
+        let (size, top) = region(stage: stage, control: control, topInset: topInset, margin: margin)
+        return RecordPillPlacement.normalized(point: CGPoint(x: point.x, y: point.y - top),
+                                               stage: size, control: control, margin: margin)
+    }
+}
+
 /// The selected display as a small picture-in-picture while preparing a camera + screen take.
 /// ScreenRecorder publishes frames through a separate object so only this thumbnail redraws.
 private struct ScreenPreviewCard: View {
     @ObservedObject var feed: ScreenPreviewFeed
     let displayName: String
+    let onHide: () -> Void
+    let onMove: (CGSize, Bool) -> Void
 
     private var aspect: CGFloat {
         guard let image = feed.image, image.height > 0 else { return 16.0 / 10.0 }
@@ -1544,8 +1632,22 @@ private struct ScreenPreviewCard: View {
             HStack(spacing: 6) {
                 Image(systemName: "display")
                 Text(displayName).lineLimit(1)
-                Spacer(minLength: 6)
-                Text("PREVIEW").font(Theme.mono(9)).foregroundStyle(Theme.faint)
+                Spacer(minLength: 3)
+                Image(systemName: "line.3.horizontal")
+                    .foregroundStyle(Theme.faint)
+                    .frame(width: 20, height: 28)
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 1)
+                        .onChanged { onMove($0.translation, false) }
+                        .onEnded { onMove($0.translation, true) })
+                    .help("Drag to move screen preview")
+                    .accessibilityLabel("Move screen preview")
+                Button(action: onHide) {
+                    Image(systemName: "eye.slash").frame(width: 20, height: 28)
+                }
+                .buttonStyle(.plain)
+                .help("Hide preview. Screen recording stays on.")
+                .accessibilityLabel("Hide screen preview")
             }
             .font(Theme.sans(10.5, .medium))
             .foregroundStyle(Theme.ink)
@@ -1618,6 +1720,7 @@ struct RecordPill: View {
     @ObservedObject var screen: ScreenRecorder
     @AppStorage("recordPillX") private var savedX = 0.5
     @AppStorage("recordPillY") private var savedY = 1.0
+    @AppStorage("screenPreviewVisible") private var screenPreviewVisible = true
     @State private var devices = false
     @State private var hover = false
     @State private var pillSize = CGSize(width: 420, height: 60)
@@ -1763,7 +1866,11 @@ struct RecordPill: View {
         .help("Camera, microphone and screen")
         .accessibilityLabel("Camera, microphone and screen")
         .cutmarkMenu(isPresented: $devices, width: 270) { [app, camera, screen] in
-            DevicePanel.rows(mode: app.mode, camera: camera, screen: screen)
+            DevicePanel.rows(mode: app.mode, camera: camera, screen: screen,
+                             previewVisible: screenPreviewVisible) {
+                screenPreviewVisible.toggle()
+                screen.setPreviewing(screenPreviewVisible, requestPermission: screenPreviewVisible)
+            }
         }
     }
 
@@ -1893,7 +2000,8 @@ struct LivePill: View {
 /// A Cutmark menu since 2026-10-11: one list, a section each for camera, microphone and screen.
 enum DevicePanel {
     @MainActor @MenuBuilder
-    static func rows(mode: Mode, camera: CameraRecorder, screen: ScreenRecorder) -> [MenuItem] {
+    static func rows(mode: Mode, camera: CameraRecorder, screen: ScreenRecorder,
+                     previewVisible: Bool, togglePreview: @escaping () -> Void) -> [MenuItem] {
         MenuLabel("Camera")
         for d in camera.videoDevices {
             MenuButton(d.localizedName, icon: "video", checked: d.uniqueID == camera.videoID) { camera.chooseVideo(d.uniqueID) }
@@ -1913,6 +2021,8 @@ enum DevicePanel {
             for d in screen.displays {
                 MenuButton(d.name, icon: "display", checked: d.id == screen.displayID) { screen.displayID = d.id }
             }
+            MenuButton("Screen preview", icon: "eye", checked: previewVisible,
+                       keepsOpen: true, action: togglePreview)
             MenuView("screen-note") {
                 Text("Cutmark hides itself from the screen file.").font(Theme.sans(11)).foregroundStyle(Theme.faint)
                     .padding(.leading, 33).padding(.trailing, 8).padding(.bottom, 4)
