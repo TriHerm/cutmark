@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import CoreText
+import CryptoKit
 import SwiftUI
 
 // The style library: a style guide, design tokens and reusable assets, for Claude to build on and for
@@ -34,12 +35,55 @@ enum StyleLib {
     static func styles(root: URL) -> URL { user(root: root).appending(path: "styles") }
     static func style(_ name: String, root: URL) -> URL { styles(root: root).appending(path: name) }
 
-    /// Your styles, A–Z.
-    static func styleNames(root: URL) -> [String] {
-        ((try? FileManager.default.contentsOfDirectory(at: styles(root: root), includingPropertiesForKeys: nil,
-                                                       options: [.skipsHiddenFiles])) ?? [])
-            .filter(\.hasDirectoryPath).map(\.lastPathComponent)
+    /// Exact trees shipped by Takes/Cutmark before the bundled Magazine demo was retired.
+    static let legacyMagazineDigests: Set<String> = [
+        "623a7cc28ffb320ca585687b0c3f2e6a320eaf4a979d3c7e6d6462655fd4953a",
+        "efd4fe67a19503a3a66b680d9fc3d808fc1deaf947d7fd74ec0e7e2d07491544",
+    ]
+
+    /// Your styles, A–Z. An unchanged bundled demo stays on disk for compatibility but does not
+    /// appear as a user style after Cutmark stops shipping it.
+    static func styleNames(root: URL, retiredDigests: Set<String>? = nil) -> [String] {
+        let retiredDigests = retiredDigests ?? legacyMagazineDigests
+        return ((try? FileManager.default.contentsOfDirectory(at: styles(root: root), includingPropertiesForKeys: nil,
+                                                              options: [.skipsHiddenFiles])) ?? [])
+            .filter { $0.hasDirectoryPath && !isLegacyShippedStyle($0, digests: retiredDigests) }.map(\.lastPathComponent)
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    /// Magazine was a Takes-era sample that older Cutmark builds copied into each library. Only an
+    /// exact shipped tree is retired. A changed or extended copy remains visible as the user's work.
+    static func isLegacyShippedStyle(_ dir: URL, digests: Set<String>) -> Bool {
+        guard dir.lastPathComponent == "Magazine" else { return false }
+        let meta = json(dir.appending(path: "style.json"))
+        guard meta["shipped"] as? Bool == true, meta["template"] as? String == "magazine",
+              let digest = treeDigest(dir) else { return false }
+        return digests.contains(digest)
+    }
+
+    /// Stable digest of every regular file, including its relative path. Any edit, add or removal
+    /// changes the result, which lets us distinguish an untouched demo from a customized copy.
+    static func treeDigest(_ dir: URL) -> String? {
+        let fm = FileManager.default
+        guard let e = fm.enumerator(atPath: dir.path) else { return nil }
+        var files: [(path: String, url: URL)] = []
+        for case let path as String in e {
+            let url = dir.appending(path: path)
+            guard let type = (try? fm.attributesOfItem(atPath: url.path)[.type]) as? FileAttributeType else { return nil }
+            if type == .typeDirectory { continue }
+            guard type == .typeRegular else { return nil }
+            files.append((path, url))
+        }
+        files.sort { $0.path < $1.path }
+        var hash = SHA256()
+        for file in files {
+            guard let path = file.path.data(using: .utf8), let data = try? Data(contentsOf: file.url) else { return nil }
+            hash.update(data: path)
+            hash.update(data: Data([0]))
+            hash.update(data: data)
+            hash.update(data: Data([0]))
+        }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     /// The style a project uses: its pick, else Magazine, else the first one.
@@ -95,10 +139,10 @@ enum StyleLib {
         return (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] ?? [:]
     }
 
-    /// The styles Cutmark ships, in the app's Resources/styles (2026-10-08: a new user saw an empty
-    /// Styles board). Each is copied into the library once. A style of the same name that is already
-    /// there stays as it is, and one you delete does not come back: "seededStyles" remembers, per
-    /// library folder. Returns the names it copied.
+    /// Compatibility hook for builds that carry styles in Resources/styles. Each is copied into the
+    /// library once. A style of the same name that is already there stays as it is, and one you delete
+    /// does not come back: "seededStyles" remembers, per library folder. Current builds ship none.
+    /// Returns the names it copied.
     static let seededKey = "seededStyles"
 
     @discardableResult
@@ -1324,7 +1368,7 @@ struct NewStyleSheet: View {
     @AppStorage("styleSheetSeen") private var seen = false
     @State private var showSteps = false
 
-    private static let ideas = ["Yellow captions, black cards", "Magazine, serif titles", "Fast cuts, bold words"]
+    private static let ideas = ["Yellow captions, black cards", "Muted palette, serif titles", "Fast cuts, bold words"]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {

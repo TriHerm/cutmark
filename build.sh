@@ -92,11 +92,6 @@ else
 fi
 # Skills for Claude Code that the app installs at launch (the public copy ships them in skills/).
 [[ -d skills ]] && cp -R skills "$APP/Contents/Resources/skills"
-# Default styles, copied into the library at launch (StyleLib.seed). Only what a style needs.
-if [[ -d styles ]]; then
-  mkdir -p "$APP/Contents/Resources/styles"
-  rsync -a --exclude 'snapshots/' --exclude 'renders/' --exclude 'footage.mp4' --exclude 'node_modules/' styles/ "$APP/Contents/Resources/styles/"
-fi
 # The skills the Skills plugin offers (private for now): Cutmark's own and those in plugins/skills.
 if [[ -d plugins/skills ]]; then
   mkdir -p "$APP/Contents/Resources/plugin-skills"

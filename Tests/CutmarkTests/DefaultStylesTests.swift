@@ -2,33 +2,42 @@ import Foundation
 import Testing
 @testable import Cutmark
 
-/// The styles Cutmark ships (styles/ in the repo) and how they reach the library (StyleLib.seed).
+/// Compatibility around styles older Cutmark builds shipped and copied into the library.
 @MainActor
 struct DefaultStylesTests {
     static let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     static let shipped = repo.appending(path: "styles")
 
-    @Test func eachShippedStyleIsComplete() throws {
+    @Test func legacyMagazineIsNoLongerBundled() {
         let fm = FileManager.default
-        let names = try fm.contentsOfDirectory(atPath: Self.shipped.path).filter { !$0.hasPrefix(".") }
-        #expect(names.contains("Magazine"))
-        for n in names {
-            let d = Self.shipped.appending(path: n)
-            for f in ["README.md", "tokens.json", "style.json", "preview.mp4", "preview.png"] {
-                #expect(fm.fileExists(atPath: d.appending(path: f).path), "\(n) has no \(f)")
-            }
-            let tokens = StyleLib.json(d.appending(path: "tokens.json"))
-            #expect(tokens["color"] != nil, "\(n): tokens.json has no colors")
-            // Fonts ship with their license.
-            let fonts = (try? fm.contentsOfDirectory(atPath: d.appending(path: "fonts").path)) ?? []
-            if fonts.contains(where: { $0.hasSuffix(".ttf") || $0.hasSuffix(".otf") }) {
-                #expect(fonts.contains { $0.hasPrefix("OFL") }, "\(n): fonts without a license file")
-            }
-            // Every source part named in assets.json is there.
-            for (asset, _) in StyleLib.json(d.appending(path: "assets.json")) {
-                #expect(fm.fileExists(atPath: d.appending(path: asset).path), "\(n): \(asset) is missing")
-            }
-        }
+        #expect(!fm.fileExists(atPath: Self.shipped.appending(path: "Magazine").path))
+    }
+
+    @Test func onlyAnUnchangedLegacyMagazineStaysOffTheBoard() throws {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appending(path: "legacy-style-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: tmp) }
+        let legacy = StyleLib.style("Magazine", root: tmp)
+        try fm.createDirectory(at: legacy, withIntermediateDirectories: true)
+        try #"{"template":"magazine","shipped":true}"#
+            .write(to: legacy.appending(path: "style.json"), atomically: true, encoding: .utf8)
+        try "keep me".write(to: legacy.appending(path: "README.md"), atomically: true, encoding: .utf8)
+        let exact = try #require(StyleLib.treeDigest(legacy))
+
+        #expect(StyleLib.styleNames(root: tmp, retiredDigests: [exact]).isEmpty)
+        #expect(fm.fileExists(atPath: legacy.appending(path: "README.md").path))
+
+        try "customized".write(to: legacy.appending(path: "README.md"), atomically: true, encoding: .utf8)
+        #expect(StyleLib.styleNames(root: tmp, retiredDigests: [exact]) == ["Magazine"])
+
+        let userRoot = fm.temporaryDirectory.appending(path: "user-style-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: userRoot) }
+        let userMagazine = StyleLib.style("Magazine", root: userRoot)
+        try fm.createDirectory(at: userMagazine, withIntermediateDirectories: true)
+        try #"{"template":"magazine"}"#
+            .write(to: userMagazine.appending(path: "style.json"), atomically: true, encoding: .utf8)
+        let userDigest = try #require(StyleLib.treeDigest(userMagazine))
+        #expect(StyleLib.styleNames(root: userRoot, retiredDigests: [userDigest]) == ["Magazine"])
     }
 
     @Test func seedCopiesOnceAndKeepsYours() throws {
