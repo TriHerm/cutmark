@@ -140,6 +140,21 @@ class Base(unittest.TestCase):
         with open(os.path.join(self.s, rel)) as f:
             return json.load(f)
 
+    def auto_zoom(self, items, take=1, digest=None, through=3.0, plan=None):
+        """A normalized-looking v1 contract for pure recipe tests."""
+        digest = digest or "a" * 64
+        plan = plan or "b" * 64
+        made = []
+        for z in items:
+            semantic = dict({"take": take, "kind": "screen", "trigger": 1.0, "in": 0.8, "out": 2.0,
+                             "focus": {"x": 0.5, "y": 0.5}, "scale": 1.35,
+                             "reason": "primary_click"}, **z)
+            semantic.setdefault("id", t.auto_zoom_id(semantic))
+            semantic.setdefault("ease", 0.18)
+            made.append(semantic)
+        return {"v": 1, "planner": t.AUTO_ZOOM_PLANNER, "plan": plan,
+                "inputs": [{"take": take, "sha256": digest, "through": through}], "items": made}
+
 
 class Pure(Base):
     def test_merge_patch(self):
@@ -351,17 +366,231 @@ class Pure(Base):
         self.assertEqual(out["suggestions"][0]["out"], 2.0)
         self.assertEqual(out["inputs"][0]["through"], 2.0)
         self.assertEqual(out["inputs"][0]["sha256"], hashlib.sha256(before).hexdigest())
-        os.makedirs(os.path.join(self.s, "edits"), exist_ok=True)
+        self.clip("edits/hook-v1.mp4", secs=1)
+        cover = self.thumb()
         t.write_json(os.path.join(self.s, "edits", "hook-v1.recipe.json"),
-                     {"cut": [{"take": 3, "kind": "screen", "in": 0.5, "out": 1.5}],
-                      "cover": {"seconds": 0.1}})
+                     {"name": "hook", "edit": "edits/hook-v1.mp4",
+                      "cut": [{"take": 3, "kind": "screen", "in": 0.5, "out": 1.5}],
+                      "frame": {"shape": "source"}, "cover": {"image": cover, "seconds": 0.1}})
         mapped = t.t_suggest_auto_zooms({"session": self.s, "take": 3, "edit": "hook-v1"})
+        self.assertEqual(mapped["base"], "hook-v1")
+        self.assertRegex(mapped["plan"], r"^[0-9a-f]{64}$")
         self.assertEqual(len(mapped["output"]), 1)
         self.assertEqual(round(mapped["output"][0]["output_trigger"], 2), 0.60)
         self.assertEqual((round(mapped["output"][0]["output_in"], 2), round(mapped["output"][0]["output_out"], 2)),
                          (0.48, 1.10))
+        self.assertEqual(mapped["applicable_ids"], [mapped["suggestions"][0]["id"]])
+        self.assertIn("apply_auto_zooms", mapped["next"])
         with open(path, "rb") as f:
             self.assertEqual(f.read(), before)
+
+    def test_recipe_zooms_are_source_clock_screen_only_and_map_per_cut_span(self):
+        self.add_take(n=1, secs=3, kind="camera", size="160x120")
+        self.add_take(n=2, secs=3, kind="screen", size="320x180")
+        recipe = {"name": "zoomed", "cut": [
+            {"take": 1, "kind": "camera", "in": 0, "out": 1},
+            {"take": 2, "kind": "screen", "in": 0, "out": 2},
+            {"take": 2, "kind": "screen", "in": 0.5, "out": 1.5},
+        ], "auto_zoom": self.auto_zoom([
+            {"take": 2, "trigger": 1.0, "in": 0.5, "out": 1.5, "focus": {"x": 0.75, "y": 0.25}}
+        ], take=2)}
+        r = t.norm_recipe(self.s, recipe)
+        item = r["auto_zoom"]["items"][0]
+        self.assertEqual(item["scale"], 1.35)
+        self.assertEqual(item["ease"], 0.18)
+        t.check_recipe(self.s, r)
+        t.fill_recipe(self.s, r)
+        self.assertEqual([(x["width"], x["height"]) for x in r["takes"]], [(160, 120), (320, 180)])
+        px, py, cw, ch = t.zoom_focus_on_canvas(r, item)
+        self.assertEqual((round(px, 2), round(py, 2), cw, ch), (120.0, 37.5, 160.0, 120.0))
+        self.assertEqual(tuple(round(x, 4) for x in t.zoom_focus_in_baseline(r, item)),
+                         (0.75, 0.3125))
+        mapped = t.map_recipe_auto_zoom(t.edit_time_map(r["cut"]), r["auto_zoom"]["items"])
+        self.assertEqual([(round(x["output_in"], 2), round(x["output_out"], 2), x["span"]) for x in mapped],
+                         [(1.5, 2.5, 1), (3.0, 4.0, 2)])
+
+    def test_recipe_zoom_refuses_camera_overlap_and_a_static_crop_that_excludes_focus(self):
+        self.add_take(n=1, secs=3, kind="screen", size="160x120")
+        base = {"name": "zoomed", "cut": [{"take": 1, "kind": "screen", "in": 0, "out": 3}]}
+        with self.assertRaisesRegex(ValueError, "kind must be screen"):
+            t.norm_recipe(self.s, dict(base, auto_zoom=self.auto_zoom([
+                {"kind": "camera", "trigger": 1.0, "in": 0.5, "out": 1.5}
+            ])))
+        overlap = t.norm_recipe(self.s, dict(base, auto_zoom=self.auto_zoom([
+            {"trigger": 1.0, "in": 0.5, "out": 1.5, "focus": {"x": 0.4, "y": 0.5}},
+            {"trigger": 1.6, "in": 1.4, "out": 2.0, "focus": {"x": 0.7, "y": 0.5}},
+        ])))
+        with self.assertRaisesRegex(ValueError, "overlaps"):
+            t.check_recipe(self.s, overlap)
+        cropped = t.norm_recipe(self.s, dict(base,
+            frame={"shape": "source", "crop": {"x": 40, "y": 20, "w": 80, "h": 80}},
+            auto_zoom=self.auto_zoom([
+                {"trigger": 1.0, "in": 0.5, "out": 1.5, "focus": {"x": 0.05, "y": 0.5}}
+            ])))
+        t.check_recipe(self.s, cropped)
+        with self.assertRaisesRegex(ValueError, "baseline viewport"):
+            t.fill_recipe(self.s, cropped)
+
+    def test_zoom_picture_chain_is_dynamic_but_keeps_authored_overlays_outside_it(self):
+        self.add_take(n=1, secs=3, kind="screen", size="160x120")
+        self.clip("_edit/zoomed/layer.mov", secs=1)
+        r = t.norm_recipe(self.s, {"name": "zoomed", "cut": [{"take": 1, "kind": "screen", "in": 0, "out": 3}],
+                                   "frame": {"shape": "source", "w": 90, "h": 160},
+                                   "auto_zoom": self.auto_zoom([
+                                       {"trigger": 1.2, "in": 0.8, "out": 2.2,
+                                        "focus": {"x": 0.55, "y": 0.5}, "scale": 1.4}
+                                   ]),
+                                   "over": [{"file": "_edit/zoomed/layer.mov", "at": 1.0, "out": 1.0}]})
+        t.check_recipe(self.s, r)
+        t.fill_recipe(self.s, r)
+        chain = t.picture_chain(r, r["cut"], 90, 160, 30)
+        self.assertIn("eval=frame", chain)
+        self.assertIn("cos(PI", chain)
+        self.assertIn("crop=90:160", chain)
+        self.assertEqual(chain.count("scale="), 1)
+        self.assertIn("force_original_aspect_ratio=increase", chain)
+        plan = t.render_plan(self.s, r, "TMP", "OUT.mp4", {"length": 3.0, "cut": r["cut"]})
+        graph = plan["picture"][plan["picture"].index("-filter_complex") + 1]
+        self.assertIn("overlay=", graph)
+        self.assertLess(graph.index("eval=frame"), graph.index("overlay="))
+
+        # Neutral time must be pixel-identical to the legacy no-zoom framing, including awkward
+        # aspect ratios where the visible source viewport is fractional (160x120 -> 90x160).
+        pattern = os.path.join(self.s, "pattern.mp4")
+        ff("-f", "lavfi", "-i", "testsrc2=s=160x120:r=30:d=3", "-c:v", "libx264", "-pix_fmt", "yuv420p", pattern)
+        legacy = "scale=90:160:force_original_aspect_ratio=increase,crop=90:160,setsar=1,fps=30,format=yuv420p"
+        dynamic = chain.removeprefix("[0:v]")
+        def first_frame(filters):
+            return subprocess.run([FFMPEG, "-v", "error", "-i", pattern, "-vf", filters,
+                                   "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                                  check=True, capture_output=True).stdout
+        self.assertEqual(first_frame(dynamic), first_frame(legacy))
+
+    def test_auto_zoom_baseline_geometry_and_effect_endpoint_are_strict(self):
+        r = {"takes": [{"take": 1, "kind": "screen", "width": 1920, "height": 1080}],
+             "frame": {"w": 1080, "h": 1920}}
+        self.assertEqual(t.baseline_viewport(r), (656.25, 0.0, 607.5, 1080.0))
+        r["frame"] = {"w": 1080, "h": 1080}
+        self.assertEqual(t.baseline_viewport(r), (420.0, 0.0, 1080.0, 1080.0))
+        r["frame"] = {"w": 1080, "h": 1350}
+        self.assertEqual(t.baseline_viewport(r), (528.0, 0.0, 864.0, 1080.0))
+        item = {"id": "az-aaaaaaaaaaaa", "take": 1, "kind": "screen", "trigger": 2.0,
+                "in": 1.8, "out": 2.2, "focus": {"x": 0.5, "y": 0.5}, "scale": 1.35,
+                "ease": 0.18, "reason": "primary_click"}
+        timeline = t.edit_time_map([{"take": 1, "kind": "screen", "in": 0, "out": 2.0}])
+        self.assertEqual(t.map_recipe_auto_zoom(timeline, [item]), [])
+        self.assertEqual(t.map_auto_zooms(timeline, 1, [item]), [])
+        item["trigger"] = 1.0
+        item["in"], item["out"] = 0.8, 1.8
+        timeline = t.edit_time_map([
+            {"take": 1, "kind": "screen", "in": 0, "out": 2.0},
+            {"take": 1, "kind": "screen", "in": 0.9, "out": 1.1},
+        ])
+        self.assertEqual(len(t.map_recipe_auto_zoom(timeline, [item])), 1)
+        self.assertEqual(len(t.map_auto_zooms(timeline, 1, [item])), 1)
+
+    def test_auto_zoom_preview_uses_the_same_frame_rounded_cut_as_render(self):
+        self.add_take(n=1, secs=2, kind="screen", size="160x120")
+        rounded = t.rounded_render_cut(self.s, [
+            {"take": 1, "kind": "screen", "in": 0.0, "out": 1.016},
+        ])
+        self.assertAlmostEqual(rounded[0]["out"], 1.0, places=6)
+        self.assertAlmostEqual(rounded[0]["len"], 1.0, places=6)
+        item = {"id": "az-bbbbbbbbbbbb", "take": 1, "kind": "screen", "trigger": 1.01,
+                "in": 0.9, "out": 1.2, "focus": {"x": 0.5, "y": 0.5}, "scale": 1.35,
+                "ease": 0.18, "reason": "primary_click"}
+        timeline = t.edit_time_map(rounded)
+        self.assertEqual(t.map_auto_zooms(timeline, 1, [item]), [])
+        self.assertEqual(t.map_recipe_auto_zoom(timeline, [item]), [])
+        recipe = t.norm_recipe(self.s, {"name": "edge", "cut": [
+            {"take": 1, "kind": "screen", "in": 0.0, "out": 1.016},
+        ], "auto_zoom": self.auto_zoom([
+            {"trigger": 1.01, "in": 0.9, "out": 1.2, "focus": {"x": 0.5, "y": 0.5}},
+        ])})
+        with self.assertRaisesRegex(ValueError, "outside the kept screen frames"):
+            t.check_recipe(self.s, recipe)
+
+    def test_auto_zoom_rounding_uses_first_source_fps_for_cut_movie_lengths(self):
+        self.add_take(n=1, secs=2, kind="camera", size="160x120", rate=30)
+        self.add_take(n=2, secs=2, kind="screen", size="160x120", rate=60)
+        rounded = t.rounded_render_cut(self.s, [
+            {"take": 1, "kind": "camera", "in": 0.0, "out": 1.0},
+            {"take": 2, "kind": "screen", "in": 0.0, "out": 0.358},
+        ])
+        # render_run snaps the screen endpoint to its own 60 fps grid (0.35 s), then render_cut
+        # quantizes the segment duration to cut.mov's first-source 30 fps grid (10 frames = 1/3 s).
+        self.assertAlmostEqual(rounded[1]["out"], 0.35, places=6)
+        self.assertAlmostEqual(rounded[1]["len"], 10 / 30.0, places=6)
+        timeline = t.edit_time_map(rounded)
+        self.assertAlmostEqual(timeline["spans"][1]["at"], 1.0, places=6)
+        self.assertAlmostEqual(timeline["spans"][1]["end"], 1.0 + 10 / 30.0, places=6)
+
+    def test_auto_zoom_inherits_null_removes_and_direct_injection_is_refused(self):
+        self.add_take(n=1, secs=3, kind="screen")
+        auto = self.auto_zoom([{"trigger": 1.0, "in": 0.8, "out": 2.0}])
+        original = {"name": "hook", "cut": [{"take": 1, "kind": "screen", "in": 0, "out": 3}],
+                    "auto_zoom": auto}
+        normalized = t.norm_recipe(self.s, original)
+        self.assertEqual(t.agent_part(normalized)["auto_zoom"], normalized["auto_zoom"])
+        inherited = t.norm_recipe(self.s, t.merge_patch(t.agent_part(normalized), {"loudness": -16}))
+        self.assertEqual(inherited["auto_zoom"], normalized["auto_zoom"])
+        removed = t.norm_recipe(self.s, t.merge_patch(t.agent_part(normalized), {"auto_zoom": None}))
+        self.assertNotIn("auto_zoom", removed)
+        with self.assertRaisesRegex(ValueError, r"suggest_auto_zooms \+ apply_auto_zooms"):
+            t.t_render_edit({"session": self.s, "recipe": original})
+        # MCP dispatch forwards raw arguments; an undeclared/hidden-looking flag must not become a
+        # capability for callers to bypass the verified apply path.
+        with self.assertRaisesRegex(ValueError, r"suggest_auto_zooms \+ apply_auto_zooms"):
+            t.t_render_edit({"session": self.s, "recipe": original, "_auto_zoom_verified": True})
+
+    def test_apply_auto_zoom_verifies_fingerprint_and_never_mutates_base_or_raw_events(self):
+        self.add_take(n=1, secs=3, kind="screen")
+        path = t.capture_events_file(self.s, 1)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(json.dumps({"v": 1, "type": "header", "take": 1, "source": "screen", "clock": "screen_pts",
+                                "coordinates": "display_normalized_top_left",
+                                "display": {"id": 1, "x": 0, "y": 0, "width": 160, "height": 120}}) + "\n")
+            f.write(json.dumps({"t": 1.0, "type": "down", "source": "screen", "x": 0.55, "y": 0.5,
+                                "button": 0, "count": 1}) + "\n")
+        self.clip("edits/hook-v1.mp4", secs=3)
+        base_path = os.path.join(self.s, "edits", "hook-v1.recipe.json")
+        t.write_json(base_path, {"name": "hook", "edit": "edits/hook-v1.mp4",
+                                 "cut": [{"take": 1, "kind": "screen", "in": 0, "out": 3}],
+                                 "frame": {"shape": "source"}})
+        plan = t.t_suggest_auto_zooms({"session": self.s, "edit": "hook-v1", "take": 1})
+        self.assertEqual(len(plan["applicable_ids"]), 1)
+        captured = []
+        real = t._render_edit
+        t._render_edit = lambda a, allow_new_auto_zoom=False: captured.append((a, allow_new_auto_zoom)) or {
+            "job": "job-autozoom", "status": "running"}
+        try:
+            out = t.t_apply_auto_zooms({"session": self.s, "base": plan["base"], "plan": plan["plan"],
+                                        "accept": plan["applicable_ids"], "take": 1})
+        finally:
+            t._render_edit = real
+        self.assertFalse(out["auto_zoom"]["published"])
+        self.assertEqual(captured[0][0]["base"], "hook-v1")
+        self.assertTrue(captured[0][1])
+        self.assertNotIn("_auto_zoom_verified", captured[0][0])
+        accepted = captured[0][0]["changes"]["auto_zoom"]
+        self.assertEqual([x["id"] for x in accepted["items"]], plan["applicable_ids"])
+        self.assertEqual(accepted["plan"], plan["plan"])
+
+        with open(base_path, "rb") as f:
+            base_before = f.read()
+        with open(path, "a") as f:
+            f.write(json.dumps({"t": 1.8, "type": "down", "source": "screen", "x": 0.6, "y": 0.5,
+                                "button": 0, "count": 1}) + "\n")
+        with open(path, "rb") as f:
+            raw_before = f.read()
+        with self.assertRaisesRegex(ValueError, "plan is stale"):
+            t.t_apply_auto_zooms({"session": self.s, "base": plan["base"], "plan": plan["plan"],
+                                  "accept": plan["applicable_ids"], "take": 1})
+        with open(base_path, "rb") as f:
+            self.assertEqual(f.read(), base_before)
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), raw_before)
 
     def test_render_plan_is_pure_and_the_voice_goes_in_once(self):
         self.add_take()
@@ -894,6 +1123,79 @@ class Publish(Base):
 
 class Render(Base):
     """Real renders, as jobs."""
+
+    def test_apply_auto_zooms_starts_a_checked_unpublished_render(self):
+        self.add_take(n=1, secs=3, kind="screen", size="160x120")
+        first = self.render(recipe={"name": "hook", "cut": [{"take": 1, "kind": "screen", "in": 0, "out": 3}]})
+        t.t_publish_edit({"session": self.s, "render": first["job"], "note": "Base screen cut.",
+                          "accept": [{"rule": x.split(" ")[0], "why": "Base screen cut."}
+                                     for x in first["checks"].get("failed", [])]})
+        path = t.capture_events_file(self.s, 1)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(json.dumps({"v": 1, "type": "header", "take": 1, "source": "screen", "clock": "screen_pts",
+                                "coordinates": "display_normalized_top_left",
+                                "display": {"id": 1, "x": 0, "y": 0, "width": 160, "height": 120}}) + "\n")
+            f.write(json.dumps({"t": 1.0, "type": "down", "source": "screen", "x": 0.55, "y": 0.5,
+                                "button": 0, "count": 1}) + "\n")
+        plan = t.t_suggest_auto_zooms({"session": self.s, "edit": "hook-v1", "take": 1})
+        out = t.t_apply_auto_zooms({"session": self.s, "base": plan["base"], "plan": plan["plan"],
+                                    "accept": plan["applicable_ids"], "take": 1, "wait_s": 120})
+        self.assertEqual(out["status"], "done")
+        self.assertFalse(out["auto_zoom"]["published"])
+        self.assertFalse(os.path.exists(os.path.join(self.s, "edits", "hook-v2.mp4")))
+        rr = self.recipe(os.path.join(t.RENDERS, out["job"] + t.RECIPE_EXT))
+        self.assertEqual(rr["auto_zoom"]["plan"], plan["plan"])
+        self.assertEqual([x["id"] for x in rr["auto_zoom"]["items"]], plan["applicable_ids"])
+        p = probe(os.path.join(self.s, out["render"]))
+        v = next(x for x in p["streams"] if x["codec_type"] == "video")
+        self.assertEqual((v["width"], v["height"], v["r_frame_rate"]), (160, 120, "30/1"))
+        self.assertAlmostEqual(float(p["format"]["duration"]), 3.0, delta=0.04)
+
+    def test_source_clock_zoom_renders_with_fixed_output_size_and_duration(self):
+        self.add_take(n=1, secs=3, kind="screen", size="160x120")
+        r = t._render_edit({"session": self.s, "wait_s": 120,
+                            "recipe": {"name": "screen-zoom",
+                                       "cut": [{"take": 1, "kind": "screen", "in": 0, "out": 3}],
+                                       "frame": {"shape": "source", "w": 90, "h": 160},
+                                       "auto_zoom": self.auto_zoom([
+                                           {"trigger": 1.2, "in": 0.7, "out": 2.3,
+                                            "focus": {"x": 0.55, "y": 0.5}, "scale": 1.35}
+                                       ])}}, allow_new_auto_zoom=True)
+        self.assertEqual(r.get("status"), "done", r)
+        p = probe(os.path.join(self.s, r["render"]))
+        v = next(x for x in p["streams"] if x["codec_type"] == "video")
+        self.assertEqual((v["width"], v["height"], v["r_frame_rate"]), (90, 160, "30/1"))
+        self.assertAlmostEqual(float(p["format"]["duration"]), 3.0, delta=0.04)
+        rr = self.recipe(os.path.join(t.RENDERS, r["job"] + t.RECIPE_EXT))
+        self.assertEqual(rr["auto_zoom"]["items"][0]["focus"], {"x": 0.55, "y": 0.5})
+        picture = next(c for c in rr["commands"] if "-filter_complex" in c and any("eval=frame" in x for x in c))
+        self.assertEqual(sum("libx264" in x for x in picture), 1)
+
+    def test_mixed_fps_render_uses_cut_movie_grid_for_words_and_zoom_timing(self):
+        self.add_take(n=1, secs=3, kind="camera", size="160x120", rate=30)
+        self.add_take(n=2, secs=3, kind="screen", size="160x120", rate=60)
+        r = t._render_edit({"session": self.s, "wait_s": 120,
+                            "recipe": {"name": "mixed-fps-zoom", "cut": [
+                                {"take": 1, "kind": "camera", "in": 0.0, "out": 1.0},
+                                {"take": 2, "kind": "screen", "in": 0.0, "out": 0.358},
+                                {"take": 2, "kind": "screen", "in": 0.5, "out": 1.5},
+                            ], "auto_zoom": self.auto_zoom([
+                                {"take": 2, "trigger": 0.8, "in": 0.6, "out": 1.2,
+                                 "focus": {"x": 0.55, "y": 0.5}}
+                            ], take=2)}}, allow_new_auto_zoom=True)
+        self.assertEqual(r.get("status"), "done", r)
+        words = self.recipe(os.path.join(t.RENDERS, r["job"] + ".words.json"))
+        made = words["made_from"]["cut"]
+        # The 60 fps source endpoint snaps to 0.35 s, but cut.mov is on the first source's 30 fps
+        # grid, so that segment is 10 frames (1/3 s) and the next segment starts at 1.3333 s.
+        self.assertAlmostEqual(made[1]["out"], 1 / 3.0, places=4)
+        self.assertAlmostEqual(made[2]["at"], 1.0 + 10 / 30.0, places=4)
+        rr = self.recipe(os.path.join(t.RENDERS, r["job"] + t.RECIPE_EXT))
+        graph = next(x[x.index("-filter_complex") + 1] for x in rr["commands"]
+                     if "-filter_complex" in x and any("eval=frame" in y for y in x))
+        self.assertIn("1.43333333", graph)  # 1.3333 segment start + (0.6 - 0.5) source offset
+        self.assertNotIn("1.45000000", graph)
 
     def test_render_publish_and_next_version(self):
         self.add_take()
