@@ -89,6 +89,12 @@ struct CaptureEventsTests {
         #expect(CaptureEventLog.read(url, through: 2).map(\.type) == [.down])
     }
 
+    @Test func readerRejectsInvalidNormalizedCoordinates() throws {
+        #expect(CaptureEventLog.valid(.init(t: 1, type: .move, x: 0.5, y: 1.0)))
+        #expect(!CaptureEventLog.valid(.init(t: 1, type: .move, x: 1.01, y: 0.5)))
+        #expect(!CaptureEventLog.valid(.init(t: 1, type: .down, x: 0.5, y: 0.5, button: 7)))
+    }
+
     @Test func writerNeverLetsTheScreenClockRunBackward() throws {
         let s = try session()
         defer { try? FileManager.default.removeItem(at: s) }
