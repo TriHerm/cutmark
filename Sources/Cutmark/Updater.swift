@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import Observation
 import SwiftUI
@@ -121,10 +122,32 @@ final class Updater {
     }
 
     private struct Release: Decodable {
-        struct Asset: Decodable { var name: String; var browser_download_url: URL }
+        struct Asset: Decodable { var name: String; var browser_download_url: URL; var digest: String? }
         var tag_name: String
         var body: String?
         var assets: [Asset]
+    }
+
+    /// GitHub publishes a sha256 digest for release assets. Public updates fail closed when it is
+    /// missing, malformed or different: Cutmark never mounts a DMG that is not the exact asset the
+    /// release API described.
+    nonisolated static func matchesReleaseDigest(_ file: URL, digest: String?) -> Bool {
+        guard let digest else { return false }
+        let parts = digest.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2, parts[0].lowercased() == "sha256" else { return false }
+        let expected = parts[1].lowercased()
+        guard expected.count == 64, expected.allSatisfy({ $0.isHexDigit }) else { return false }
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return false }
+        defer { try? handle.close() }
+        var hash = SHA256()
+        while true {
+            let chunk: Data?
+            do { chunk = try handle.read(upToCount: 1 << 20) } catch { return false }
+            guard let chunk, !chunk.isEmpty else { break }
+            hash.update(data: chunk)
+        }
+        let actual = hash.finalize().map { String(format: "%02x", $0) }.joined()
+        return actual == expected
     }
 
     /// Asks for the newest release; a newer one is downloaded and staged. Quiet when offline or
@@ -158,7 +181,8 @@ final class Updater {
               let dmg = r.assets.first(where: { $0.name == "Cutmark.dmg" }),
               let (file, dresp) = try? await URLSession.shared.download(from: dmg.browser_download_url) else { return nil }
         defer { try? FileManager.default.removeItem(at: file) }
-        guard (dresp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        guard (dresp as? HTTPURLResponse)?.statusCode == 200,
+              matchesReleaseDigest(file, digest: dmg.digest) else { return nil }
         // One update jumps to the newest release, so What's new lists every release since `own`
         // (2026-10-08), not only the newest. Without the list, the newest release's notes.
         var bodies = [r.body ?? ""]
@@ -200,10 +224,12 @@ final class Updater {
         let script = """
         set -e
         mnt="$0/mnt"; trap 'hdiutil detach -quiet "$mnt" 2>/dev/null || true' EXIT
+        hdiutil verify -quiet "$1"
         hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mnt" "$1"
         plist="$mnt/Cutmark.app/Contents/Info.plist"
         [ "$(/usr/libexec/PlistBuddy -c 'Print :ReleaseTag' "$plist")" = "$2" ]
         [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "$3" ]
+        codesign --verify --deep --strict "$mnt/Cutmark.app"
         mkdir -p "$4"; rm -rf "$4/incoming.app"
         ditto "$mnt/Cutmark.app" "$4/incoming.app"
         xattr -dr com.apple.quarantine "$4/incoming.app" 2>/dev/null || true

@@ -35,6 +35,18 @@ struct ChatTests {
         #expect(Set(n.map(\.id)).count == 3)
     }
 
+    @Test func aReleaseAssetMustMatchGitHubsSHA256() throws {
+        let file = FileManager.default.temporaryDirectory.appending(path: "cutmark-digest-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try Data("abc".utf8).write(to: file)
+        let sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        #expect(Updater.matchesReleaseDigest(file, digest: "sha256:\(sha256)"))
+        #expect(Updater.matchesReleaseDigest(file, digest: "SHA256:\(sha256.uppercased())"))
+        #expect(!Updater.matchesReleaseDigest(file, digest: nil))
+        #expect(!Updater.matchesReleaseDigest(file, digest: "sha256:" + String(repeating: "0", count: 64)))
+        #expect(!Updater.matchesReleaseDigest(file, digest: "sha512:\(sha256)"))
+    }
+
     /// Three releases behind: one update, and What's new lists all three releases' changes.
     @Test func skippedReleasesNotesMergeIntoOne() {
         let newest = "### Chat\n- Replies stream\n\n### Install\n- not news"
@@ -71,11 +83,21 @@ struct ChatTests {
         let dir = fm.temporaryDirectory.appending(path: "cutmark-stage-\(UUID().uuidString)")
         defer { try? fm.removeItem(at: dir) }
         let app = dir.appending(path: "disk/Cutmark.app/Contents")
-        try fm.createDirectory(at: app, withIntermediateDirectories: true)
+        let macos = app.appending(path: "MacOS")
+        try fm.createDirectory(at: macos, withIntermediateDirectories: true)
+        let executable = macos.appending(path: "Cutmark")
+        try "#!/bin/sh\nexit 0\n".write(to: executable, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         let dmg = dir.appending(path: "Cutmark.dmg")
         func makeDMG(bundleID: String) throws {
-            let info: NSDictionary = ["ReleaseTag": "v2026.10.7", "CFBundleIdentifier": bundleID, "BuildStamp": "abc Oct 7 10:00"]
+            let info: NSDictionary = ["ReleaseTag": "v2026.10.7", "CFBundleIdentifier": bundleID,
+                                      "CFBundleExecutable": "Cutmark", "BuildStamp": "abc Oct 7 10:00"]
             try info.write(to: app.appending(path: "Info.plist"))
+            let sign = Process()
+            sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+            sign.arguments = ["--force", "--sign", "-", dir.appending(path: "disk/Cutmark.app").path]
+            try sign.run(); sign.waitUntilExit()
+            try #require(sign.terminationStatus == 0)
             try? fm.removeItem(at: dmg)
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
