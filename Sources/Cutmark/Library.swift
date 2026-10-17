@@ -382,10 +382,14 @@ final class SessionDoc {
     func addCutmark(_ takes: [Take]) -> Bool {
         meta.takes.append(contentsOf: takes)
         guard save() else { return false }
+        let cameraNumbers = Set(takes.filter { $0.kind == .camera }.map(\.number))
+        let screenNumbers = Set(takes.filter { $0.kind == .screen }.map(\.number))
         for t in Transcripts.voiceCutmark(takes) {
             Transcripts.shared.add(fileURL(t))
             // Word times on the video clock for the cut (faster-whisper): a job in the Jobs row.
-            _ = Voice.launcher(["--prepare", url.path, String(t.number)])
+            // Camera+screen adds screen silence evidence in the same background job for smart-speed.
+            let both = cameraNumbers.contains(t.number) && screenNumbers.contains(t.number)
+            _ = Voice.launcher(["--prepare", url.path, String(t.number)] + (both ? ["both"] : []))
         }
         return true
     }

@@ -55,7 +55,7 @@ enum Voice {
     }
 
     /// Runs the server script in the background: `--voice-run session n kind`, `--voice-mix session key`
-    /// or `--prepare session n` (word times for a new take).
+    /// or `--prepare session n [both]` (word times for a new take and optional screen clock).
     @discardableResult
     static func launch(_ args: [String]) -> Bool {
         guard let script = Bundle.main.url(forResource: "cutmark_mcp", withExtension: "py") else { return false }
