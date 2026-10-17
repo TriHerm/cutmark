@@ -189,6 +189,7 @@ final class AppModel {
 
     @ObservationIgnored private var recordTask: Task<Void, Never>?
     @ObservationIgnored private var pending: Pending?
+    @ObservationIgnored private var captureEvents: CaptureEventRecorder?
     @ObservationIgnored private var monitors: [Any] = []
     @ObservationIgnored private var pollTimer: Timer?
     @ObservationIgnored private let scout = CommentScout()
@@ -205,6 +206,10 @@ final class AppModel {
         let hook: String?
         let shot: String?
     }
+
+    /// Number of durable markers dropped into the take that is recording now. This is UI state only;
+    /// the append-only take event log is the source of truth.
+    var recordingMarkerCount = 0
 
     /// The storyboard shot the next take films (the Storyboard tab's Record button). The script
     /// column shows its lines while it records; after the take, the tab goes back to the storyboard.
@@ -604,6 +609,23 @@ final class AppModel {
         }
     }
 
+    var canMarkRecording: Bool {
+        if case .recording = phase { return captureEvents != nil }
+        return false
+    }
+
+    /// A flag on the source timeline, persisted before the UI confirms it. Labels are already part
+    /// of the event contract for later MCP/editor use; today's buttons create numbered markers.
+    func addRecordingMarker(label: String? = nil) {
+        guard case .recording = phase, let events = captureEvents else { return }
+        Task { @MainActor [weak self] in
+            guard let marker = await events.addMarker(label), let self,
+                  self.captureEvents === events, case .recording = self.phase else { return }
+            self.recordingMarkerCount = marker.number
+            self.show(toast: "\(marker.label) · \(SessionDoc.clock(marker.t))")
+        }
+    }
+
     private func syncCaptureControls() {
         let show: Bool
         switch phase {
@@ -674,16 +696,29 @@ final class AppModel {
         }
         do {
             async let camStart = camera.startRecording(to: camURL)
-            var screenStart: Date?
+            var screenStart: ScreenRecorder.Start?
             if let screenURL { screenStart = try await screen.startRecording(to: screenURL, micID: micID) }
             let cs = try await camStart
-            if !RecordingRecovery.started(in: doc.url, number: n, camera: cs, screen: screenStart) {
+            if !RecordingRecovery.started(in: doc.url, number: n, camera: cs, screen: screenStart?.date) {
                 // The original claim is still on disk. The take remains recoverable, but a crash may
                 // lose the exact sub-second camera/screen offset, so say so without stopping the take.
                 self.error = "Cutmark is recording, but it could not save exact crash-recovery timing for this take."
             }
-            pending = Pending(doc: doc, number: n, cam: camURL, camStart: cs, screen: screenURL, screenStart: screenStart,
+            pending = Pending(doc: doc, number: n, cam: camURL, camStart: cs, screen: screenURL, screenStart: screenStart?.date,
                               script: script, hook: hook, shot: shotID)
+            recordingMarkerCount = 0
+            captureEvents = nil
+            if let screenStart {
+                do {
+                    let events = try await CaptureEventRecorder.prepare(session: doc.url, take: n,
+                                                                        screenOriginHost: screenStart.hostTime,
+                                                                        displayID: screenStart.displayID)
+                    events.start()
+                    captureEvents = events
+                } catch {
+                    show(toast: "Recording started · markers and input signals are unavailable for this take")
+                }
+            }
             phase = .recording(Date())
             for h in Plugins.recordHooks { h.take(TakeMoment(session: doc.url, number: n, started: cs)) }
             if autoScroll && Plugins.recordStage(doc.url) == nil { scrolling = true }
@@ -717,6 +752,9 @@ final class AppModel {
         guard case .recording = phase, let p = pending else { return }
         phase = .finishing
         scrolling = false
+        let events = captureEvents
+        captureEvents = nil
+        await events?.stop()
         async let a: Void = camera.stopRecording()
         async let b: Void = screen.stopRecording()
         _ = await (a, b)
@@ -758,6 +796,9 @@ final class AppModel {
             for journal in RecordingRecovery.journals(in: session) {
                 guard !library.isRecording, library.root == root else { return }
                 if doc.meta.takes.contains(where: { $0.number == journal.number }) {
+                    if !doc.meta.takes.contains(where: { $0.number == journal.number && $0.kind == .screen }) {
+                        CaptureEventLog.remove(in: session, take: journal.number)
+                    }
                     RecordingRecovery.clear(session, number: journal.number)
                     continue
                 }
@@ -771,10 +812,16 @@ final class AppModel {
                 if latest.id == nil { latest.id = doc.meta.id }
                 if latest != doc.meta { doc.meta = latest }
                 if doc.meta.takes.contains(where: { $0.number == journal.number }) {
+                    if !doc.meta.takes.contains(where: { $0.number == journal.number && $0.kind == .screen }) {
+                        CaptureEventLog.remove(in: session, take: journal.number)
+                    }
                     RecordingRecovery.clear(session, number: journal.number)
                     continue
                 }
                 if doc.addCutmark(takes) {
+                    if !takes.contains(where: { $0.kind == .screen }) {
+                        CaptureEventLog.remove(in: session, take: journal.number)
+                    }
                     RecordingRecovery.clear(session, number: journal.number)
                     changed = true
                     recovered.append((journal.number, takes.map(\.kind)))

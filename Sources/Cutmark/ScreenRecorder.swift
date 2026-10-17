@@ -7,6 +7,12 @@ import ScreenCaptureKit
 /// The Cutmark window itself is excluded, so the script never shows up in the screen file.
 final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStreamOutput {
     struct Display: Identifiable, Hashable { let id: CGDirectDisplayID; let name: String }
+    struct Start: Sendable {
+        let date: Date
+        /// First accepted screen-frame PTS on ScreenCaptureKit's host clock.
+        let hostTime: Double
+        let displayID: CGDirectDisplayID
+    }
 
     @Published var displays: [Display] = []
     @Published var displayID: CGDirectDisplayID? {
@@ -15,11 +21,12 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
 
     private var stream: SCStream?
     private var movie: ScreenMovieWriter?
-    private var startCont: CheckedContinuation<Date, Error>?
+    private var startCont: CheckedContinuation<Start, Error>?
     private var stopCont: CheckedContinuation<Void, Never>?
     private let lock = NSLock()
     private let captureQueue = DispatchQueue(label: "cutmark.screen.capture", qos: .userInitiated)
     private var filler: DispatchSourceTimer?
+    private var recordingDisplayID: CGDirectDisplayID?
 
     override init() {
         super.init()
@@ -47,7 +54,7 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         if !displays.contains(where: { $0.id == displayID }) { displayID = displays.first?.id }
     }
 
-    func startRecording(to url: URL, micID: String?) async throws -> Date {
+    func startRecording(to url: URL, micID: String?) async throws -> Start {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let display = content.displays.first(where: { $0.displayID == displayID }) ?? content.displays.first
         else { throw RecorderError("No display found.") }
@@ -74,6 +81,7 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         if micID != nil { try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: captureQueue) }
         self.movie = movie
         self.stream = stream
+        recordingDisplayID = display.displayID
         startFiller()
         return try await withCheckedThrowingContinuation { cont in
             lock.withLock { startCont = cont }
@@ -104,6 +112,7 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
             DispatchQueue.global().asyncAfter(deadline: .now() + 6) { [weak self] in self?.finishMovie() }
         }
         self.stream = nil
+        recordingDisplayID = nil
         filler?.cancel()
         filler = nil
         self.movie = nil
@@ -112,8 +121,8 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
     /// Gives up on a start that has not begun yet (Record pressed again while "Starting…").
     func cancelStart() { resumeStart(.failure(CancellationError())) }
 
-    private func resumeStart(_ r: Result<Date, Error>) {
-        let c = lock.withLock { () -> CheckedContinuation<Date, Error>? in defer { startCont = nil }; return startCont }
+    private func resumeStart(_ r: Result<Start, Error>) {
+        let c = lock.withLock { () -> CheckedContinuation<Start, Error>? in defer { startCont = nil }; return startCont }
         c?.resume(with: r)
     }
 
@@ -151,7 +160,9 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
             case .screen:
                 switch Self.frameStatus(sampleBuffer) {
                 case .complete:
-                    if let started = try movie.appendScreen(sampleBuffer) { resumeStart(.success(started)) }
+                    if let started = try movie.appendScreen(sampleBuffer), let displayID = recordingDisplayID {
+                        resumeStart(.success(Start(date: started.date, hostTime: started.hostTime, displayID: displayID)))
+                    }
                 case .idle:
                     try movie.appendFiller(at: sampleBuffer.presentationTimeStamp)
                 default:
@@ -251,18 +262,19 @@ final class ScreenMovieWriter {
         }
     }
 
-    /// Returns the wall-clock start once, when the first real screen frame starts the movie.
-    func appendScreen(_ sampleBuffer: CMSampleBuffer) throws -> Date? {
+    /// Returns both clocks once, when the first real screen frame starts the movie. The PTS is the
+    /// canonical source origin for input events; Date remains session metadata for camera/screen sync.
+    func appendScreen(_ sampleBuffer: CMSampleBuffer) throws -> (date: Date, hostTime: Double)? {
         guard sampleBuffer.isValid, CMSampleBufferDataIsReady(sampleBuffer), let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
         let pts = sampleBuffer.presentationTimeStamp
         guard pts.isNumeric else { return nil }
-        var began: Date?
+        var began: (date: Date, hostTime: Double)?
         if !started {
             guard writer.startWriting() else { throw failure("Screen recording could not start") }
             writer.startSession(atSourceTime: pts)
             startPTS = pts
             started = true
-            began = Date()
+            began = (Date(), pts.seconds)
         }
         guard !isFinishing else { return began }
         // A synthetic filler can run before a delayed SCStream callback. Keep the delayed frame as

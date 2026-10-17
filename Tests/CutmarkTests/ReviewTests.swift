@@ -106,6 +106,7 @@ struct IdleTests {
     @Test func chatSavesAreNotChanges() {
         let s = "/Movies/Cutmark/p/2026-09-27-x"
         #expect(FileWatch.folders([s + "/.claude-chat.json", s + "/.claude-chat.json.sb-aa06c7e4-H7mIXC"]).isEmpty)
+        #expect(FileWatch.folders([s + "/.capture-events/take-01-screen.jsonl"]).isEmpty)
         #expect(FileWatch.folders([s + "/script.md", s + "/edits/cut-v2.mp4"]) == [s, s + "/edits"])
         #expect(FileWatch.folders([s]) == ["/Movies/Cutmark/p"])  // a new session folder: its project changed
     }
