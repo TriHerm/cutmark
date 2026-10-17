@@ -43,8 +43,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      - name: Validate release scripts
+        run: bash -n build.sh scripts/package-dmg.sh scripts/notarize-dmg.sh scripts/setup-release-keychain.sh
       - name: Build Cutmark.app
         env:
           CUTMARK_ADHOC_SIGN: '1'
+          CUTMARK_VERIFY_NATIVE_SET: '1'
           SKIP_TESTS: '1'
         run: ./build.sh

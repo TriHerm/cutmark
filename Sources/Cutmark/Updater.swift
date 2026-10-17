@@ -82,6 +82,9 @@ final class Updater {
     static let releaseRepo = Product.repository
     /// This build's release tag; nil for a build from source, which never updates itself.
     private var ownRelease: String? { Bundle.main.infoDictionary?["ReleaseTag"] as? String }
+    /// Production builds carry the Apple Developer Team ID in their signed Info.plist. Older
+    /// ad-hoc releases have no value and keep the legacy compatibility path.
+    private var ownSigningTeamID: String? { Bundle.main.infoDictionary?["CutmarkSigningTeamIdentifier"] as? String }
 
     private var running: URL { Bundle.main.bundleURL }
     private var waiting: URL {
@@ -159,7 +162,8 @@ final class Updater {
         let stage = waiting.deletingLastPathComponent(), skip = staged?.release
         Task { @MainActor in
             defer { fetching = false }
-            if await Self.fetchRelease(api: api, own: own, skip: skip, into: stage) != nil {
+            if await Self.fetchRelease(api: api, own: own, skip: skip, into: stage,
+                                       expectedTeamID: ownSigningTeamID) != nil {
                 lastRead = nil; check()
             }
         }
@@ -167,7 +171,8 @@ final class Updater {
 
     /// Reads the newest release from `api`; when it is newer than `own` and not `skip` (already
     /// staged), downloads its Cutmark.dmg and stages it. Returns the staged tag.
-    nonisolated static func fetchRelease(api: URL, own: String, skip: String?, into stage: URL) async -> String? {
+    nonisolated static func fetchRelease(api: URL, own: String, skip: String?, into stage: URL,
+                                         expectedTeamID: String? = nil) async -> String? {
         func latest(_ url: URL) async -> Data? {
             var req = URLRequest(url: url)
             req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -195,7 +200,8 @@ final class Updater {
             if !since.isEmpty { bodies = since.map { $0.body ?? "" } }
         }
         let notes = (try? JSONEncoder().encode(["tag": r.tag_name, "body": mergeNotes(bodies)])) ?? Data()
-        return Self.stage(dmg: file, tag: r.tag_name, notes: notes, into: stage) ? r.tag_name : nil
+        return Self.stage(dmg: file, tag: r.tag_name, notes: notes, into: stage,
+                          expectedTeamID: expectedTeamID) ? r.tag_name : nil
     }
 
     /// Several releases' notes as one: each "### Area" once, in the order it first shows, with
@@ -216,7 +222,8 @@ final class Updater {
 
     /// Mounts the download, checks it is Cutmark at that tag, and stages its app as build.sh does.
     /// The notes go beside it as release.json for What's new.
-    nonisolated static func stage(dmg: URL, tag: String, notes: Data, into stage: URL) -> Bool {
+    nonisolated static func stage(dmg: URL, tag: String, notes: Data, into stage: URL,
+                                  expectedTeamID: String? = nil) -> Bool {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("cutmark-update-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: tmp) }
         guard (try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)) != nil,
@@ -225,11 +232,21 @@ final class Updater {
         set -e
         mnt="$0/mnt"; trap 'hdiutil detach -quiet "$mnt" 2>/dev/null || true' EXIT
         hdiutil verify -quiet "$1"
+        if [ -n "$5" ]; then
+          xcrun stapler validate "$1" >/dev/null 2>&1
+          spctl --assess --type open --context context:primary-signature "$1" >/dev/null 2>&1
+        fi
         hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mnt" "$1"
         plist="$mnt/Cutmark.app/Contents/Info.plist"
         [ "$(/usr/libexec/PlistBuddy -c 'Print :ReleaseTag' "$plist")" = "$2" ]
         [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "$3" ]
         codesign --verify --deep --strict "$mnt/Cutmark.app"
+        if [ -n "$5" ]; then
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CutmarkSigningTeamIdentifier' "$plist")" = "$5" ]
+          team="$(codesign -dv --verbose=4 "$mnt/Cutmark.app" 2>&1 | sed -n 's/^TeamIdentifier=//p' | tail -1)"
+          [ "$team" = "$5" ]
+          spctl --assess --type execute "$mnt/Cutmark.app" >/dev/null 2>&1
+        fi
         mkdir -p "$4"; rm -rf "$4/incoming.app"
         ditto "$mnt/Cutmark.app" "$4/incoming.app"
         xattr -dr com.apple.quarantine "$4/incoming.app" 2>/dev/null || true
@@ -238,7 +255,8 @@ final class Updater {
         """
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", script, tmp.path, dmg.path, tag, Product.bundleID, stage.path]
+        p.arguments = ["-c", script, tmp.path, dmg.path, tag, Product.bundleID, stage.path,
+                       expectedTeamID ?? ""]
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         guard (try? p.run()) != nil else { return false }

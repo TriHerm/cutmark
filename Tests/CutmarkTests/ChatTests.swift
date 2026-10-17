@@ -119,6 +119,13 @@ struct ChatTests {
         #expect(staged?["CFBundleIdentifier"] as? String == Product.bundleID)
         #expect(fm.fileExists(atPath: stage.appending(path: "release.json").path))
         #expect(!fm.fileExists(atPath: stage.appending(path: "incoming.app").path))
+
+        // Once a production build knows its Apple Team ID, an ad-hoc release is no longer an
+        // acceptable update even when its bundle ID/tag/signature are otherwise internally valid.
+        let productionStage = dir.appending(path: ".cutmark-production-update.noindex")
+        #expect(!Updater.stage(dmg: dmg, tag: "v2026.10.7", notes: notes, into: productionStage,
+                              expectedTeamID: "ABCDE12345"))
+        #expect(!fm.fileExists(atPath: productionStage.appending(path: "Cutmark.app").path))
     }
 
     @Test func updateChannelIsCutmarkOnTriHermGitHub() {
