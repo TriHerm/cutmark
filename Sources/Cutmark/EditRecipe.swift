@@ -2,7 +2,7 @@ import Foundation
 
 /// An edit's recipe (2026-10-11): `edits/<name>-vN.recipe.json` beside `edits/<name>-vN.mp4`, written once
 /// by the MCP's publish_edit (same format as the edit recipes section of mcp/cutmark_mcp.py). It says how
-/// the version was made: the cut, the voice, the picture layers, the music, the cover. The next version
+/// the version was made: the cut, source-space screen zooms, the voice, picture layers, music, and cover. The next version
 /// starts from it. The app reads its `note` (the line under the edit's tile) and its `cover`, and the
 /// Cover button writes the recipe of the version it makes.
 enum EditRecipe {

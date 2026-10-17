@@ -10834,6 +10834,7 @@ def short_name(text):
 # name              agent                required on a first recipe; from base after
 # cut               agent                required: [{take, in, out, kind?}] (rough_cut's cut), whole frames
 # frame             agent                {"shape": "source"}: the first take's size and fps; crop: none
+# auto_zoom         agent                optional v1 accepted click-focus plan on screen-source clocks
 # over              agent                []: picture layers {file, at, in?, out?, alpha?}; their sound is never used
 # music, sfx        agent                []: music {file, at 0, in 0, out?, gain_db -18, duck_db 8, fade_out 1.5},
 #                                        sfx {file, at, gain_db -10}
@@ -10843,7 +10844,8 @@ def short_name(text):
 # loudness          agent (LUFS)         null = the voice's own setting: normal -14, quiet -18
 # takes, voice, inputs, parent, made, by, host, commands, render_id, job, started, src, src_skipped,
 # edit, checks, length_s, rendered, mix (the loudness it reached): Cutmark. note, fixed, accepted: publish_edit.
-# Times in over, music and sfx are seconds of the cut: a cover adds its seconds before them by itself.
+# Zoom in/out are seconds of their source screen take. Times in over, music and sfx are seconds of the
+# cut: a cover adds its seconds before them by itself.
 
 RECIPE_EXT = ".recipe.json"
 EDIT_DIR = "_edit"
@@ -10855,9 +10857,13 @@ RENDER_KEEP_DAYS = 7
 FREEZE_MAX = 1 << 30
 FREEZE_SKIP = {".versions", "node_modules", ".cache"}
 SHAPES = {"9:16": (1080, 1920), "16:9": (1920, 1080), "1:1": (1080, 1080), "4:5": (1080, 1350)}
-AGENT_FIELDS = ("name", "cut", "frame", "over", "music", "sfx", "style", "steps", "cover", "loudness")
+AGENT_FIELDS = ("name", "cut", "frame", "auto_zoom", "over", "music", "sfx", "style", "steps", "cover", "loudness")
 MUSIC_DEFAULTS = {"at": 0.0, "in": 0.0, "gain_db": -18, "duck_db": 8, "fade_out": 1.5}
 SFX_DEFAULTS = {"gain_db": -10}
+ZOOM_DEFAULT_SCALE = 1.35
+ZOOM_DEFAULT_EASE = 0.18
+ZOOM_MAX_SCALE = 3.0
+ZOOM_MAX_EASE = 0.75
 MUSIC_LUFS = -14.0
 TRUE_PEAK = -1.0
 LOUDNESS_TARGET = {"normal": -14.0, "quiet": -18.0}
@@ -11156,6 +11162,77 @@ def norm_recipe(s, r):
             raise ValueError("frame.crop is {x, y, w, h} in pixels of the take.")
         f["crop"] = {k: int(num(c[k], "frame.crop." + k, 0, 16384)) for k in ("x", "y", "w", "h")}
     out["frame"] = f
+    auto = r.get("auto_zoom")
+    if auto is not None:
+        if not isinstance(auto, dict):
+            raise ValueError("auto_zoom is a v1 accepted click-focus plan object, or null to remove it.")
+        if auto.get("v") != 1 or auto.get("planner") != AUTO_ZOOM_PLANNER:
+            raise ValueError("auto_zoom must use v=1 and planner='%s'." % AUTO_ZOOM_PLANNER)
+        plan = str(auto.get("plan") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", plan):
+            raise ValueError("auto_zoom.plan is the 64-character fingerprint from suggest_auto_zooms.")
+        raw_inputs = auto.get("inputs")
+        if not isinstance(raw_inputs, list) or not raw_inputs:
+            raise ValueError("auto_zoom.inputs is the non-empty input list from suggest_auto_zooms.")
+        inputs = []
+        seen_inputs = set()
+        for i, x in enumerate(raw_inputs):
+            what = "auto_zoom.inputs[%d]" % i
+            if not isinstance(x, dict) or isinstance(x.get("take"), bool):
+                raise ValueError("%s is {take, sha256, through}." % what)
+            try:
+                take = int(x.get("take"))
+            except (TypeError, ValueError):
+                raise ValueError("%s.take is a take number." % what)
+            digest = str(x.get("sha256") or "").lower()
+            if take < 1 or take in seen_inputs or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("%s must have a unique take and a 64-character sha256." % what)
+            through = num(x.get("through"), what + ".through", 0)
+            seen_inputs.add(take)
+            inputs.append({"take": take, "sha256": digest, "through": round(through, 4)})
+        raw_items = auto.get("items")
+        if not isinstance(raw_items, list) or not raw_items:
+            raise ValueError("auto_zoom.items is the non-empty accepted suggestion list.")
+        items = []
+        seen_ids = set()
+        for i, z in enumerate(raw_items):
+            what = "auto_zoom.items[%d]" % i
+            if not isinstance(z, dict) or isinstance(z.get("take"), bool):
+                raise ValueError("%s is an accepted screen click-focus suggestion." % what)
+            zid = str(z.get("id") or "").lower()
+            if not re.fullmatch(r"az-[0-9a-f]{12}", zid) or zid in seen_ids:
+                raise ValueError("%s.id must be a unique stable id from suggest_auto_zooms." % what)
+            try:
+                take = int(z.get("take"))
+            except (TypeError, ValueError):
+                raise ValueError("%s.take is a take number." % what)
+            if take < 1 or take not in seen_inputs:
+                raise ValueError("%s.take must name one of auto_zoom.inputs." % what)
+            kind = z.get("kind") or "screen"
+            if kind != "screen":
+                raise ValueError("%s.kind must be screen: auto-zoom never targets camera footage." % what)
+            if z.get("reason") != "primary_click":
+                raise ValueError("%s.reason must be primary_click in auto-zoom v1." % what)
+            a = num(z.get("in"), what + ".in", 0)
+            b = num(z.get("out"), what + ".out", 0)
+            trigger = num(z.get("trigger"), what + ".trigger", 0)
+            if b <= a or not a <= trigger < b:
+                raise ValueError("%s needs in <= trigger < out on the source screen clock." % what)
+            focus = z.get("focus")
+            if not isinstance(focus, dict) or focus.get("x") is None or focus.get("y") is None:
+                raise ValueError("%s.focus is {x, y}, normalized from 0 to 1 on the source screen." % what)
+            x = num(focus["x"], what + ".focus.x", 0, 1)
+            y = num(focus["y"], what + ".focus.y", 0, 1)
+            scale = num(z.get("scale", ZOOM_DEFAULT_SCALE), what + ".scale", 1.01, ZOOM_MAX_SCALE)
+            ease = num(z.get("ease", ZOOM_DEFAULT_EASE), what + ".ease", 0, ZOOM_MAX_EASE)
+            seen_ids.add(zid)
+            items.append({"id": zid, "take": take, "kind": "screen", "trigger": round(trigger, 4),
+                          "in": round(a, 4), "out": round(b, 4),
+                          "focus": {"x": round(x, 6), "y": round(y, 6)}, "scale": round(scale, 4),
+                          "ease": round(ease, 4), "reason": "primary_click"})
+        out["auto_zoom"] = {"v": 1, "planner": AUTO_ZOOM_PLANNER, "plan": plan,
+                            "inputs": sorted(inputs, key=lambda x: x["take"]),
+                            "items": sorted(items, key=lambda z: (z["take"], z["in"], z["out"], z["id"]))}
     over = []
     for i, o in enumerate(r.get("over") or []):
         what = "over[%d]" % i
@@ -11252,6 +11329,30 @@ def check_music(s, music):
 
 def check_recipe(s, r):
     """The hard rules before a render starts. Each error names the field and the fix."""
+    cut_sources = {(g["take"], g["kind"]) for g in r.get("cut") or []}
+    zooms_by_source = {}
+    zoom_items = (r.get("auto_zoom") or {}).get("items") or []
+    # Auto-zoom validity is defined on the same frame-rounded source ranges the renderer will
+    # concatenate. Legacy/no-effect recipes keep check_recipe's previous no-probe path.
+    effective_cut = rounded_render_cut(s, r["cut"]) if zoom_items else r.get("cut") or []
+    for i, z in enumerate(zoom_items):
+        key = (z["take"], z["kind"])
+        if key not in cut_sources:
+            raise ValueError("auto_zoom.items[%d] targets take %d screen, but that source is not in this cut."
+                             % (i, z["take"]))
+        # Effects are stricter than seek mapping: a trigger at the exact out endpoint has no visible
+        # frame, so it must not leak pre-roll into the edit.
+        if not any(g["take"] == z["take"] and g["kind"] == "screen"
+                   and g["in"] <= z["trigger"] < g["in"] + float(g.get("len", g["out"] - g["in"]))
+                   for g in effective_cut):
+            raise ValueError("auto_zoom.items[%d]'s trigger is outside the kept screen frames." % i)
+        zooms_by_source.setdefault(key, []).append((z["in"], z["out"], i))
+    for spans in zooms_by_source.values():
+        spans.sort()
+        for (_, a1, i), (b0, _, j) in zip(spans, spans[1:]):
+            if b0 < a1 - 1e-6:
+                raise ValueError("auto_zoom.items[%d] overlaps auto_zoom.items[%d]. Keep one target at a time."
+                                 % (j, i))
     for what in ("music", "sfx"):
         for i, m in enumerate(r.get(what) or []):
             parts = m["file"].split(os.sep)
@@ -11271,6 +11372,91 @@ def take_files(s, r):
     return out
 
 
+def zoom_focus_on_canvas(r, z):
+    """The zoom's normalized source focus as pixels on render_cut's first-take canvas.
+
+    render_cut letterboxes a source whose dimensions differ from the first cut source, so a screen's
+    normalized capture coordinate must pass through the same fit+pad transform before picture framing.
+    """
+    takes = r.get("takes") or []
+    if not takes:
+        return None
+    canvas = takes[0]
+    source = next((t for t in takes if t.get("take") == z.get("take") and t.get("kind") == z.get("kind")), None)
+    try:
+        cw, ch = float(canvas["width"]), float(canvas["height"])
+        sw, sh = float(source["width"]), float(source["height"])
+        fx, fy = float(z["focus"]["x"]), float(z["focus"]["y"])
+    except (TypeError, ValueError, KeyError):
+        return None
+    if min(cw, ch, sw, sh) <= 0:
+        return None
+    fit = min(cw / sw, ch / sh)
+    shown_w, shown_h = sw * fit, sh * fit
+    px = (cw - shown_w) / 2.0 + fx * shown_w
+    py = (ch - shown_h) / 2.0 + fy * shown_h
+    return px, py, cw, ch
+
+
+def baseline_viewport(r):
+    """The cut.mov rectangle visible with today's frame.crop + centered aspect fill.
+
+    Auto-zoom v1 is deliberately nested inside this baseline: it may punch in and move focus within
+    what the edit already shows, but it never reveals content that the current framing cropped away.
+    Keep this geometric rectangle as floats: the legacy scale+center-crop can expose a half source pixel
+    at an aspect boundary, and rounding it here would move the accepted focus relative to that baseline.
+    """
+    takes, frame = r.get("takes") or [], r.get("frame") or {}
+    if not takes or not frame.get("w") or not frame.get("h"):
+        return None
+    try:
+        canvas_w, canvas_h = int(takes[0]["width"]), int(takes[0]["height"])
+        out_w, out_h = int(frame["w"]), int(frame["h"])
+    except (TypeError, ValueError, KeyError):
+        return None
+    if min(canvas_w, canvas_h, out_w, out_h) <= 0:
+        return None
+    crop = frame.get("crop")
+    x0, y0 = (float(crop["x"]), float(crop["y"])) if crop else (0.0, 0.0)
+    cw, ch = (float(crop["w"]), float(crop["h"])) if crop else (float(canvas_w), float(canvas_h))
+    target = out_w / float(out_h)
+    if cw / float(ch) > target:
+        bh = ch
+        bw = max(1.0, min(cw, ch * target))
+        bx, by = x0 + (cw - bw) / 2.0, y0
+    else:
+        bw = cw
+        bh = max(1.0, min(ch, cw / target))
+        bx, by = x0, y0 + (ch - bh) / 2.0
+    return bx, by, bw, bh
+
+
+def zoom_focus_in_baseline(r, z):
+    """Normalized focus on the exact legacy frame.crop + aspect-fill output.
+
+    The same geometry as `fill_frame` is used analytically: optional source crop, scale-to-cover, then
+    centered output crop. None means the click lies outside what the existing edit framing already shows.
+    """
+    point = zoom_focus_on_canvas(r, z)
+    frame = r.get("frame") or {}
+    if point is None or not frame.get("w") or not frame.get("h"):
+        return None
+    px, py, canvas_w, canvas_h = point
+    crop = frame.get("crop")
+    x0, y0 = (float(crop["x"]), float(crop["y"])) if crop else (0.0, 0.0)
+    cw, ch = (float(crop["w"]), float(crop["h"])) if crop else (float(canvas_w), float(canvas_h))
+    if cw <= 0 or ch <= 0 or not (x0 <= px <= x0 + cw and y0 <= py <= y0 + ch):
+        return None
+    w, h = float(frame["w"]), float(frame["h"])
+    scale = max(w / cw, h / ch)
+    scaled_w, scaled_h = cw * scale, ch * scale
+    ox = (px - x0) * scale - (scaled_w - w) / 2.0
+    oy = (py - y0) * scale - (scaled_h - h) / 2.0
+    if not (-1e-6 <= ox <= w + 1e-6 and -1e-6 <= oy <= h + 1e-6):
+        return None
+    return min(1.0, max(0.0, ox / w)), min(1.0, max(0.0, oy / h))
+
+
 def fill_recipe(s, r, base=None):
     """Cutmark' fields: takes, frame size, voice, style, inputs. warnings: what changed under the base."""
     warns = []
@@ -11280,7 +11466,7 @@ def fill_recipe(s, r, base=None):
         c = take_clock(os.path.join(s, t["file"])) or {}
         first = first or c
         takes.append({"take": n, "kind": kind, "file": t["file"], "audio_offset_s": c.get("audio_offset_s"),
-                      "fps_mode": c.get("fps_mode")})
+                      "fps_mode": c.get("fps_mode"), "width": c.get("width"), "height": c.get("height")})
         key = voice_key(n, kind)
         v, f = read_voice(s, key) or {}, voice_files(s, key)["mix"]
         if v.get("state") == "done" and v.get("on", True) and os.path.exists(f):
@@ -11303,6 +11489,10 @@ def fill_recipe(s, r, base=None):
     else:
         w, h = SHAPES[f["shape"]]
     f.update(w=int(f.get("w") or w) // 2 * 2, h=int(f.get("h") or h) // 2 * 2, fps=int(fps))
+    for i, z in enumerate((r.get("auto_zoom") or {}).get("items") or []):
+        if zoom_focus_in_baseline(r, z) is None:
+            raise ValueError("auto_zoom.items[%d]'s focus is outside the edit's baseline viewport. "
+                             "Adjust the frame/crop or skip this zoom." % i)
     if not r.get("style"):
         name = style_pick(os.path.dirname(s), s)[0]
         r["style"] = {"name": name, "params": {}} if name else {}
@@ -11363,6 +11553,82 @@ def fill_frame(w, h):
     return "scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1" % (w, h, w, h)
 
 
+def zoom_progress_expr(piece):
+    """ffmpeg expression: neutral→zoom→neutral inside one mapped cut.mov fragment.
+
+    Every cut/reuse boundary is neutral by construction. Source-clock ease is divided by the span rate,
+    then clamped to half of the surviving output fragment so even a clipped zoom never jumps in/out.
+    """
+    z = piece["item"]
+    duration = max(0.0, float(piece["output_out"]) - float(piece["output_in"]))
+    ease = min(float(z.get("ease", ZOOM_DEFAULT_EASE)) / float(piece["rate"]), duration / 2.0)
+    if ease <= 1e-6:
+        return "1"
+    a, b = float(piece["output_in"]), float(piece["output_out"])
+    up_end, down_start = a + ease, b - ease
+    up = "(0.5-0.5*cos(PI*(t-%.8f)/%.8f))" % (a, ease)
+    down = "(0.5+0.5*cos(PI*(t-%.8f)/%.8f))" % (down_start, ease)
+    return "if(lt(t,%.8f),%s,if(lt(t,%.8f),1,%s))" % (up_end, up, down_start, down)
+
+
+def zoom_value_expr(pieces, value, default):
+    """One non-overlapping piecewise ffmpeg expression over cut.mov time."""
+    expr = str(default)
+    for piece in reversed(pieces):
+        p = zoom_progress_expr(piece)
+        v = value(piece, p)
+        expr = "if(between(t,%.8f,%.8f),%s,%s)" % (piece["output_in"], piece["output_out"], v, expr)
+    return expr
+
+
+def picture_chain(r, cut, w, h, fps):
+    """The base picture transform. Auto-zoom v1 punches into the exact existing framing.
+
+    This is deliberately before cover concatenation and picture overlays: source-clock zooms affect only
+    captured footage, while covers and authored overlays remain stable on the final canvas.
+    """
+    crop = (r.get("frame") or {}).get("crop")
+    static_crop = ("crop=%d:%d:%d:%d," % (crop["w"], crop["h"], crop["x"], crop["y"])) if crop else ""
+    timeline = edit_time_map(cut, lead=0.0)
+    pieces = map_recipe_auto_zoom(timeline, (r.get("auto_zoom") or {}).get("items") or [])
+    if not pieces:
+        return "[0:v]" + static_crop + fill_frame(w, h) + ",fps=%d,format=yuv420p" % fps
+
+    usable = []
+    for piece in pieces:
+        focus = zoom_focus_in_baseline(r, piece["item"])
+        if focus is None:
+            continue
+        usable.append(dict(piece, focus=focus))
+    if not usable:
+        return "[0:v]" + static_crop + fill_frame(w, h) + ",fps=%d,format=yuv420p" % fps
+
+    zexpr = zoom_value_expr(usable,
+                            lambda piece, p: "(1+(%.8f-1)*(%s))" % (piece["item"]["scale"], p),
+                            "1")
+    xexpr = zoom_value_expr(usable,
+                            lambda piece, p: "(0.5+(%.8f-0.5)*(%s))" % (piece["focus"][0], p),
+                            "0.5")
+    yexpr = zoom_value_expr(usable,
+                            lambda piece, p: "(0.5+(%.8f-0.5)*(%s))" % (piece["focus"][1], p),
+                            "0.5")
+    box_w = "(ceil(%d*(%s)/2)*2)" % (w, zexpr)
+    box_h = "(ceil(%d*(%s)/2)*2)" % (h, zexpr)
+    left = "((in_w-%s)/2)" % box_w
+    top = "((in_h-%s)/2)" % box_h
+    desired_x = "(%s+(%s)*%s-%d/2)" % (left, xexpr, box_w, w)
+    desired_y = "(%s+(%s)*%s-%d/2)" % (top, yexpr, box_h, h)
+    x = "max(%s,min(%s+%s-%d,%s))" % (left, left, box_w, w, desired_x)
+    y = "max(%s,min(%s+%s-%d,%s))" % (top, top, box_h, h, desired_y)
+    # Use the legacy scale-to-cover as the *single* scale stage, but make its requested W×H box grow
+    # with zoom progress. At z=1 it asks ffmpeg for exactly the old scale dimensions and centered crop,
+    # which is pixel-equivalent to the no-auto-zoom path. When z>1 the crop is constrained to the scaled
+    # copy of that same baseline box, so it cannot reveal content the old framing did not show.
+    return ("[0:v]" + static_crop +
+            "scale=w='%s':h='%s':force_original_aspect_ratio=increase:eval=frame," % (box_w, box_h) +
+            "crop=%d:%d:x='%s':y='%s',setsar=1,fps=%d,format=yuv420p" % (w, h, x, y, fps))
+
+
 def render_plan(s, r, tmp, out, meas=None):
     """The picture, sound and mux commands of a render, as argv lists. Pure: no disk writes, no probes.
     meas: what the job measured ({"length": cut seconds, "music": {file: LUFS}, "voice": LUFS,
@@ -11379,8 +11645,7 @@ def render_plan(s, r, tmp, out, meas=None):
     base = [ff_, "-nostdin", "-v", "error", "-y", "-progress", "pipe:1", "-nostats"]
     # Picture: one pass, the only lossy video encode.
     args = ["-i", os.path.join(tmp, "cut.mov")]
-    chain = "[0:v]" + ("crop=%d:%d:%d:%d," % (f["crop"]["w"], f["crop"]["h"], f["crop"]["x"], f["crop"]["y"])
-                       if f.get("crop") else "") + fill_frame(W, H) + ",fps=%d,format=yuv420p" % F
+    chain = picture_chain(r, meas.get("cut") or r["cut"], W, H, F)
     graph, k = [], 1
     if cover:
         args += ["-loop", "1", "-framerate", str(F), "-t", "%.3f" % lead, "-i", ref_abs(s, cover["image"])]
@@ -11561,6 +11826,43 @@ def edit_time_map(cut, lead=0.0):
     return {"lead": float(lead), "spans": spans, "duration": at}
 
 
+def rounded_cut_for_render(cut, clocks):
+    """The exact source spans render_run/render_cut concatenate, from already-probed source clocks.
+
+    render_run first snaps each segment endpoint on that source's own fps. render_cut then computes every
+    concatenated segment length on the *first cut source's* fps (the cut.mov output grid), with a two-frame
+    minimum. Keep this as the one implementation used by both the renderer and read-only planning so their
+    source/output clocks cannot diverge when a cut mixes frame rates.
+    """
+    if len(cut) != len(clocks) or not cut:
+        raise ValueError("Cutmark needs one media clock per cut segment.")
+    out = []
+    first_fps = float((clocks[0] or {}).get("fps") or 0)
+    if first_fps <= 0:
+        raise ValueError("Cutmark cannot read the frame rate of the first cut source.")
+    for g, c in zip(cut, clocks):
+        source_fps = float(c.get("fps") or 0)
+        if source_fps <= 0:
+            raise ValueError("Cutmark cannot read a cut source frame rate.")
+        a = round(float(g["in"]) * source_fps) / source_fps
+        b = round(float(g["out"]) * source_fps) / source_fps
+        length = max(2, frames(b - a, first_fps)) / first_fps
+        out.append({"take": g["take"], "kind": g["kind"], "in": a, "out": b, "len": length})
+    return out
+
+
+def rounded_render_cut(s, cut):
+    """Read-only resolution of the exact cut timeline used by the renderer."""
+    clocks = []
+    for g in cut:
+        t = voice_take(s, g["take"], g["kind"])
+        c = take_clock(os.path.join(s, t["file"])) or {}
+        if float(c.get("fps") or 0) <= 0:
+            raise ValueError("Cutmark cannot read the frame rate of %s." % t["file"])
+        clocks.append(c)
+    return rounded_cut_for_render(cut, clocks)
+
+
 def span_source_to_output(span_, source_time):
     """Output seconds for one moment inside a specific timeline span."""
     t = float(source_time)
@@ -11689,6 +11991,39 @@ AUTO_ZOOM_MIN_OUTPUT = 0.35
 AUTO_ZOOM_PLANNER = "click_focus_v1"
 
 
+def _json_digest(value):
+    data = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
+
+
+def _file_sha256(path):
+    try:
+        with open(path, "rb") as f:
+            h = hashlib.sha256()
+            while True:
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
+                h.update(chunk)
+            return h.hexdigest()
+    except OSError:
+        return None
+
+
+def auto_zoom_id(z):
+    payload = {k: z[k] for k in ("take", "kind", "trigger", "in", "out", "focus", "scale", "reason")}
+    return "az-" + _json_digest(payload)[:12]
+
+
+def auto_zoom_plan_fingerprint(base, inputs):
+    """Fingerprint raw capture evidence + exact immutable base recipe + planner semantics."""
+    payload = {"v": 1, "planner": AUTO_ZOOM_PLANNER,
+               "inputs": [{"take": x["take"], "sha256": x["sha256"], "through": x["through"]}
+                          for x in sorted(inputs, key=lambda y: y["take"])],
+               "base": base}
+    return _json_digest(payload)
+
+
 def _median(xs):
     xs = sorted(xs)
     if not xs:
@@ -11748,6 +12083,8 @@ def plan_auto_zooms(events, take, through=None):
                 else:
                     out.pop()
         out.append(candidate)
+    for z in out:
+        z["id"] = auto_zoom_id(z)
     return out
 
 
@@ -11764,10 +12101,11 @@ def map_auto_zooms(timeline, take, suggestions, minimum_duration=AUTO_ZOOM_MIN_O
         if int(z.get("take", -1)) != take or z.get("kind") != "screen":
             continue
         trigger = float(z["trigger"])
-        if not source_to_outputs(timeline, take, "screen", trigger):
-            continue
         for i, p in enumerate(spans):
             if p["take"] != take or p["kind"] != "screen":
+                continue
+            # Effect triggers are strict half-open even though seek mapping accepts the final endpoint.
+            if not p["in"] <= trigger < p["out"]:
                 continue
             a, b = max(float(z["in"]), p["in"]), min(float(z["out"]), p["out"])
             if b <= a:
@@ -11776,17 +12114,144 @@ def map_auto_zooms(timeline, take, suggestions, minimum_duration=AUTO_ZOOM_MIN_O
             output_out = p["at"] + (b - p["in"]) / p["rate"]
             if output_out - output_in < float(minimum_duration):
                 continue
-            contains = p["in"] <= trigger < p["out"]
-            output_trigger = p["at"] + (trigger - p["in"]) / p["rate"] if contains else None
+            output_trigger = p["at"] + (trigger - p["in"]) / p["rate"]
             out.append({"take": take, "kind": "screen", "source": z,
                         "output_trigger": output_trigger, "output_in": output_in, "output_out": output_out,
                         "span": p["index"]})
     return sorted(out, key=lambda x: (x["output_in"], x["span"]))
 
 
+def map_recipe_auto_zoom(timeline, items, minimum_duration=AUTO_ZOOM_MIN_OUTPUT):
+    """Map accepted source-space auto-zoom items to visible cut.mov fragments.
+
+    The trigger must exist strictly inside each span receiving the effect. This intentionally differs
+    from seek mapping's final-endpoint exception: an effect at sourceOut has no visible video frame.
+    Reused source ranges can therefore duplicate an item only when the click itself is present there.
+    """
+    out = []
+    for z in items or []:
+        take, kind = int(z["take"]), z.get("kind") or "screen"
+        trigger = float(z["trigger"])
+        for p in timeline["spans"]:
+            if p["take"] != take or p["kind"] != kind:
+                continue
+            if not p["in"] <= trigger < p["out"]:
+                continue
+            a, b = max(float(z["in"]), p["in"]), min(float(z["out"]), p["out"])
+            if b <= a:
+                continue
+            output_in = p["at"] + (a - p["in"]) / p["rate"]
+            output_out = p["at"] + (b - p["in"]) / p["rate"]
+            if output_out - output_in < float(minimum_duration):
+                continue
+            out.append({"item": z, "source_in": a, "source_out": b,
+                        "output_in": output_in, "output_out": output_out,
+                        "rate": p["rate"], "span": p["index"]})
+    return sorted(out, key=lambda x: (x["output_in"], x["span"]))
+
+
+def resolve_auto_zoom_base(s, ref):
+    """(exact ref like hook-v3, immutable published recipe) for a user-facing edit ref."""
+    name, version = edit_ref(s, ref)
+    if version is None:
+        r = newest_recipe(s, name)
+        if not r or not r.get("edit"):
+            raise ValueError("%s has no published recipe. Render and publish an edit first." % ref)
+        name, version = edit_name_of(os.path.basename(r["edit"]))
+    else:
+        entry = (edit_versions(s, name).get(name) or {}).get(version) or {}
+        if not entry.get("video") or not entry.get("recipe"):
+            raise ValueError("%s-v%d is not a published edit with a recipe." % (name, version))
+        r = load_recipe(s, entry["recipe"])
+    if r is None:
+        raise ValueError("%s has no recipe." % ref)
+    return "%s-v%d" % (name, version), r
+
+
+def auto_zoom_item(z):
+    """Canonical v1 render intent from one current planner suggestion."""
+    return {"id": z["id"], "take": int(z["take"]), "kind": "screen", "trigger": round(float(z["trigger"]), 4),
+            "in": round(float(z["in"]), 4), "out": round(float(z["out"]), 4),
+            "focus": {"x": round(float(z["focus"]["x"]), 6), "y": round(float(z["focus"]["y"]), 6)},
+            "scale": round(float(z["scale"]), 4), "ease": ZOOM_DEFAULT_EASE, "reason": "primary_click"}
+
+
+def build_auto_zoom_plan(s, base_ref, take=None):
+    """Fresh read-only plan against one exact published recipe. No files are written."""
+    exact, base = resolve_auto_zoom_base(s, base_ref)
+    # Rebuild only the geometry fields Cutmark derives today. Existing auto_zoom is deliberately left
+    # out: a fresh plan replaces that effect, but its fingerprint still covers the exact immutable base.
+    fields = agent_part(base)
+    fields.pop("auto_zoom", None)
+    work = norm_recipe(s, fields)
+    check_recipe(s, work)
+    fill_recipe(s, work, base)
+    meta = read_meta(s) or {}
+    available = sorted({int(g["take"]) for g in work["cut"] if g["kind"] == "screen"})
+    if take is not None:
+        try:
+            take = int(take)
+        except (TypeError, ValueError):
+            raise ValueError("take is a screen take number.")
+        if take not in available:
+            raise ValueError("Take %d screen is not in %s's cut." % (take, exact))
+        available = [take]
+    lead = float((base.get("cover") or {}).get("seconds") or 0.0)
+    timeline = edit_time_map(rounded_render_cut(s, work["cut"]), lead=lead)
+    suggestions, inputs, output, skipped, eligible = [], [], [], [], []
+    for n in available:
+        path = capture_events_file(s, n)
+        screen = next((x for x in meta.get("takes", [])
+                       if x.get("number") == n and x.get("kind") == "screen"), {})
+        duration = screen.get("duration")
+        through = float(duration) if isinstance(duration, (int, float)) and math.isfinite(float(duration)) else None
+        digest = _file_sha256(path)
+        inp = {"take": n, "events": os.path.relpath(path, s), "sha256": digest, "through": through}
+        inputs.append(inp)
+        planned = plan_auto_zooms(read_capture_events(s, n), n, through=through)
+        suggestions.extend(planned)
+        mapped = map_auto_zooms(timeline, n, planned)
+        mapped_ids = {x["source"]["id"] for x in mapped}
+        for z in planned:
+            item = auto_zoom_item(z)
+            why = None
+            if z["id"] not in mapped_ids:
+                why = "The click is outside the kept screen frames."
+            elif digest is None or through is None:
+                why = "The capture-event fingerprint or playable duration is unavailable."
+            elif zoom_focus_in_baseline(work, item) is None:
+                why = "The click is outside this edit's baseline viewport."
+            if why:
+                skipped.append({"id": z["id"], "take": n, "why": why})
+            else:
+                eligible.append(item)
+        good = {z["id"] for z in eligible}
+        output.extend(x for x in mapped if x["source"]["id"] in good)
+    plan_inputs = [{"take": int(x["take"]), "sha256": str(x["sha256"]).lower(),
+                    "through": round(float(x["through"]), 4)}
+                   for x in inputs if x["sha256"] is not None and x["through"] is not None]
+    plan = auto_zoom_plan_fingerprint(base, plan_inputs)
+    return {"base": exact, "base_recipe": base, "work": work, "scope_take": take,
+            "plan": plan, "inputs": inputs,
+            "plan_inputs": plan_inputs, "suggestions": suggestions, "eligible": eligible,
+            "output": output, "skipped": skipped}
+
+
 def t_suggest_auto_zooms(a):
     """Read-only auto-zoom planner. It returns proposals; it never edits a recipe or renders media."""
     s = resolve_session(a["session"])
+    if a.get("edit"):
+        p = build_auto_zoom_plan(s, a["edit"], a.get("take"))
+        ids = [z["id"] for z in p["eligible"]]
+        return {"v": 1, "planner": AUTO_ZOOM_PLANNER, "mode": "suggestions", "applied": False,
+                "clock": "screen_pts", "base": p["base"], "plan": p["plan"], "inputs": p["inputs"],
+                "suggestions": p["suggestions"], "applicable_ids": ids, "output": p["output"],
+                **({"take": p["scope_take"]} if p["scope_take"] is not None else {}),
+                **({"skipped": p["skipped"]} if p["skipped"] else {}),
+                "note": "Read-only proposals. No recipe or media was changed.",
+                "next": ("Review applicable_ids, then call apply_auto_zooms base=%s plan=%s accept=[...]%s. "
+                         "That starts a normal render; it never auto-publishes."
+                         % (p["base"], p["plan"], " take=%d" % p["scope_take"] if p["scope_take"] is not None else ""))}
     meta = read_meta(s) or {}
     available = sorted({int(x["number"]) for x in meta.get("takes", []) if x.get("kind") == "screen"})
     if a.get("take") is not None:
@@ -11794,16 +12259,7 @@ def t_suggest_auto_zooms(a):
         if take not in available:
             raise ValueError("Take %d has no screen recording in this session." % take)
         available = [take]
-    edit = None
-    timeline = None
-    if a.get("edit"):
-        edit = read_recipe(s, a["edit"])
-        if not edit:
-            raise ValueError("%s has no recipe. Give an edit made by render_edit + publish_edit." % a["edit"])
-        lead = float((edit.get("cover") or {}).get("seconds") or 0.0)
-        timeline = edit_time_map(edit.get("cut") or [], lead=lead)
     suggestions = []
-    mapped = []
     inputs = []
     for take in available:
         path = capture_events_file(s, take)
@@ -11813,27 +12269,44 @@ def t_suggest_auto_zooms(a):
         through = float(duration) if isinstance(duration, (int, float)) and math.isfinite(float(duration)) else None
         planned = plan_auto_zooms(read_capture_events(s, take), take, through=through)
         suggestions.extend(planned)
-        try:
-            with open(path, "rb") as f:
-                h = hashlib.sha256()
-                while True:
-                    chunk = f.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    h.update(chunk)
-                digest = h.hexdigest()
-        except OSError:
-            digest = None
+        digest = _file_sha256(path)
         inputs.append({"take": take, "events": os.path.relpath(path, s), "sha256": digest,
                        "through": through})
-        if timeline:
-            mapped.extend(map_auto_zooms(timeline, take, planned))
     out = {"v": 1, "planner": AUTO_ZOOM_PLANNER, "mode": "suggestions", "applied": False,
            "clock": "screen_pts", "inputs": inputs,
            "suggestions": suggestions,
            "note": "Read-only proposals. No recipe or media was changed."}
-    if a.get("edit"):
-        out.update(edit=a["edit"], output=mapped)
+    return out
+
+
+def t_apply_auto_zooms(a):
+    """Verify one fresh suggestion plan and render only the explicitly accepted ids. Never publishes."""
+    s = resolve_session(a["session"])
+    name, version = edit_ref(s, a.get("base"))
+    if version is None:
+        raise ValueError("base must be an exact published version from suggest_auto_zooms, e.g. hook-v3.")
+    p = build_auto_zoom_plan(s, a["base"], a.get("take"))
+    plan = str(a.get("plan") or "").lower()
+    if plan != p["plan"]:
+        raise ValueError("The auto-zoom plan is stale. Call suggest_auto_zooms again before applying it.")
+    accept = a.get("accept")
+    if not isinstance(accept, list) or not accept or not all(isinstance(x, str) for x in accept):
+        raise ValueError("accept is the non-empty list of applicable_ids you reviewed.")
+    if len(set(accept)) != len(accept):
+        raise ValueError("accept contains the same auto-zoom id more than once.")
+    eligible = {z["id"]: z for z in p["eligible"]}
+    unknown = [x for x in accept if x not in eligible]
+    if unknown:
+        raise ValueError("These auto-zoom ids are not applicable in the fresh plan: %s." % ", ".join(unknown))
+    items = [eligible[x] for x in accept]
+    changes = {"auto_zoom": {"v": 1, "planner": AUTO_ZOOM_PLANNER, "plan": p["plan"],
+                             "inputs": p["plan_inputs"], "items": items}}
+    render = {"session": s, "base": p["base"], "changes": changes,
+              "wait_s": a.get("wait_s") or 0}
+    if a.get("go_back"):
+        render["go_back"] = True
+    out = _render_edit(render, allow_new_auto_zoom=True)
+    out["auto_zoom"] = {"plan": p["plan"], "accepted": accept, "published": False}
     return out
 
 
@@ -11881,7 +12354,7 @@ def render_run(job_id):
     try:
         # 1. Cut: each part on whole frames, ProRes parts, the voice of the same length.
         say("CUTMARK_STAGE " + RENDER_STAGES["cut"])
-        files, clocks, voices, cut = [], [], [], []
+        files, clocks, voices = [], [], []
         for g in r["cut"]:
             try:
                 t = voice_take(s, g["take"], g["kind"])
@@ -11890,15 +12363,12 @@ def render_run(job_id):
             if not os.path.isfile(t["file"]):
                 raise RenderStop("a take file is gone")
             c = take_clock(t["file"])
-            fps = c["fps"]
-            a, b = round(g["in"] * fps) / float(fps), round(g["out"] * fps) / float(fps)
-            cut.append({"take": g["take"], "kind": g["kind"], "in": a, "out": b,
-                        "len": max(2, int(round((b - a) * fps))) / float(fps)})
             files.append(t["file"])
             clocks.append(c)
             key = voice_key(g["take"], g["kind"])
             mix = (r.get("voice") or {}).get("keys", {}).get(key)
             voices.append((mix, voice_offset(s, key)) if mix and os.path.exists(mix) else None)
+        cut = rounded_cut_for_render(r["cut"], clocks)
         segs = [{"take": g["take"], "kind": g["kind"], "in": g["in"], "out": g["out"]} for g in cut]
         length = render_cut(segs, files, clocks, voices, os.path.join(tmp, "cut.mov"), os.path.join(tmp, "voice.wav"),
                             vargs=PRORES)
@@ -11915,7 +12385,7 @@ def render_run(job_id):
             if not os.path.isfile(ref_abs(s, o["file"])):
                 raise RenderStop("a picture layer is missing (%s)" % o["file"])
         # 3. Picture, 4. sound, 5. mux.
-        meas = {"length": length, "real": True,
+        meas = {"length": length, "real": True, "cut": cut,
                 "over": {o["file"]: media_seconds(ref_abs(s, o["file"])) for o in r.get("over") or []
                          if o.get("out") is None and media_kind(o["file"]) != "image"},
                 "music": {m["file"]: loudness_of(ref_abs(s, m["file"]))[0] for m in r.get("music") or []},
@@ -12155,10 +12625,15 @@ def start_render(s, r, label, length):
     raise ValueError("Cutmark could not start the render. Try again.")
 
 
-def t_render_edit(a):
+def _render_edit(a, allow_new_auto_zoom=False):
     s = job_session(a.get("session"))
     if a.get("recipe") is not None and a.get("base"):
         raise ValueError("Give recipe (a whole recipe) or base with changes, not both.")
+    if not allow_new_auto_zoom:
+        if isinstance(a.get("recipe"), dict) and a["recipe"].get("auto_zoom") is not None:
+            raise ValueError("Apply a new auto_zoom with suggest_auto_zooms + apply_auto_zooms, not by writing it directly.")
+        if isinstance(a.get("changes"), dict) and a["changes"].get("auto_zoom") is not None:
+            raise ValueError("Apply a new auto_zoom with suggest_auto_zooms + apply_auto_zooms, not by writing it directly.")
     try:
         wait = min(max(float(a.get("wait_s") or 0), 0), RENDER_WAIT_MAX)
     except (TypeError, ValueError):
@@ -12234,6 +12709,11 @@ def t_render_edit(a):
         out.update(status=b["status"], error=b.get("error"), log_tail=b.get("log_tail"),
                    next=b.get("next") or "Fix the recipe and call render_edit again.")
     return with_rules(out, *EDIT_AREAS)
+
+
+def t_render_edit(a):
+    """Public MCP surface. Fresh auto-zoom intent enters only through apply_auto_zooms."""
+    return _render_edit(a, allow_new_auto_zoom=False)
 
 
 def link_noclobber(src, dst):
@@ -13777,7 +14257,8 @@ TOOLS = [
      "(picture layers: alpha graphics or b-roll, with at/in/out), music and sfx (file, at, gain_db), steps (commands "
      "that make the layers, run in _edit/<name>/), cover (a thumbnail). Next version: base=<name> and changes (a JSON "
      "merge patch on the newest recipe; a list replaces the whole list; {\"name\": \"hook-vertical\"} starts a new "
-     "line). Cutmark uses the clean voice once and never uses a finished edit as an input. One render of a name runs "
+     "line). Existing auto_zoom is inherited; auto_zoom:null removes it. New auto-zoom plans must come from "
+     "suggest_auto_zooms + apply_auto_zooms. Cutmark uses the clean voice once and never uses a finished edit as an input. One render of a name runs "
      "at a time: to compare two options, give the second a new name. Returns a job; then publish_edit.",
      {"session": SESSION,
       "recipe": {"type": "object", "description": "A whole recipe. For a first version, or to rebuild an edit that "
@@ -13810,21 +14291,35 @@ TOOLS = [
       "go_back": {"type": "boolean", "description": "true to save even when a newer version was saved while this "
                   "render ran."}},
      ["session", "render", "note"], t_publish_edit),
-    ("get_edit_recipe", "The recipe of an edit: how it was made (cut list, voice, layers, music, sfx, cover, checks, "
+    ("get_edit_recipe", "The recipe of an edit: how it was made (cut list, accepted auto-zoom plan, voice, layers, music, sfx, cover, checks, "
      "the exact commands) and the versions before it. get_session shows a short form of the newest one.",
      {"session": SESSION,
       "edit": {"type": "string", "description": "'hook-v4', 'edits/hook-v4.mp4' or 'hook' for its newest. Default: "
                "the newest edit."}},
      ["session"], t_get_edit_recipe),
     ("suggest_auto_zooms", "Plan conservative screen-recording zooms from Cutmark's captured primary clicks. "
-     "This is read-only: it returns normalized focus points and source-clock intervals, and when edit is given it "
-     "maps those intervals through that edit's cut/rate timeline. It never changes the recipe or media. Pointer "
-     "movement only stabilizes a click target; scrolls, markers and keyboard input never trigger a zoom.",
+     "This is read-only. With edit it returns an exact published base, a plan fingerprint, applicable stable ids, "
+     "normalized source-clock focus intervals and their mapped preview. It never changes recipe/media. Pointer "
+     "movement only stabilizes a click target; scrolls, markers and keyboard input never trigger a zoom. Review the "
+     "ids, then use apply_auto_zooms; do not copy an auto_zoom object into render_edit yourself.",
      {"session": SESSION,
       "take": {"type": "integer", "description": "Only this screen take. Omit to inspect every screen take in the session."},
       "edit": {"type": "string", "description": "Optional existing edit recipe ('hook', 'hook-v4' or edits/hook-v4.mp4). "
-               "When given, output contains the suggestions after cuts, reuse and rate changes."}},
+               "When given, output contains a fingerprinted plan against the exact published base and only renderable ids."}},
      ["session"], t_suggest_auto_zooms),
+    ("apply_auto_zooms", "Render a reviewed auto-zoom plan as a new, unpublished edit candidate. Call "
+     "suggest_auto_zooms with edit first, then pass its exact base, plan fingerprint and only the applicable_ids you "
+     "accept. Cutmark recomputes the plan and refuses if capture events, playable duration or the base changed. It "
+     "stores the accepted source-clock plan in EditRecipe and starts the normal checked render. It never publishes.",
+     {"session": SESSION,
+      "base": {"type": "string", "description": "Exact published edit version returned by suggest_auto_zooms, e.g. hook-v3."},
+      "plan": {"type": "string", "description": "64-character plan fingerprint returned by suggest_auto_zooms."},
+      "accept": {"type": "array", "items": {"type": "string"},
+                 "description": "Non-empty subset of applicable_ids you reviewed and want rendered."},
+      "take": {"type": "integer", "description": "Same optional screen-take scope used for suggest_auto_zooms."},
+      "wait_s": {"type": "integer", "description": "Wait up to this many seconds (max 120) for the render. Default 0."},
+      "go_back": {"type": "boolean", "description": "true only when intentionally rendering from an older exact base."}},
+     ["session", "base", "plan", "accept"], t_apply_auto_zooms),
     ("save_broll", "Save a video of a session into the user's b-roll library (_library/broll/<folder>/, an APFS "
      "clone), so every session can use it (list_broll, add_broll). Gemini describes it in the background and "
      "writes the description and keywords into the clip. Only on the user's ask.",

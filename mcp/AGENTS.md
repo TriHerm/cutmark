@@ -68,6 +68,13 @@ server `instructions`. Each description goes into every chat's context, so keep 
   `O_EXCL`, and the video moves in with `link_noclobber`: `versions_in`, `next_path` and the app's
   `Cover.next` count a recipe with no video as taken. A post moves to a new version only when it has no
   pick or `media_by: takes`; the user's star clears `media_by`. `render_plan` is pure: test it directly.
+- **Screen zooms stay on the source clock.** Recipe `auto_zoom` is a versioned accepted plan: raw-event
+  fingerprints plus screen-take items with a stable id, click trigger, normalized focus, scale and ease.
+  Rendering maps those items through the actual frame-rounded cut, applies them inside the edit's existing
+  baseline viewport before cover/overlays, and keeps output size/duration fixed. `suggest_auto_zooms` is
+  read-only; `apply_auto_zooms` recomputes its fingerprint, accepts only reviewed ids, and starts a normal
+  unpublished render. New `auto_zoom` data must not be hand-written through `render_edit`; `auto_zoom:null`
+  removes an inherited effect. Smart-speed is a separate feature.
 - **Built-in checks compare an edit with its take.** A new one needs a synthetic test that fails
   it and one that passes (`mcp/tests/test_check_edit.py`, media from `check_media.py`). `say` is
   for the user: plain words, no names.
