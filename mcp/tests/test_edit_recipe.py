@@ -2,6 +2,7 @@
 the next version with its recipe, the next version starts from that recipe. Media made with ffmpeg in a
 temp library; real renders run as real jobs. No network, no money."""
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -291,6 +292,76 @@ class Pure(Base):
                               "startedAt": "2026-10-11T00:00:00Z", "duration": 1.5})
         t.write_meta(self.s, meta)
         self.assertEqual([e["type"] for e in t.read_capture_events(self.s, 8)], ["down"])
+
+    def test_auto_zoom_planner_is_deterministic_click_focused_and_ignores_move_only_activity(self):
+        events = [
+            {"t": 0.90, "type": "move", "source": "screen", "x": 0.01, "y": 0.04},
+            {"t": 0.98, "type": "move", "source": "screen", "x": 0.02, "y": 0.05},
+            {"t": 1.00, "type": "down", "source": "screen", "x": 0.01, "y": 0.05, "button": 0, "count": 1},
+            {"t": 1.45, "type": "down", "source": "screen", "x": 0.53, "y": 0.51, "button": 0, "count": 1},
+            {"t": 1.70, "type": "down", "source": "screen", "x": 0.80, "y": 0.20, "button": 0, "count": 1},
+            {"t": 2.00, "type": "scroll", "source": "screen", "x": 0.7, "y": 0.2, "dx": 0, "dy": 20},
+            {"t": 2.20, "type": "down", "source": "screen", "x": 0.1, "y": 0.9, "button": 1, "count": 1},
+        ]
+        a = t.plan_auto_zooms(events, 4)
+        b = t.plan_auto_zooms(list(reversed(events)), 4)
+        self.assertEqual(a, b)
+        self.assertEqual(len(a), 1)
+        self.assertEqual(a[0]["trigger"], 1.70)  # rapid burst keeps the final navigation target
+        self.assertEqual(a[0]["in"], 0.88)      # but keeps pre-roll from the first click in the burst
+        self.assertEqual(a[0]["focus"], {"x": 0.80, "y": 0.20})
+        self.assertEqual(a[0]["scale"], 1.35)
+        self.assertEqual(t.plan_auto_zooms([events[0], events[1]], 4), [])
+
+    def test_auto_zoom_interval_mapping_respects_cuts_reuse_rate_and_camera_identity(self):
+        timeline = t.edit_time_map([
+            {"take": 4, "kind": "screen", "in": 2.0, "out": 5.0},
+            {"take": 4, "kind": "camera", "in": 0.0, "out": 1.0},
+            {"take": 4, "kind": "screen", "in": 2.5, "out": 4.0, "rate": 2.0},
+        ], lead=0.1)
+        zoom = {"take": 4, "kind": "screen", "trigger": 3.0, "in": 2.88, "out": 4.35,
+                "focus": {"x": 0.5, "y": 0.5}, "scale": 1.35, "reason": "primary_click"}
+        mapped = t.map_auto_zooms(timeline, 4, [zoom])
+        self.assertEqual(len(mapped), 2)
+        self.assertEqual([round(x["output_trigger"], 2) for x in mapped], [1.10, 4.35])
+        self.assertEqual([(round(x["output_in"], 2), round(x["output_out"], 2)) for x in mapped],
+                         [(0.98, 2.45), (4.29, 4.85)])
+        # A trigger removed by the cut does not leak its pre/post window into a kept span.
+        removed = dict(zoom, trigger=1.5, **{"in": 1.4, "out": 2.4})
+        self.assertEqual(t.map_auto_zooms(timeline, 4, [removed]), [])
+
+    def test_suggest_auto_zooms_is_read_only_versioned_and_uses_recovered_duration(self):
+        self.add_take(n=3, secs=2, kind="screen")
+        path = t.capture_events_file(self.s, 3)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(json.dumps({"v": 1, "type": "header", "take": 3, "source": "screen", "clock": "screen_pts",
+                                "coordinates": "display_normalized_top_left",
+                                "display": {"id": 1, "x": 0, "y": 0, "width": 1920, "height": 1080}}) + "\n")
+            f.write(json.dumps({"t": 1.0, "type": "down", "source": "screen", "x": 0.4, "y": 0.6,
+                                "button": 0, "count": 1}) + "\n")
+            f.write(json.dumps({"t": 2.4, "type": "down", "source": "screen", "x": 0.8, "y": 0.2,
+                                "button": 0, "count": 1}) + "\n")
+        with open(path, "rb") as f:
+            before = f.read()
+        out = t.t_suggest_auto_zooms({"session": self.s, "take": 3})
+        self.assertEqual(out["planner"], "click_focus_v1")
+        self.assertFalse(out["applied"])
+        self.assertEqual([z["trigger"] for z in out["suggestions"]], [1.0])
+        self.assertEqual(out["suggestions"][0]["out"], 2.0)
+        self.assertEqual(out["inputs"][0]["through"], 2.0)
+        self.assertEqual(out["inputs"][0]["sha256"], hashlib.sha256(before).hexdigest())
+        os.makedirs(os.path.join(self.s, "edits"), exist_ok=True)
+        t.write_json(os.path.join(self.s, "edits", "hook-v1.recipe.json"),
+                     {"cut": [{"take": 3, "kind": "screen", "in": 0.5, "out": 1.5}],
+                      "cover": {"seconds": 0.1}})
+        mapped = t.t_suggest_auto_zooms({"session": self.s, "take": 3, "edit": "hook-v1"})
+        self.assertEqual(len(mapped["output"]), 1)
+        self.assertEqual(round(mapped["output"][0]["output_trigger"], 2), 0.60)
+        self.assertEqual((round(mapped["output"][0]["output_in"], 2), round(mapped["output"][0]["output_out"], 2)),
+                         (0.48, 1.10))
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), before)
 
     def test_render_plan_is_pure_and_the_voice_goes_in_once(self):
         self.add_take()

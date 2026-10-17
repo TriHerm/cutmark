@@ -11677,6 +11677,166 @@ def map_capture_events(timeline, take, events):
     return out
 
 
+AUTO_ZOOM_SCALE = 1.35
+AUTO_ZOOM_PRE_ROLL = 0.12
+AUTO_ZOOM_HOLD = 1.35
+AUTO_ZOOM_MERGE_WINDOW = 0.75
+AUTO_ZOOM_TARGET_RADIUS = 0.10
+AUTO_ZOOM_POINTER_WINDOW = 0.18
+AUTO_ZOOM_POINTER_RADIUS = 0.08
+AUTO_ZOOM_MIN_GAP = 0.20
+AUTO_ZOOM_MIN_OUTPUT = 0.35
+AUTO_ZOOM_PLANNER = "click_focus_v1"
+
+
+def _median(xs):
+    xs = sorted(xs)
+    if not xs:
+        return 0.5
+    i = len(xs) // 2
+    return (xs[i - 1] + xs[i]) / 2.0 if len(xs) % 2 == 0 else xs[i]
+
+
+def plan_auto_zooms(events, take, through=None):
+    """Conservative, deterministic zoom suggestions on one screen take's source clock.
+
+    Only primary-button downs trigger zooms. Pointer samples near the click stabilize its target;
+    scrolls/right-clicks/movement alone do not cause camera motion. Suggestions are derived on demand:
+    this function never changes the capture log, recipe or media.
+    """
+    ordered = [e for _, e in sorted(enumerate(events), key=lambda x: (float(x[1].get("t", 0)), x[0]))]
+    moves = [e for e in ordered if e.get("type") == "move" and e.get("x") is not None and e.get("y") is not None]
+    limit = float(through) if isinstance(through, (int, float)) and math.isfinite(float(through)) and float(through) >= 0 else None
+    clicks = [e for e in ordered if e.get("type") == "down" and e.get("button") == 0
+              and e.get("x") is not None and e.get("y") is not None
+              and (limit is None or float(e["t"]) <= limit + 0.001)]
+    bursts = []
+    for click in clicks:
+        if bursts and float(click["t"]) - float(bursts[-1][-1]["t"]) <= AUTO_ZOOM_MERGE_WINDOW:
+            bursts[-1].append(click)
+        else:
+            bursts.append([click])
+    out = []
+    for burst in bursts:
+        first, click = burst[0], burst[-1]
+        t0, x0, y0 = float(click["t"]), float(click["x"]), float(click["y"])
+        points = [(x0, y0)]
+        for move in moves:
+            mt, mx, my = float(move["t"]), float(move["x"]), float(move["y"])
+            if abs(mt - t0) <= AUTO_ZOOM_POINTER_WINDOW and math.hypot(mx - x0, my - y0) <= AUTO_ZOOM_POINTER_RADIUS:
+                points.append((mx, my))
+        fx, fy = _median([p[0] for p in points]), _median([p[1] for p in points])
+        source_in = max(0.0, float(first["t"]) - AUTO_ZOOM_PRE_ROLL)
+        source_out = min(limit, t0 + AUTO_ZOOM_HOLD) if limit is not None else t0 + AUTO_ZOOM_HOLD
+        if source_out <= source_in:
+            continue
+        candidate = {"take": int(take), "kind": "screen", "trigger": t0,
+                     "in": source_in, "out": source_out,
+                     "focus": {"x": fx, "y": fy}, "scale": AUTO_ZOOM_SCALE, "reason": "primary_click"}
+        if out:
+            last = out[-1]
+            distance = math.hypot(candidate["focus"]["x"] - last["focus"]["x"],
+                                  candidate["focus"]["y"] - last["focus"]["y"])
+            if distance <= AUTO_ZOOM_TARGET_RADIUS and candidate["in"] <= last["out"] + AUTO_ZOOM_MIN_GAP:
+                last.update(trigger=candidate["trigger"], out=max(last["out"], candidate["out"]),
+                            focus=candidate["focus"])
+                continue
+            if candidate["in"] < last["out"] + AUTO_ZOOM_MIN_GAP:
+                shortened = candidate["in"] - AUTO_ZOOM_MIN_GAP
+                if shortened > last["trigger"]:
+                    last["out"] = shortened
+                else:
+                    out.pop()
+        out.append(candidate)
+    return out
+
+
+def map_auto_zooms(timeline, take, suggestions, minimum_duration=AUTO_ZOOM_MIN_OUTPUT):
+    """Project source zoom suggestions onto an edit without crossing a cut.
+
+    The trigger click itself must survive in a matching `(take, screen)` span. Source reuse intentionally
+    duplicates a suggestion; rate changes scale its output duration. Tiny surviving slivers are omitted.
+    """
+    take = int(take)
+    out = []
+    spans = timeline["spans"]
+    for z in suggestions:
+        if int(z.get("take", -1)) != take or z.get("kind") != "screen":
+            continue
+        trigger = float(z["trigger"])
+        if not source_to_outputs(timeline, take, "screen", trigger):
+            continue
+        for i, p in enumerate(spans):
+            if p["take"] != take or p["kind"] != "screen":
+                continue
+            a, b = max(float(z["in"]), p["in"]), min(float(z["out"]), p["out"])
+            if b <= a:
+                continue
+            output_in = p["at"] + (a - p["in"]) / p["rate"]
+            output_out = p["at"] + (b - p["in"]) / p["rate"]
+            if output_out - output_in < float(minimum_duration):
+                continue
+            contains = p["in"] <= trigger < p["out"]
+            output_trigger = p["at"] + (trigger - p["in"]) / p["rate"] if contains else None
+            out.append({"take": take, "kind": "screen", "source": z,
+                        "output_trigger": output_trigger, "output_in": output_in, "output_out": output_out,
+                        "span": p["index"]})
+    return sorted(out, key=lambda x: (x["output_in"], x["span"]))
+
+
+def t_suggest_auto_zooms(a):
+    """Read-only auto-zoom planner. It returns proposals; it never edits a recipe or renders media."""
+    s = resolve_session(a["session"])
+    meta = read_meta(s) or {}
+    available = sorted({int(x["number"]) for x in meta.get("takes", []) if x.get("kind") == "screen"})
+    if a.get("take") is not None:
+        take = int(a["take"])
+        if take not in available:
+            raise ValueError("Take %d has no screen recording in this session." % take)
+        available = [take]
+    edit = None
+    timeline = None
+    if a.get("edit"):
+        edit = read_recipe(s, a["edit"])
+        if not edit:
+            raise ValueError("%s has no recipe. Give an edit made by render_edit + publish_edit." % a["edit"])
+        lead = float((edit.get("cover") or {}).get("seconds") or 0.0)
+        timeline = edit_time_map(edit.get("cut") or [], lead=lead)
+    suggestions = []
+    mapped = []
+    inputs = []
+    for take in available:
+        path = capture_events_file(s, take)
+        screen = next((x for x in meta.get("takes", [])
+                       if x.get("number") == take and x.get("kind") == "screen"), {})
+        duration = screen.get("duration")
+        through = float(duration) if isinstance(duration, (int, float)) and math.isfinite(float(duration)) else None
+        planned = plan_auto_zooms(read_capture_events(s, take), take, through=through)
+        suggestions.extend(planned)
+        try:
+            with open(path, "rb") as f:
+                h = hashlib.sha256()
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+                digest = h.hexdigest()
+        except OSError:
+            digest = None
+        inputs.append({"take": take, "events": os.path.relpath(path, s), "sha256": digest,
+                       "through": through})
+        if timeline:
+            mapped.extend(map_auto_zooms(timeline, take, planned))
+    out = {"v": 1, "planner": AUTO_ZOOM_PLANNER, "mode": "suggestions", "applied": False,
+           "clock": "screen_pts", "inputs": inputs,
+           "suggestions": suggestions,
+           "note": "Read-only proposals. No recipe or media was changed."}
+    if a.get("edit"):
+        out.update(edit=a["edit"], output=mapped)
+    return out
+
+
 def render_words(s, r, cut, lead):
     """The final edit's words, from the takes' word times, and made_from for check_edit."""
     timeline = edit_time_map(cut, lead)
@@ -13656,6 +13816,15 @@ TOOLS = [
       "edit": {"type": "string", "description": "'hook-v4', 'edits/hook-v4.mp4' or 'hook' for its newest. Default: "
                "the newest edit."}},
      ["session"], t_get_edit_recipe),
+    ("suggest_auto_zooms", "Plan conservative screen-recording zooms from Cutmark's captured primary clicks. "
+     "This is read-only: it returns normalized focus points and source-clock intervals, and when edit is given it "
+     "maps those intervals through that edit's cut/rate timeline. It never changes the recipe or media. Pointer "
+     "movement only stabilizes a click target; scrolls, markers and keyboard input never trigger a zoom.",
+     {"session": SESSION,
+      "take": {"type": "integer", "description": "Only this screen take. Omit to inspect every screen take in the session."},
+      "edit": {"type": "string", "description": "Optional existing edit recipe ('hook', 'hook-v4' or edits/hook-v4.mp4). "
+               "When given, output contains the suggestions after cuts, reuse and rate changes."}},
+     ["session"], t_suggest_auto_zooms),
     ("save_broll", "Save a video of a session into the user's b-roll library (_library/broll/<folder>/, an APFS "
      "clone), so every session can use it (list_broll, add_broll). Gemini describes it in the background and "
      "writes the description and keywords into the clip. Only on the user's ask.",
@@ -13795,7 +13964,7 @@ READ_ONLY = {"get_comment_context", "list_comment_suggestions", "list_projects",
              "post_history", "get_post_queue", "get_plan", "get_comments", "get_rules", "script_history",
              "get_script_version", "get_performance", "list_broll", "search_media", "list_music", "get_library",
              "phone_videos", "higgsfield_status", "replicate_status", "replicate_model",
-             "list_ideas", "get_idea", "get_job", "get_edit_recipe"}
+             "list_ideas", "get_idea", "get_job", "get_edit_recipe", "suggest_auto_zooms"}
 DESTRUCTIVE = {"trash_takes", "trash_sessions", "delete_variants", "delete_post_variants", "copy_library",
                "set_rule", "set_hooks", "set_post_hooks", "set_storyboard",
                # run_job runs any shell command: clients that gate on destructiveHint must ask first.
