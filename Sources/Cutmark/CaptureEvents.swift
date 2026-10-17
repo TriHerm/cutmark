@@ -125,6 +125,17 @@ enum CaptureEventLog {
             && d.width > 0 && d.height > 0
     }
 
+    static func valid(_ event: CaptureEvent) -> Bool {
+        guard event.source == .screen, event.t.isFinite, event.t >= 0 else { return false }
+        if let x = event.x, !x.isFinite || x < 0 || x > 1 { return false }
+        if let y = event.y, !y.isFinite || y < 0 || y > 1 { return false }
+        if let dx = event.dx, !dx.isFinite { return false }
+        if let dy = event.dy, !dy.isFinite { return false }
+        if let button = event.button, !(0...2).contains(button) { return false }
+        if let count = event.count, count < 1 { return false }
+        return true
+    }
+
     static func header(_ url: URL) -> Header? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
@@ -142,7 +153,7 @@ enum CaptureEventLog {
         let decoder = JSONDecoder()
         return data.split(separator: 0x0A).dropFirst().compactMap { line in
             guard let event = try? decoder.decode(CaptureEvent.self, from: Data(line)),
-                  event.source == .screen, event.t >= 0,
+                  valid(event),
                   duration.map({ event.t <= $0 + 0.001 }) ?? true else { return nil }
             return event
         }
@@ -164,9 +175,9 @@ enum CaptureEventLog {
                 let line = data[..<newline]
                 data.removeSubrange(...newline)
                 // Pointer events dominate the file. Avoid Codable work unless the flat line says marker.
-                guard line.range(of: Data("\"type\":\"marker\"".utf8)) != nil,
+                guard line.range(of: Data("\"marker\"".utf8)) != nil,
                       let event = try? decoder.decode(CaptureEvent.self, from: Data(line)),
-                      event.source == .screen, event.t >= 0, event.t <= duration + 0.001 else { continue }
+                      valid(event), event.type == .marker, event.t <= duration + 0.001 else { continue }
                 out.append(event)
             }
         }
@@ -179,7 +190,7 @@ enum CaptureEventLog {
         private var lastTime = 0.0
 
         init(url: URL, header: Header) throws {
-            guard CaptureEventLog.valid(header, take: CaptureEventLog.takeNumber(forEventFile: url)) else {
+            guard let take = CaptureEventLog.takeNumber(forEventFile: url), CaptureEventLog.valid(header, take: take) else {
                 throw RecorderError("The take event log metadata is invalid.")
             }
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

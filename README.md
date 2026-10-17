@@ -95,6 +95,7 @@ Provider CLIs continue to own their own login and model configuration.
 ## Privacy
 
 - Video, scripts, chats, and project metadata stay in the library on your Mac unless a selected provider or explicit publishing/generation action sends data to an external service.
+- Camera + Screen takes may keep a local `.capture-events` sidecar with normalized pointer movement, mouse clicks, scroll deltas, and manual markers for later editing features. Cutmark does not record keystrokes in this event format.
 - Cutmark does not configure a usage analytics endpoint in the current release.
 - API/provider calls follow the privacy and billing terms of the service you choose.
 - The MCP HTTP listener binds to loopback by default.

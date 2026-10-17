@@ -11624,8 +11624,11 @@ def read_capture_events(s, take):
                 or header.get("take") != int(take) or header.get("source") != "screen"
                 or header.get("clock") != "screen_pts" or header.get("coordinates") != "display_normalized_top_left"
                 or not isinstance(display, dict)
-                or not isinstance(display.get("width"), (int, float)) or float(display["width"]) <= 0
-                or not isinstance(display.get("height"), (int, float)) or float(display["height"]) <= 0):
+                or not isinstance(display.get("id"), int)
+                or not isinstance(display.get("x"), (int, float)) or not math.isfinite(float(display["x"]))
+                or not isinstance(display.get("y"), (int, float)) or not math.isfinite(float(display["y"]))
+                or not isinstance(display.get("width"), (int, float)) or not math.isfinite(float(display["width"])) or float(display["width"]) <= 0
+                or not isinstance(display.get("height"), (int, float)) or not math.isfinite(float(display["height"])) or float(display["height"]) <= 0):
             return []
         for line in f:
             try:
@@ -11635,6 +11638,14 @@ def read_capture_events(s, take):
             if not isinstance(e, dict) or e.get("type") not in CAPTURE_EVENT_TYPES or e.get("source") != "screen":
                 continue
             if not isinstance(e.get("t"), (int, float)) or not math.isfinite(float(e["t"])) or float(e["t"]) < 0:
+                continue
+            if any(k in e and (not isinstance(e[k], (int, float)) or not math.isfinite(float(e[k]))) for k in ("x", "y", "dx", "dy")):
+                continue
+            if "x" in e and not 0 <= float(e["x"]) <= 1 or "y" in e and not 0 <= float(e["y"]) <= 1:
+                continue
+            if "button" in e and e["button"] not in (0, 1, 2):
+                continue
+            if "count" in e and (not isinstance(e["count"], int) or e["count"] < 1):
                 continue
             out.append(e)
     # Crash recovery can keep the last completed movie fragment while the JSONL contains events from
