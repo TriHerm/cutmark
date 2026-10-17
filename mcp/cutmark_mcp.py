@@ -12352,7 +12352,8 @@ def _smart_speed_take_plan(s, take, through):
     if not any(e.get("type") in ("visual_idle", "visual_active") for e in events):
         return inp, [], "This take predates visual-idle capture; smart-speed will not infer idle from mouse activity."
     has_audio = bool(clock.get("channels"))
-    if has_audio and (words_sha is None or not is_ready(doc, clock)):
+    if has_audio and (words_sha is None or not is_ready(doc, clock)
+                      or doc.get("v") != 2 or not isinstance(doc.get("sounds"), list)):
         return inp, [], "Prepared word/sound timing is unavailable; smart-speed will not guess over audio."
     if not has_audio:
         words_sha = "no_audio"

@@ -503,6 +503,14 @@ class Pure(Base):
         self.assertEqual(missing["suggestions"], [])
         self.assertIn("will not guess over audio", missing["skipped"][0]["why"])
 
+        # A video-clock words file is not sufficient on its own: smart-speed also needs the
+        # prepared v2 non-word `sounds` channel so coughs/clicks/breaths cannot become false silence.
+        t.write_json(words_path, {"v": 2, "clock": "video", "duration": 12.0, "onsets": 1,
+                                  "words": [{"word": "hello", "start": 5.0, "end": 6.0}]})
+        no_sounds = t.t_suggest_smart_speed({"session": self.s, "take": 1, "edit": "hook-v1"})
+        self.assertEqual(no_sounds["suggestions"], [])
+        self.assertIn("will not guess over audio", no_sounds["skipped"][0]["why"])
+
         # A screen movie with no microphone stream needs no speech-model evidence: visual-idle alone
         # is sufficient because there is no audio that smart-speed could distort or skip over.
         ff("-f", "lavfi", "-i", "color=black:s=160x120:r=30:d=12", "-c:v", "libx264", "-pix_fmt", "yuv420p",
