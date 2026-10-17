@@ -75,6 +75,13 @@ server `instructions`. Each description goes into every chat's context, so keep 
   read-only; `apply_auto_zooms` recomputes its fingerprint, accepts only reviewed ids, and starts a normal
   unpublished render. New `auto_zoom` data must not be hand-written through `render_edit`; `auto_zoom:null`
   removes an inherited effect. Smart-speed is a separate feature.
+- **Smart-speed v1 is planner-only.** `suggest_smart_speed` proposes 1.5× only where ScreenCaptureKit's
+  persisted state says the screen is visually idle and prepared audio timing says it is silent. Pointer,
+  click, scroll, marker, speech and non-word voiced-sound guards keep normal speed. It requires a published
+  edit, fingerprints the immutable base + visual/audio evidence, maps through its exact frame-rounded
+  cut/reuse timeline, and never writes `EditRecipe` or media. Old takes without visual-idle evidence and
+  takes with audio but missing word/sound timing are skipped; never fall back to mouse inactivity. New
+  camera+screen recordings prepare camera words and screen-clock audio timing in one background job.
 - **Built-in checks compare an edit with its take.** A new one needs a synthetic test that fails
   it and one that passes (`mcp/tests/test_check_edit.py`, media from `check_media.py`). `say` is
   for the user: plain words, no names.

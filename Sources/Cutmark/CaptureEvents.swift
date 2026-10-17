@@ -16,6 +16,8 @@ struct CaptureEvent: Codable, Equatable, Sendable {
         case up
         case scroll
         case marker
+        case visualActive = "visual_active"
+        case visualIdle = "visual_idle"
     }
 
     var t: Double
@@ -352,6 +354,17 @@ final class CaptureEventRecorder: @unchecked Sendable {
                 }
                 continuation.resume(returning: CaptureMarker(number: markerCount, t: e.t, label: title))
             }
+        }
+    }
+
+    /// ScreenCaptureKit's own content-change signal on the same PTS clock as the movie. Smart-speed
+    /// uses these sparse transitions instead of assuming that a quiet mouse means an idle screen.
+    func recordVisualState(active: Bool, screenPTS: Double) {
+        guard screenPTS.isFinite else { return }
+        queue.async { [weak self] in
+            guard let self, running else { return }
+            let t = max(0, screenPTS - originHost)
+            _ = writer.append(.init(t: t, type: active ? .visualActive : .visualIdle), durable: true)
         }
     }
 

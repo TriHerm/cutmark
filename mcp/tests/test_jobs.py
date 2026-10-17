@@ -80,11 +80,16 @@ class Jobs(unittest.TestCase):
         return json.load(open(t.job_path(s or self.s, job)))
 
     def test_run_returns_at_once_and_ends_done(self):
-        t0 = time.time()
-        r = self.run_job("sleep 0.3; printf x > edits/a-v1.mp4", ["edits/a-v1.mp4"])
-        self.assertLess(time.time() - t0, 1)
+        # Do not use a sub-second wall-clock assertion here: a loaded macOS runner can take more
+        # than a second just to launch/fork the detached Python runner. Instead make the command wait
+        # for a gate that this test creates only after run_job returns. If run_job ever waits for the
+        # command itself, the command times out and the final status below is failed instead of done.
+        cmd = ("for i in $(seq 1 100); do [ -f edits/run-job-gate ] && break; sleep 0.05; done; "
+               "[ -f edits/run-job-gate ] || exit 9; printf x > edits/a-v1.mp4")
+        r = self.run_job(cmd, ["edits/a-v1.mp4"])
         self.assertEqual(r["status"], "starting")
         self.assertRegex(r["job"], r"^job-[0-9a-f]{6}$")
+        open(os.path.join(self.s, "edits", "run-job-gate"), "w").close()
         out = self.wait(r["job"])
         self.assertEqual(out["status"], "done")
         self.assertGreater(out["outputs"][0]["bytes"], 0)

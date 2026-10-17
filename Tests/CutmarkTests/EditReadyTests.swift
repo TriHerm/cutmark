@@ -116,7 +116,7 @@ struct EditReadyTests {
         let at = Date()
         doc.addCutmark([Take(number: 3, kind: .camera, file: "take-03-camera.mov", startedAt: at),
                       Take(number: 3, kind: .screen, file: "take-03-screen.mov", startedAt: at)])
-        #expect(calls == [["--prepare", doc.url.path, "3"]], "one call per take number")
+        #expect(calls == [["--prepare", doc.url.path, "3", "both"]])
     }
 
     @Test func appleWordsNeverReplacePreparedWords() throws {

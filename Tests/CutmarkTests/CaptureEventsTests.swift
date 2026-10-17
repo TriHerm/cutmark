@@ -106,6 +106,20 @@ struct CaptureEventsTests {
         #expect(CaptureEventLog.read(url).map(\.t) == [2, 2])
     }
 
+    @Test func visualIdleTransitionsRoundTripOnTheSameScreenClock() throws {
+        let s = try session()
+        defer { try? FileManager.default.removeItem(at: s) }
+        let url = CaptureEventLog.url(in: s, take: 5)
+        let writer = try CaptureEventLog.Writer(url: url, header: header(take: 5))
+        #expect(writer.append(.init(t: 0, type: .visualActive), durable: true))
+        #expect(writer.append(.init(t: 1.25, type: .visualIdle), durable: true))
+        #expect(writer.append(.init(t: 4.5, type: .visualActive), durable: true))
+        writer.close()
+        let events = CaptureEventLog.read(url)
+        #expect(events.map(\.type) == [.visualActive, .visualIdle, .visualActive])
+        #expect(events.map(\.t) == [0, 1.25, 4.5])
+    }
+
     @Test func displayCoordinatesAreNormalizedAndOtherDisplaysAreDropped() throws {
         let bounds = CGRect(x: 100, y: -200, width: 1000, height: 500)
         let p = try #require(CaptureEventRecorder.normalized(CGPoint(x: 600, y: 50), in: bounds))

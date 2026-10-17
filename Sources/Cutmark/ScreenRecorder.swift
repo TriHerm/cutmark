@@ -27,6 +27,10 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
     private let captureQueue = DispatchQueue(label: "cutmark.screen.capture", qos: .userInitiated)
     private var filler: DispatchSourceTimer?
     private var recordingDisplayID: CGDirectDisplayID?
+    private var visualOriginHost: Double?
+    private var lastVisualActive: Bool?
+    private var visualStateSink: (@Sendable (Bool, Double) -> Void)?
+    private var pendingVisualStates: [(Bool, Double)] = []
 
     override init() {
         super.init()
@@ -82,6 +86,10 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         self.movie = movie
         self.stream = stream
         recordingDisplayID = display.displayID
+        visualOriginHost = nil
+        lastVisualActive = nil
+        pendingVisualStates.removeAll(keepingCapacity: true)
+        visualStateSink = nil
         startFiller()
         return try await withCheckedThrowingContinuation { cont in
             lock.withLock { startCont = cont }
@@ -116,6 +124,25 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         filler?.cancel()
         filler = nil
         self.movie = nil
+        visualOriginHost = nil
+        lastVisualActive = nil
+        pendingVisualStates.removeAll(keepingCapacity: false)
+        visualStateSink = nil
+    }
+
+    /// Attach the current take's event recorder after the first real screen frame establishes the media
+    /// clock. Transitions seen in the short setup gap are buffered and flushed in order.
+    func setVisualStateSink(_ sink: (@Sendable (Bool, Double) -> Void)?) {
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            visualStateSink = sink
+            guard let sink else {
+                pendingVisualStates.removeAll(keepingCapacity: false)
+                return
+            }
+            for (active, pts) in pendingVisualStates { sink(active, pts) }
+            pendingVisualStates.removeAll(keepingCapacity: true)
+        }
     }
 
     /// Gives up on a start that has not begun yet (Record pressed again while "Starting…").
@@ -160,11 +187,15 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
             case .screen:
                 switch Self.frameStatus(sampleBuffer) {
                 case .complete:
-                    if let started = try movie.appendScreen(sampleBuffer), let displayID = recordingDisplayID {
+                    let started = try movie.appendScreen(sampleBuffer)
+                    if let started { visualOriginHost = started.hostTime }
+                    noteVisualState(active: true, at: sampleBuffer.presentationTimeStamp)
+                    if let started, let displayID = recordingDisplayID {
                         resumeStart(.success(Start(date: started.date, hostTime: started.hostTime, displayID: displayID)))
                     }
                 case .idle:
                     try movie.appendFiller(at: sampleBuffer.presentationTimeStamp)
+                    noteVisualState(active: false, at: sampleBuffer.presentationTimeStamp)
                 default:
                     break
                 }
@@ -182,6 +213,17 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let raw = attachments.first?[.status] as? Int else { return nil }
         return SCFrameStatus(rawValue: raw)
+    }
+
+    private func noteVisualState(active: Bool, at pts: CMTime) {
+        guard visualOriginHost != nil, pts.isNumeric, lastVisualActive != active else { return }
+        lastVisualActive = active
+        let seconds = pts.seconds
+        if let visualStateSink {
+            visualStateSink(active, seconds)
+        } else {
+            pendingVisualStates.append((active, seconds))
+        }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

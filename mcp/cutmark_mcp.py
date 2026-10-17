@@ -9662,8 +9662,12 @@ def voice_file(s, t):
     return os.path.join(s, t["file"])
 
 
-def prepare_jobs(s):
-    """[(job, take numbers)] of the session's prepare jobs, oldest first."""
+def prepare_jobs(s, kind=None):
+    """[(job, take numbers)] of the session's prepare jobs for one source kind, oldest first.
+
+    Legacy/default jobs are camera/voice jobs (`kind=None`). Screen timing jobs use `--kind screen`; new
+    camera+screen recordings use `--kind both`, which counts for both views of the same background job.
+    """
     out = []
     for j in all_jobs(s):
         try:
@@ -9671,19 +9675,26 @@ def prepare_jobs(s):
         except ValueError:
             continue
         if "--prepare-run" in argv:
+            tail = argv[argv.index("--prepare-run") + 2:]
+            job_kind = None
+            if "--kind" in tail:
+                i = tail.index("--kind")
+                job_kind = tail[i + 1] if i + 1 < len(tail) else None
+            if not (job_kind == kind or job_kind == "both" and kind in (None, "screen")):
+                continue
             nums = set()
-            for x in argv[argv.index("--prepare-run") + 2:]:
+            for x in tail:
                 if x.isdigit():
                     nums.add(int(x))
             out.append((j, nums))
     return out
 
 
-def prepare_state(s, n, jobs=None):
+def prepare_state(s, n, jobs=None, kind=None):
     """'ready', 'running', ('failed', reason) or 'missing'."""
-    if is_ready(words_doc(voice_file(s, voice_take(s, n)))):
+    if is_ready(words_doc(voice_file(s, voice_take(s, n, kind)))):
         return "ready"
-    mine = [j for j, nums in (prepare_jobs(s) if jobs is None else jobs) if int(n) in nums]
+    mine = [j for j, nums in (prepare_jobs(s, kind) if jobs is None else jobs) if int(n) in nums]
     if any(j["status"] in ("starting", "running") for j in mine):
         return "running"
     if mine and mine[-1]["status"] in ("failed", "lost"):
@@ -9926,46 +9937,77 @@ def ensure_onsets(s, t):
         return doc
 
 
-def start_prepare(s, numbers):
+def start_prepare(s, numbers, kind=None):
     """One job that prepares these takes, one after the other."""
     meta = read_meta(s)
     numbers = sorted({int(n) for n in numbers})
-    cmd = "%s %s --prepare-run . %s" % (shlex.quote(sys.executable), shlex.quote(os.path.abspath(__file__)),
-                                        " ".join(str(n) for n in numbers))
+    kind_args = "--kind %s " % shlex.quote(kind) if kind else ""
+    cmd = "%s %s --prepare-run . %s%s" % (shlex.quote(sys.executable), shlex.quote(os.path.abspath(__file__)),
+                                          kind_args, " ".join(str(n) for n in numbers))
     cached = model_cached()
     if not cached:
         label = MODEL_LABEL
     elif len(numbers) == 1:
-        label = "Finding words in take %d" % numbers[0]
+        label = (("Finding words and screen timing in take %d" if kind == "both" else
+                  "Finding screen audio timing in take %d" if kind == "screen" else "Finding words in take %d") % numbers[0])
     else:
-        label = "Finding words in takes " + ", ".join(str(n) for n in numbers)
+        label = (("Finding words and screen timing in takes " if kind == "both" else
+                  "Finding screen audio timing in takes " if kind == "screen" else "Finding words in takes ")
+                 + ", ".join(str(n) for n in numbers))
         if len(label) > 60:
-            label = "Finding words in %d takes" % len(numbers)
-    secs = sum(next((t.get("duration") or 60 for t in meta.get("takes", []) if t["number"] == n), 60) for n in numbers)
+            label = (("Finding words + screen in %d takes" if kind == "both" else
+                      "Finding screen timing in %d takes" if kind == "screen" else "Finding words in %d takes") % len(numbers))
+    secs = sum(next((t.get("duration") or 60 for t in meta.get("takes", [])
+                     if t["number"] == n and (kind in (None, "both") or t.get("kind") == kind)), 60) for n in numbers)
     return start_job(s, cmd, [], label, estimate_s=int(max(5, secs / 6) + (0 if cached else 120)))
 
 
-def app_prepare(session, n):
-    """`--prepare <session> <take>`: the app saved a take. Starts a job and returns at once. An offline
+def app_prepare(session, n, kind=None):
+    """`--prepare <session> <take> [both]`: the app saved a take. Starts a job and returns at once. An offline
     Mac without the model gets one failed row, then quiet for an hour (the next cut tries again)."""
     s = resolve_session(session)
+    if kind not in (None, "screen", "both"):
+        raise ValueError("prepare kind must be screen or both when supplied.")
+    if kind == "screen":
+        t = voice_take(s, n, "screen")
+        if (take_clock(voice_file(s, t)) or {}).get("audio_offset_s") is None:
+            return None  # no microphone stream: silence needs no speech-model evidence
     if not model_cached():
         try:
             if time.time() - os.path.getmtime(os.path.join(lib_root(s), PREP_OFFLINE)) < PREP_OFFLINE_S:
                 return None
         except OSError:
             pass
-    if prepare_state(s, n) in ("ready", "running"):
+    if kind == "both":
+        main = prepare_state(s, n)
+        try:
+            screen_take = voice_take(s, n, "screen")
+            has_screen_audio = (take_clock(voice_file(s, screen_take)) or {}).get("audio_offset_s") is not None
+        except ValueError:
+            has_screen_audio = False
+        screen = prepare_state(s, n, kind="screen") if has_screen_audio else "ready"
+        if main in ("ready", "running") and screen in ("ready", "running"):
+            return None
+    elif prepare_state(s, n, kind=kind) in ("ready", "running"):
         return None
-    return start_prepare(s, [n])
+    return start_prepare(s, [n], kind=kind)
 
 
-def prepare_run(numbers):
+def prepare_run(numbers, kind=None):
     """`--prepare-run . <take>...`: the prepare job's command, in the session folder."""
     failed = None
     for n in numbers:
         try:
-            prepare_take(".", int(n))
+            if kind == "both":
+                prepare_take(".", int(n))
+                try:
+                    screen = voice_take(".", int(n), "screen")
+                    if (take_clock(voice_file(".", screen)) or {}).get("audio_offset_s") is not None:
+                        prepare_take(".", int(n), "screen")
+                except ValueError:
+                    pass
+            else:
+                prepare_take(".", int(n), kind)
         except ValueError as e:
             failed = str(e)
             say(failed)
@@ -11893,7 +11935,8 @@ def output_to_source(timeline, output_time):
     return None
 
 
-CAPTURE_EVENT_TYPES = {"recording_started", "recording_stopped", "move", "down", "up", "scroll", "marker"}
+CAPTURE_EVENT_TYPES = {"recording_started", "recording_stopped", "move", "down", "up", "scroll", "marker",
+                       "visual_active", "visual_idle"}
 
 
 def capture_events_file(s, take):
@@ -11989,6 +12032,15 @@ AUTO_ZOOM_POINTER_RADIUS = 0.08
 AUTO_ZOOM_MIN_GAP = 0.20
 AUTO_ZOOM_MIN_OUTPUT = 0.35
 AUTO_ZOOM_PLANNER = "click_focus_v1"
+SMART_SPEED_RATE = 1.5
+SMART_SPEED_VISUAL_GUARD = 0.25
+SMART_SPEED_ACTIVITY_GUARD = 0.35
+SMART_SPEED_MARKER_GUARD = 0.75
+SMART_SPEED_SPEECH_GUARD = 0.40
+SMART_SPEED_EDGE_GUARD = 0.50
+SMART_SPEED_MIN_SOURCE = 2.5
+SMART_SPEED_MIN_MAPPED_SOURCE = 1.50
+SMART_SPEED_PLANNER = "idle_silence_v1"
 
 
 def _json_digest(value):
@@ -12119,6 +12171,258 @@ def map_auto_zooms(timeline, take, suggestions, minimum_duration=AUTO_ZOOM_MIN_O
                         "output_trigger": output_trigger, "output_in": output_in, "output_out": output_out,
                         "span": p["index"]})
     return sorted(out, key=lambda x: (x["output_in"], x["span"]))
+
+
+def _merge_ranges(ranges, through):
+    """Sorted union of numeric half-open ranges clipped to [0, through]."""
+    limit = float(through)
+    clean = []
+    for a, b in ranges:
+        try:
+            a, b = max(0.0, float(a)), min(limit, float(b))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(a) and math.isfinite(b) and b > a:
+            clean.append((a, b))
+    clean.sort()
+    out = []
+    for a, b in clean:
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def smart_speed_id(suggestion):
+    payload = {k: suggestion[k] for k in ("take", "kind", "in", "out", "rate", "reason")}
+    return "ss-" + _json_digest(payload)[:12]
+
+
+def _visual_idle_ranges(events, through):
+    """ScreenCaptureKit-declared visual-idle ranges, guarded away from each state transition."""
+    limit = float(through)
+    ordered = [e for _, e in sorted(enumerate(events or []), key=lambda x: (float(x[1].get("t", 0)), x[0]))
+               if e.get("source") == "screen" and isinstance(e.get("t"), (int, float))
+               and math.isfinite(float(e["t"])) and 0 <= float(e["t"]) <= limit + 0.001]
+    start, out = None, []
+    for e in ordered:
+        if e.get("type") == "visual_idle":
+            if start is None:
+                start = float(e["t"])
+        elif e.get("type") == "visual_active" and start is not None:
+            a, b = max(0.0, start + SMART_SPEED_VISUAL_GUARD), min(limit, float(e["t"]) - SMART_SPEED_VISUAL_GUARD)
+            if b > a:
+                out.append((a, b))
+            start = None
+    if start is not None:
+        a, b = max(0.0, start + SMART_SPEED_VISUAL_GUARD), max(0.0, limit - SMART_SPEED_VISUAL_GUARD)
+        if b > a:
+            out.append((a, b))
+    return out
+
+
+def plan_smart_speeds(events, words, sounds, take, through):
+    """Conservative source-clock smart-speed proposals for one screen take.
+
+    V1 only proposes long gaps that are both interaction-free and genuinely unvoiced. Prepared words and
+    non-word voiced sounds protect audio; pointer/click/scroll activity and deliberate markers protect UI
+    moments. It never changes a recipe or media.
+    """
+    if not isinstance(through, (int, float)) or not math.isfinite(float(through)) or float(through) <= 0:
+        return []
+    limit = float(through)
+    idle = _visual_idle_ranges(events, limit)
+    if not idle:
+        return []
+    protected = [(0.0, min(limit, SMART_SPEED_EDGE_GUARD)),
+                 (max(0.0, limit - SMART_SPEED_EDGE_GUARD), limit)]
+    for e in events or []:
+        if e.get("source") != "screen" or not isinstance(e.get("t"), (int, float)):
+            continue
+        t = float(e["t"])
+        if not math.isfinite(t) or t < 0 or t > limit + 0.001:
+            continue
+        kind = e.get("type")
+        if kind in ("move", "down", "up", "scroll"):
+            guard = SMART_SPEED_ACTIVITY_GUARD
+        elif kind == "marker":
+            guard = SMART_SPEED_MARKER_GUARD
+        else:
+            continue
+        protected.append((t - guard, t + guard))
+    for w in words or []:
+        if not isinstance(w, dict):
+            continue
+        try:
+            a, b = float(w.get("start")), float(w.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(a) and math.isfinite(b) and b > a:
+            protected.append((a - SMART_SPEED_SPEECH_GUARD, b + SMART_SPEED_SPEECH_GUARD))
+    for sound in sounds or []:
+        if not isinstance(sound, (list, tuple)) or len(sound) != 2:
+            continue
+        try:
+            a, b = float(sound[0]), float(sound[1])
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(a) and math.isfinite(b) and b > a:
+            protected.append((a - SMART_SPEED_SPEECH_GUARD, b + SMART_SPEED_SPEECH_GUARD))
+
+    merged = _merge_ranges(protected, limit)
+    out = []
+    for idle_in, idle_out in idle:
+        cursor = idle_in
+        for block_in, block_out in merged:
+            if block_out <= idle_in or block_in >= idle_out:
+                continue
+            a, b = max(idle_in, block_in), min(idle_out, block_out)
+            if a - cursor >= SMART_SPEED_MIN_SOURCE:
+                out.append({"take": int(take), "kind": "screen", "in": cursor, "out": a,
+                            "rate": SMART_SPEED_RATE, "reason": "idle_silence"})
+            cursor = max(cursor, b)
+        if idle_out - cursor >= SMART_SPEED_MIN_SOURCE:
+            out.append({"take": int(take), "kind": "screen", "in": cursor, "out": idle_out,
+                        "rate": SMART_SPEED_RATE, "reason": "idle_silence"})
+    for suggestion in out:
+        suggestion["id"] = smart_speed_id(suggestion)
+    return out
+
+
+def map_smart_speeds(timeline, take, suggestions, minimum_source=SMART_SPEED_MIN_MAPPED_SOURCE):
+    """Project source idle ranges through matching screen spans without crossing cuts or camera footage."""
+    take = int(take)
+    out = []
+    for suggestion in suggestions or []:
+        if int(suggestion.get("take", -1)) != take or suggestion.get("kind") != "screen":
+            continue
+        for span in timeline["spans"]:
+            if span["take"] != take or span["kind"] != "screen":
+                continue
+            a, b = max(float(suggestion["in"]), span["in"]), min(float(suggestion["out"]), span["out"])
+            if b - a < float(minimum_source):
+                continue
+            output_in = span["at"] + (a - span["in"]) / span["rate"]
+            output_out = span["at"] + (b - span["in"]) / span["rate"]
+            current = output_out - output_in
+            out.append({"take": take, "kind": "screen", "source": suggestion,
+                        "source_in": a, "source_out": b,
+                        "output_in": output_in, "output_out": output_out,
+                        "suggested_output_duration": current / float(suggestion["rate"]),
+                        "span": span["index"]})
+    return sorted(out, key=lambda x: (x["output_in"], x["span"]))
+
+
+def smart_speed_words_file(s, take):
+    screen = voice_take(s, int(take), "screen")
+    return os.path.splitext(os.path.join(s, screen["file"]))[0] + ".words.json"
+
+
+def smart_speed_plan_fingerprint(base, inputs):
+    payload = {"v": 1, "planner": SMART_SPEED_PLANNER,
+               "inputs": [{"take": x["take"], "events_sha256": x["events_sha256"],
+                            "words_sha256": x["words_sha256"], "through": x["through"], "media": x["media"]}
+                           for x in sorted(inputs, key=lambda y: y["take"])],
+               "base": base}
+    return _json_digest(payload)
+
+
+def _smart_speed_take_plan(s, take, through):
+    """Fresh read-only evidence + proposals for one screen take."""
+    events_path = capture_events_file(s, take)
+    words_path = smart_speed_words_file(s, take)
+    screen = voice_take(s, int(take), "screen")
+    media_path = os.path.join(s, screen["file"])
+    clock = take_clock(media_path) or {}
+    doc = words_doc(media_path)
+    event_sha, words_sha = _file_sha256(events_path), _file_sha256(words_path)
+    try:
+        st = os.stat(media_path)
+        media = [st.st_size, int(st.st_mtime)]
+    except OSError:
+        media = None
+    inp = {"take": int(take), "events": os.path.relpath(events_path, s), "events_sha256": event_sha,
+           "words": os.path.relpath(words_path, s), "words_sha256": words_sha, "through": through, "media": media}
+    if event_sha is None:
+        return inp, [], "No capture-event log is available for this screen take."
+    if through is None:
+        return inp, [], "Playable screen duration is unavailable."
+    events = read_capture_events(s, take)
+    if not any(e.get("type") in ("visual_idle", "visual_active") for e in events):
+        return inp, [], "This take predates visual-idle capture; smart-speed will not infer idle from mouse activity."
+    has_audio = bool(clock.get("channels"))
+    if has_audio and (words_sha is None or not is_ready(doc, clock)):
+        return inp, [], "Prepared word/sound timing is unavailable; smart-speed will not guess over audio."
+    if not has_audio:
+        words_sha = "no_audio"
+        inp["words_sha256"] = words_sha
+        doc = {"words": [], "sounds": []}
+    planned = plan_smart_speeds(events, doc.get("words") or [], doc.get("sounds") or [],
+                                take, through)
+    return inp, planned, None
+
+
+def build_smart_speed_plan(s, base_ref, take=None):
+    """Fresh read-only smart-speed plan against one exact published edit."""
+    exact, base = resolve_auto_zoom_base(s, base_ref)
+    available = sorted({int(g["take"]) for g in base.get("cut") or [] if g.get("kind") == "screen"})
+    if take is not None:
+        try:
+            take = int(take)
+        except (TypeError, ValueError):
+            raise ValueError("take is a screen take number.")
+        if take not in available:
+            raise ValueError("Take %d screen is not in %s's cut." % (take, exact))
+        available = [take]
+    lead = float((base.get("cover") or {}).get("seconds") or 0.0)
+    timeline = edit_time_map(rounded_render_cut(s, base.get("cut") or []), lead=lead)
+    meta = read_meta(s) or {}
+    suggestions, inputs, output, skipped = [], [], [], []
+    for n in available:
+        screen = next((x for x in meta.get("takes", []) if x.get("number") == n and x.get("kind") == "screen"), {})
+        duration = screen.get("duration")
+        through = float(duration) if isinstance(duration, (int, float)) and math.isfinite(float(duration)) else None
+        inp, planned, why = _smart_speed_take_plan(s, n, through)
+        inputs.append(inp)
+        if why:
+            skipped.append({"take": n, "why": why})
+            continue
+        suggestions.extend(planned)
+        mapped = map_smart_speeds(timeline, n, planned)
+        mapped_ids = {x["source"]["id"] for x in mapped}
+        for z in planned:
+            if z["id"] not in mapped_ids:
+                skipped.append({"id": z["id"], "take": n,
+                                "why": "Less than %.1f s of this idle range survives the edit."
+                                       % SMART_SPEED_MIN_MAPPED_SOURCE})
+        output.extend(mapped)
+    valid_inputs = [{"take": int(x["take"]), "events_sha256": str(x["events_sha256"]).lower(),
+                     "words_sha256": str(x["words_sha256"]).lower(), "through": round(float(x["through"]), 4),
+                     "media": x.get("media")}
+                    for x in inputs if x.get("events_sha256") and x.get("words_sha256") and x.get("through") is not None
+                    and x.get("media") is not None]
+    plan = smart_speed_plan_fingerprint(base, valid_inputs)
+    applicable = sorted({x["source"]["id"] for x in output})
+    return {"base": exact, "scope_take": take, "plan": plan, "inputs": inputs,
+            "suggestions": suggestions, "applicable_ids": applicable, "output": output, "skipped": skipped}
+
+
+def t_suggest_smart_speed(a):
+    """Read-only silent-idle planner. V1 intentionally does not apply or render speed changes."""
+    s = resolve_session(a["session"])
+    p = build_smart_speed_plan(s, a["edit"], a.get("take"))
+    current = sum(max(0.0, float(x["output_out"]) - float(x["output_in"])) for x in p["output"])
+    suggested = sum(max(0.0, float(x["suggested_output_duration"])) for x in p["output"])
+    return {"v": 1, "planner": SMART_SPEED_PLANNER, "mode": "suggestions", "applied": False,
+            "clock": "screen_pts", "rate": SMART_SPEED_RATE,
+            "base": p["base"], "plan": p["plan"], "inputs": p["inputs"],
+            "suggestions": p["suggestions"], "applicable_ids": p["applicable_ids"], "output": p["output"],
+            "projected_savings_s": round(max(0.0, current - suggested), 3),
+            **({"take": p["scope_take"]} if p["scope_take"] is not None else {}),
+            **({"skipped": p["skipped"]} if p["skipped"] else {}),
+            "note": "Read-only smart-speed proposals. No recipe or media was changed.",
+            "next": "Review these idle+silence ranges. Rendering/apply is intentionally not enabled in v1 yet."}
 
 
 def map_recipe_auto_zoom(timeline, items, minimum_duration=AUTO_ZOOM_MIN_OUTPUT):
@@ -14320,6 +14624,15 @@ TOOLS = [
       "wait_s": {"type": "integer", "description": "Wait up to this many seconds (max 120) for the render. Default 0."},
       "go_back": {"type": "boolean", "description": "true only when intentionally rendering from an older exact base."}},
      ["session", "base", "plan", "accept"], t_apply_auto_zooms),
+    ("suggest_smart_speed", "Plan conservative 1.5x speed-ups only where ScreenCaptureKit reports the screen visually idle and "
+     "prepared audio timing says it is silent. This is read-only and planner-only in v1: it never changes a recipe or media. "
+     "Pointer/click/scroll activity, deliberate markers, speech/non-word voiced sounds and recording edges stay protected. "
+     "Old takes without visual-idle evidence are skipped rather than inferred from mouse inactivity.",
+     {"session": SESSION,
+      "take": {"type": "integer", "description": "Only this screen take. Omit to inspect every screen take in scope."},
+      "edit": {"type": "string", "description": "Published edit ('hook', 'hook-v4' or edits/hook-v4.mp4). Cutmark maps "
+               "suggestions through its exact frame-rounded cut/reuse timeline and fingerprints that immutable base."}},
+     ["session", "edit"], t_suggest_smart_speed),
     ("save_broll", "Save a video of a session into the user's b-roll library (_library/broll/<folder>/, an APFS "
      "clone), so every session can use it (list_broll, add_broll). Gemini describes it in the background and "
      "writes the description and keywords into the clip. Only on the user's ask.",
@@ -14459,7 +14772,7 @@ READ_ONLY = {"get_comment_context", "list_comment_suggestions", "list_projects",
              "post_history", "get_post_queue", "get_plan", "get_comments", "get_rules", "script_history",
              "get_script_version", "get_performance", "list_broll", "search_media", "list_music", "get_library",
              "phone_videos", "higgsfield_status", "replicate_status", "replicate_model",
-             "list_ideas", "get_idea", "get_job", "get_edit_recipe", "suggest_auto_zooms"}
+             "list_ideas", "get_idea", "get_job", "get_edit_recipe", "suggest_auto_zooms", "suggest_smart_speed"}
 DESTRUCTIVE = {"trash_takes", "trash_sessions", "delete_variants", "delete_post_variants", "copy_library",
                "set_rule", "set_hooks", "set_post_hooks", "set_storyboard",
                # run_job runs any shell command: clients that gate on destructiveHint must ask first.
@@ -15110,11 +15423,19 @@ if __name__ == "__main__":
     elif sys.argv[1:2] == ["--voice-mix"]:
         voice_mix(*sys.argv[2:4])
     elif sys.argv[1:2] == ["--prepare"]:  # the app saved a take: start its prepare job, return at once
-        app_prepare(sys.argv[2], int(sys.argv[3]))
+        app_prepare(sys.argv[2], int(sys.argv[3]), sys.argv[4] if len(sys.argv) > 4 else None)
     elif sys.argv[1:2] == ["--prepare-run"]:  # the prepare job's command, in the session folder
         os.chdir(sys.argv[2])
         signal.signal(signal.SIGTERM, stop_now)
-        prepare_run(sys.argv[3:])
+        args = sys.argv[3:]
+        kind = None
+        if "--kind" in args:
+            i = args.index("--kind")
+            if i + 1 >= len(args):
+                raise ValueError("--kind needs screen or both")
+            kind = args[i + 1]
+            args = args[:i] + args[i + 2:]
+        prepare_run(args, kind=kind)
     elif sys.argv[1:2] == ["--cut-run"]:  # the cut job's command, in the session folder
         os.chdir(sys.argv[2])
         signal.signal(signal.SIGTERM, stop_now)

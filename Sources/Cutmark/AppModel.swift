@@ -714,8 +714,12 @@ final class AppModel {
                                                                         screenOriginHost: screenStart.hostTime,
                                                                         displayID: screenStart.displayID)
                     events.start()
+                    screen.setVisualStateSink { [weak events] active, pts in
+                        events?.recordVisualState(active: active, screenPTS: pts)
+                    }
                     captureEvents = events
                 } catch {
+                    screen.setVisualStateSink(nil)
                     show(toast: "Recording started · markers and input signals are unavailable for this take")
                 }
             }

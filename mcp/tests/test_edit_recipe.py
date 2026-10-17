@@ -384,6 +384,133 @@ class Pure(Base):
         with open(path, "rb") as f:
             self.assertEqual(f.read(), before)
 
+    def test_smart_speed_planner_only_finds_long_silent_interaction_free_gaps(self):
+        events = [
+            {"t": 0.0, "type": "visual_active", "source": "screen"},
+            {"t": 0.6, "type": "visual_idle", "source": "screen"},
+            {"t": 3.7, "type": "visual_active", "source": "screen"},
+            {"t": 8.6, "type": "visual_idle", "source": "screen"},
+            {"t": 11.7, "type": "visual_active", "source": "screen"},
+        ]
+        planned = t.plan_smart_speeds(events, [{"word": "hello", "start": 5.0, "end": 6.0}], [], 2, 12.0)
+        self.assertEqual(len(planned), 2)
+        self.assertEqual([(round(x["in"], 2), round(x["out"], 2)) for x in planned], [(0.85, 3.45), (8.85, 11.45)])
+        self.assertTrue(all(x["rate"] == 1.5 and x["reason"] == "idle_silence" for x in planned))
+        self.assertTrue(all(re.fullmatch(r"ss-[0-9a-f]{12}", x["id"]) for x in planned))
+
+        guarded = t.plan_smart_speeds([
+            {"t": 0.0, "type": "visual_active", "source": "screen"},
+            {"t": 0.25, "type": "visual_idle", "source": "screen"},
+            {"t": 4.5, "type": "marker", "source": "screen", "label": "keep normal"},
+            {"t": 9.75, "type": "visual_active", "source": "screen"},
+        ], [], [], 1, 10.0)
+        self.assertEqual([(round(x["in"], 2), round(x["out"], 2)) for x in guarded], [(0.5, 3.75), (5.25, 9.5)])
+
+        with_sound = t.plan_smart_speeds([
+            {"t": 0.0, "type": "visual_active", "source": "screen"},
+            {"t": 0.25, "type": "visual_idle", "source": "screen"},
+            {"t": 8.75, "type": "visual_active", "source": "screen"},
+        ], [], [[4.0, 5.0]], 1, 9.0)
+        self.assertEqual([(round(x["in"], 2), round(x["out"], 2)) for x in with_sound], [(0.5, 3.6), (5.4, 8.5)])
+
+        # Silence + a quiet pointer does not prove the screen is idle: keyboard-driven activity is not
+        # captured by design, so an old/mouse-only log must never create a speed suggestion.
+        self.assertEqual(t.plan_smart_speeds([
+            {"t": 0.0, "type": "recording_started", "source": "screen"},
+            {"t": 4.0, "type": "move", "source": "screen", "x": 0.5, "y": 0.5},
+        ], [], [], 1, 12.0), [])
+
+    def test_smart_speed_mapping_splits_cuts_reuse_and_never_targets_camera(self):
+        timeline = t.edit_time_map([
+            {"take": 4, "kind": "screen", "in": 1.0, "out": 5.0},
+            {"take": 4, "kind": "camera", "in": 1.0, "out": 5.0},
+            {"take": 4, "kind": "screen", "in": 2.0, "out": 5.0, "rate": 2.0},
+        ], lead=0.1)
+        idle = {"id": "ss-aaaaaaaaaaaa", "take": 4, "kind": "screen", "in": 1.5, "out": 4.5,
+                "rate": 1.5, "reason": "idle_silence"}
+        mapped = t.map_smart_speeds(timeline, 4, [idle])
+        self.assertEqual(len(mapped), 2)
+        self.assertEqual([x["span"] for x in mapped], [0, 2])
+        self.assertEqual([(round(x["output_in"], 2), round(x["output_out"], 2)) for x in mapped],
+                         [(0.6, 3.6), (8.1, 9.35)])
+        self.assertEqual([round(x["suggested_output_duration"], 3) for x in mapped], [2.0, 0.833])
+        tiny = t.edit_time_map([{"take": 4, "kind": "screen", "in": 2.0, "out": 3.2}])
+        self.assertEqual(t.map_smart_speeds(tiny, 4, [idle]), [])
+
+    def test_suggest_smart_speed_is_read_only_fingerprinted_and_refuses_to_guess_without_words(self):
+        self.add_take(n=1, secs=12, kind="screen", size="160x120")
+        events_path = t.capture_events_file(self.s, 1)
+        os.makedirs(os.path.dirname(events_path), exist_ok=True)
+        with open(events_path, "w") as f:
+            f.write(json.dumps({"v": 1, "type": "header", "take": 1, "source": "screen", "clock": "screen_pts",
+                                "coordinates": "display_normalized_top_left",
+                                "display": {"id": 1, "x": 0, "y": 0, "width": 160, "height": 120}}) + "\n")
+            for e in [
+                {"t": 0.0, "type": "visual_active", "source": "screen"},
+                {"t": 0.6, "type": "visual_idle", "source": "screen"},
+                {"t": 3.7, "type": "visual_active", "source": "screen"},
+                {"t": 8.6, "type": "visual_idle", "source": "screen"},
+                {"t": 11.7, "type": "visual_active", "source": "screen"},
+            ]:
+                f.write(json.dumps(e) + "\n")
+        words_path = os.path.splitext(os.path.join(self.s, "take-01-screen.mov"))[0] + ".words.json"
+        t.write_json(words_path, {"v": 2, "clock": "video", "duration": 12.0, "onsets": 1,
+                                  "words": [{"word": "hello", "start": 5.0, "end": 6.0}], "sounds": []})
+        with open(events_path, "rb") as f:
+            events_before = f.read()
+        with open(words_path, "rb") as f:
+            words_before = f.read()
+
+        self.clip("edits/hook-v1.mp4", secs=12)
+        t.write_json(os.path.join(self.s, "edits", "hook-v1.recipe.json"),
+                     {"name": "hook", "edit": "edits/hook-v1.mp4",
+                      "cut": [{"take": 1, "kind": "screen", "in": 0.0, "out": 12.0}],
+                      "frame": {"shape": "source"}})
+        mapped = t.t_suggest_smart_speed({"session": self.s, "take": 1, "edit": "hook-v1"})
+        self.assertEqual(mapped["planner"], "idle_silence_v1")
+        self.assertFalse(mapped["applied"])
+        self.assertEqual(mapped["base"], "hook-v1")
+        self.assertRegex(mapped["plan"], r"^[0-9a-f]{64}$")
+        self.assertEqual(mapped["rate"], 1.5)
+        self.assertEqual(len(mapped["suggestions"]), 2)
+        self.assertEqual(len(mapped["applicable_ids"]), 2)
+        self.assertEqual(len(mapped["output"]), 2)
+        self.assertGreater(mapped["projected_savings_s"], 0)
+        self.assertEqual(mapped["inputs"][0]["events_sha256"], hashlib.sha256(events_before).hexdigest())
+        self.assertEqual(mapped["inputs"][0]["words_sha256"], hashlib.sha256(words_before).hexdigest())
+        self.assertIsInstance(mapped["inputs"][0]["media"], list)
+        self.assertIn("not enabled", mapped["next"])
+        with open(events_path, "rb") as f:
+            self.assertEqual(f.read(), events_before)
+        with open(words_path, "rb") as f:
+            self.assertEqual(f.read(), words_before)
+
+        # Old event logs remain safe: no visual-idle state means no inference from mouse inactivity.
+        with open(events_path, "w") as f:
+            f.write(json.dumps({"v": 1, "type": "header", "take": 1, "source": "screen", "clock": "screen_pts",
+                                "coordinates": "display_normalized_top_left",
+                                "display": {"id": 1, "x": 0, "y": 0, "width": 160, "height": 120}}) + "\n")
+            f.write(json.dumps({"t": 4.0, "type": "move", "source": "screen", "x": 0.5, "y": 0.5}) + "\n")
+        old = t.t_suggest_smart_speed({"session": self.s, "take": 1, "edit": "hook-v1"})
+        self.assertEqual(old["suggestions"], [])
+        self.assertIn("will not infer idle", old["skipped"][0]["why"])
+
+        # With visual evidence restored, missing audio timing also fails closed.
+        with open(events_path, "wb") as f:
+            f.write(events_before)
+        os.remove(words_path)
+        missing = t.t_suggest_smart_speed({"session": self.s, "take": 1, "edit": "hook-v1"})
+        self.assertEqual(missing["suggestions"], [])
+        self.assertIn("will not guess over audio", missing["skipped"][0]["why"])
+
+        # A screen movie with no microphone stream needs no speech-model evidence: visual-idle alone
+        # is sufficient because there is no audio that smart-speed could distort or skip over.
+        ff("-f", "lavfi", "-i", "color=black:s=160x120:r=30:d=12", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+           os.path.join(self.s, "take-01-screen.mov"))
+        no_audio = t.t_suggest_smart_speed({"session": self.s, "take": 1, "edit": "hook-v1"})
+        self.assertEqual(len(no_audio["suggestions"]), 2)
+        self.assertEqual(no_audio["inputs"][0]["words_sha256"], "no_audio")
+
     def test_recipe_zooms_are_source_clock_screen_only_and_map_per_cut_span(self):
         self.add_take(n=1, secs=3, kind="camera", size="160x120")
         self.add_take(n=2, secs=3, kind="screen", size="320x180")

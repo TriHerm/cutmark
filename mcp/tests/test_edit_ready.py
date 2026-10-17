@@ -497,12 +497,35 @@ class Prepare(Base):
         t.start_prepare(s, [5, 3])
         t.model_cached = lambda model=None: False
         t.start_prepare(s, [3])
+        t.model_cached = lambda model=None: True
+        t.start_prepare(s, [3], kind="screen")
+        t.start_prepare(s, [3], kind="both")
         self.assertEqual([x[1] for x in seen], ["Finding words in take 3", "Finding words in takes 3, 5",
-                                                "Getting the speech model (one time, about 500 MB)"])
+                                                "Getting the speech model (one time, about 500 MB)",
+                                                "Finding screen audio timing in take 3",
+                                                "Finding words and screen timing in take 3"])
         import shlex
         argv = shlex.split(seen[1][0])
         self.assertEqual(argv[2:], ["--prepare-run", ".", "3", "5"])
         self.assertTrue(os.path.exists(argv[1]))
+        screen_argv = shlex.split(seen[3][0])
+        self.assertEqual(screen_argv[2:], ["--prepare-run", ".", "--kind", "screen", "3"])
+        both_argv = shlex.split(seen[4][0])
+        self.assertEqual(both_argv[2:], ["--prepare-run", ".", "--kind", "both", "3"])
+
+    def test_prepare_both_writes_camera_and_screen_clock_timing(self):
+        camera = self.add_take(n=1, secs=3, kind="camera")
+        screen = self.add_take(n=1, secs=3, kind="screen")
+        self.words(self.WORDS)
+        old = os.getcwd()
+        try:
+            os.chdir(self.s)  # --prepare-run enters the session before calling prepare_run.
+            t.prepare_run(["1"], kind="both")
+        finally:
+            os.chdir(old)
+        self.assertEqual((self.doc(camera)["v"], self.doc(camera)["clock"]), (2, "video"))
+        self.assertEqual((self.doc(screen)["v"], self.doc(screen)["clock"]), (2, "video"))
+        self.assertGreater(self.doc(screen)["audio_offset_s"], 0.15)
 
     def test_app_prepare_skipped_offline(self):
         self.add_take()
