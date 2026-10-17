@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreGraphics
 import Foundation
 import Testing
 @testable import Cutmark
@@ -37,6 +38,14 @@ struct ScreenRecorderTests {
         let small = ScreenRecorder.previewSize(contentRect: CGRect(x: 0, y: 0, width: 320, height: 180), scale: 1)
         #expect(small.width == 320)
         #expect(small.height == 180)
+    }
+
+    @Test func selectedDisplayNeverSilentlyChangesWhenDisconnected() {
+        let available: [CGDirectDisplayID] = [11, 22]
+        #expect(ScreenRecorder.captureDisplayID(selected: 22, available: available) == 22)
+        #expect(ScreenRecorder.captureDisplayID(selected: 33, available: available) == nil)
+        #expect(ScreenRecorder.captureDisplayID(selected: nil, available: available) == 11)
+        #expect(ScreenRecorder.captureDisplayID(selected: nil, available: []) == nil)
     }
 
     @Test func finishingBeforeTheFirstFrameIsIdempotent() throws {

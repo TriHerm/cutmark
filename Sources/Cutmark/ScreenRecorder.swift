@@ -41,6 +41,7 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
     private var pendingVisualStates: [(Bool, Double)] = []
     private var previewTask: Task<Void, Never>?
     private var previewDisplayID: CGDirectDisplayID?
+    private var previewGeneration = UUID()
 
     override init() {
         super.init()
@@ -65,7 +66,9 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         }
         // Runs on every ⌘-Tab back: an equal list must not redraw the stage.
         if found != displays { displays = found }
-        if !displays.contains(where: { $0.id == displayID }) { displayID = displays.first?.id }
+        // A disconnected selected display is not permission to record a different one.
+        // Only choose the first display if the user has never selected one.
+        if displayID == nil { displayID = displays.first?.id }
     }
 
     /// A small, low-rate viewfinder while Record is idle. It uses the same application exclusion as
@@ -77,6 +80,7 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
             previewTask?.cancel()
             previewTask = nil
             previewDisplayID = nil
+            previewGeneration = UUID()
             preview.image = nil
             preview.message = "Starting screen preview…"
             return
@@ -87,6 +91,7 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
             previewTask?.cancel()
             previewTask = nil
             previewDisplayID = nil
+            previewGeneration = UUID()
             preview.image = nil
             preview.message = "Allow Screen Recording to see the preview."
             return
@@ -95,12 +100,14 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         // A normal view update can ask again for the same display. Keep the existing capture loop.
         if previewTask != nil, previewDisplayID == displayID { return }
         previewTask?.cancel()
+        previewGeneration = UUID()
+        let generation = previewGeneration
         previewDisplayID = displayID
         preview.image = nil
         preview.message = "Starting screen preview…"
         let wantedDisplay = displayID
         previewTask = Task { @MainActor [weak self] in
-            await self?.runPreview(displayID: wantedDisplay)
+            await self?.runPreview(displayID: wantedDisplay, generation: generation)
         }
     }
 
@@ -112,12 +119,28 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         return (max(1, Int(width.rounded())), max(1, Int((pixelHeight * ratio).rounded())))
     }
 
+    /// A selected external display can disappear between refresh and capture. Never substitute
+    /// another screen for an explicit choice; an unset choice may use the primary available one.
+    static func captureDisplayID(selected: CGDirectDisplayID?, available: [CGDirectDisplayID]) -> CGDirectDisplayID? {
+        guard let selected else { return available.first }
+        return available.contains(selected) ? selected : nil
+    }
+
     @MainActor
-    private func runPreview(displayID: CGDirectDisplayID?) async {
+    private func runPreview(displayID: CGDirectDisplayID?, generation: UUID) async {
+        defer {
+            // An older cancelled request must not clear its replacement's task.
+            if previewGeneration == generation {
+                previewTask = nil
+                previewDisplayID = nil
+            }
+        }
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            guard let display = content.displays.first(where: { $0.displayID == displayID }) ?? content.displays.first else {
-                preview.message = "No display found."
+            guard !Task.isCancelled else { return }
+            guard let id = Self.captureDisplayID(selected: displayID, available: content.displays.map(\.displayID)),
+                  let display = content.displays.first(where: { $0.displayID == id }) else {
+                preview.message = displayID == nil ? "No display found." : "Selected display is unavailable."
                 return
             }
             let me = content.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
@@ -150,9 +173,11 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         // AppModel normally stops the viewfinder when phase leaves idle. Also stop it here so a
         // delayed SwiftUI update can never leave a screenshot request overlapping the real stream.
         await MainActor.run { self.setPreviewing(false) }
+        let selectedDisplay = displayID
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let display = content.displays.first(where: { $0.displayID == displayID }) ?? content.displays.first
-        else { throw RecorderError("No display found.") }
+        guard let id = Self.captureDisplayID(selected: selectedDisplay, available: content.displays.map(\.displayID)),
+              let display = content.displays.first(where: { $0.displayID == id })
+        else { throw RecorderError(selectedDisplay == nil ? "No display found." : "Selected display is unavailable. Choose another screen.") }
         let me = content.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
         let filter = SCContentFilter(display: display, excludingApplications: me, exceptingWindows: [])
 
