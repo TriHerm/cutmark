@@ -94,6 +94,9 @@ final class FileWatch {
         Set(paths.compactMap { p in
             let url = URL(fileURLWithPath: p)
             if url.lastPathComponent.hasPrefix(".claude-chat.json") { return nil }
+            // Pointer/click signals can append ~30 times a second while recording. They are internal
+            // source metadata, not a reason for panes or the sidebar to rescan the session.
+            if url.pathComponents.contains(".capture-events") { return nil }
             // A job writes its state every 2 s: that goes to .cutmarkJobsChanged only (jobSessions).
             if jobsIndex(url.pathComponents) != nil || url.lastPathComponent.hasPrefix(".jobs") { return nil }
             return url.deletingLastPathComponent().path

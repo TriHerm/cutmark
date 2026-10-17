@@ -258,6 +258,40 @@ class Pure(Base):
         self.assertAlmostEqual(rounded["spans"][0]["out"], 1.0 + 2 / 30.0)
         self.assertAlmostEqual(t.span_source_to_output(rounded["spans"][0], 1.0 + 2 / 30.0), 2 / 30.0)
 
+    def test_capture_events_skip_torn_lines_and_share_the_edit_time_map(self):
+        path = t.capture_events_file(self.s, 8)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        events = [
+            {"t": 1.8, "type": "marker", "source": "screen"},
+            {"t": 1.0, "type": "down", "source": "screen", "x": 0.5, "y": 0.4},
+        ]
+        with open(path, "w") as f:
+            f.write(json.dumps({"v": 1, "type": "header", "take": 8, "source": "screen", "clock": "screen_pts",
+                                "coordinates": "display_normalized_top_left",
+                                "display": {"id": 1, "x": 0, "y": 0, "width": 1920, "height": 1080}}) + "\n")
+            for e in events:
+                f.write(json.dumps(e) + "\n")
+            f.write(json.dumps({"t": 1.5, "type": "key", "source": "screen"}) + "\n")
+            f.write('{"t":2,"type":"move"')  # a crash can tear only the last append
+        self.assertEqual(t.read_capture_events(self.s, 8), events)
+
+        timeline = t.edit_time_map([
+            {"take": 8, "kind": "camera", "in": 1.0, "out": 4.0},
+            {"take": 8, "kind": "screen", "in": 0.0, "out": 3.0},
+        ])
+        mapped = t.map_capture_events(timeline, 8, events)
+        marker = [x for x in mapped if x["event"]["type"] == "marker"]
+        self.assertEqual([round(x["output"], 1) for x in marker], [4.8])
+        click = [x for x in mapped if x["event"]["type"] == "down"]
+        self.assertEqual([(x["kind"], round(x["output"], 1)) for x in click], [("screen", 4.0)])
+
+        # Recovered media can be shorter than the JSONL tail; metadata bounds what readers expose.
+        meta = t.read_meta(self.s)
+        meta["takes"].append({"number": 8, "kind": "screen", "file": "take-08-screen.mov",
+                              "startedAt": "2026-10-11T00:00:00Z", "duration": 1.5})
+        t.write_meta(self.s, meta)
+        self.assertEqual([e["type"] for e in t.read_capture_events(self.s, 8)], ["down"])
+
     def test_render_plan_is_pure_and_the_voice_goes_in_once(self):
         self.add_take()
         song = self.music()

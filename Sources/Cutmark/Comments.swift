@@ -430,6 +430,10 @@ struct ReviewPlayer: View {
     @State private var safePeek = false
     /// The take's voice, when this video is a take (nil for edits and other files).
     @StateObject private var voice: VoiceHolder
+    /// Manual flags recorded with a raw screen take. Input events stay invisible here; only a
+    /// deliberate marker becomes review UI.
+    @State private var captureMarkers: [CaptureEvent] = []
+    @State private var captureMarkerLoad: Task<Void, Never>?
 
     struct Draft: Equatable {
         var quote: String?
@@ -489,6 +493,7 @@ struct ReviewPlayer: View {
             store.load(session)
             if embedded { post.clock = clock; app.postReview = post; return }
             loadChecks()
+            loadCaptureMarkers()
             app.player = clock.player
             if let t = app.pendingSeek {
                 app.pendingSeek = nil
@@ -499,13 +504,15 @@ struct ReviewPlayer: View {
         }
         .onChange(of: clock.duration) { _, d in
             if d > 0, let t = seekOnLoad { seekOnLoad = nil; clock.seek(t) }
+            if d > 0 { loadCaptureMarkers() }
         }
         .onChange(of: paneShown) { _, on in if !on { clock.player.pause(); mode = false } }
         .onDisappear {
+            captureMarkerLoad?.cancel()
             clock.stop(); mode = false
             if app.postReview === post { app.postReview = nil }
         }
-        .onFilesChanged(in: session) { store.load(session); voice.mix?.reload(); loadChecks() }
+        .onFilesChanged(in: session) { store.load(session); voice.mix?.reload(); loadChecks(); loadCaptureMarkers() }
         .task { voice.mix?.attach(clock) }
         .onChange(of: mode) { _, on in
             if on { clock.player.pause(); focused = nil }
@@ -524,6 +531,7 @@ struct ReviewPlayer: View {
             ReviewBar(clock: clock, head: clock.head, url: url, comments: comments, draft: $draft, focused: focused,
                       commentMode: modeBinding, embedded: embedded, compact: videoWidth < 440,
                       scrubbing: $scrubbing,
+                      captureMarkers: captureMarkers,
                       onRange: { s, e in
                           clock.player.pause()
                           focused = nil
@@ -550,6 +558,19 @@ struct ReviewPlayer: View {
         let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
         let now = EditChecks.read(session, file: rel, modified: modified)
         if now != checks { checks = now }
+    }
+
+    private func loadCaptureMarkers() {
+        captureMarkerLoad?.cancel()
+        guard !embedded, clock.duration > 0 else { captureMarkers = []; return }
+        let session = session, url = url, duration = clock.duration
+        captureMarkerLoad = Task { @MainActor in
+            let now = await Task.detached(priority: .utility) {
+                CaptureEventLog.markers(in: session, screenFile: url, through: duration)
+            }.value
+            guard !Task.isCancelled else { return }
+            if now != captureMarkers { captureMarkers = now }
+        }
     }
 
     private var video: some View {
@@ -824,6 +845,7 @@ struct ReviewBar: View {
     var compact = false
     /// True while a drag scrubs or picks a range: the controls stay on.
     @Binding var scrubbing: Bool
+    var captureMarkers: [CaptureEvent] = []
     let onRange: (Double, Double?) -> Void
     var voice: VoiceMix?
     /// A vertical video's safe-zone button: the pinned setting, and the hover that shows it.
@@ -979,6 +1001,16 @@ struct ReviewBar: View {
     /// Comment marks above the track. Click one to jump to it.
     private func markers(_ w: CGFloat) -> some View {
         ZStack(alignment: .topLeading) {
+            ForEach(Array(captureMarkers.enumerated()), id: \.offset) { i, marker in
+                Image(systemName: "flag.fill")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Theme.warn)
+                    .frame(width: 12, height: 12)
+                    .contentShape(Rectangle())
+                    .offset(x: min(max(0, x(marker.t, w) - 3), max(0, w - 12)), y: -5)
+                    .onTapGesture { releaseKeys(); clock.seek(marker.t) }
+                    .help("\(marker.label ?? "Marker \(i + 1)") · \(Comment.stamp(marker.t))")
+            }
             ForEach(Array(comments.enumerated()), id: \.element.id) { i, c in
                 if let s = c.start {
                     let e = c.end ?? s

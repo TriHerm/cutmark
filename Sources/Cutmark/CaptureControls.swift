@@ -118,6 +118,23 @@ private struct CaptureControlBar: View {
             .frame(maxWidth: 130)
             .help("Screen being recorded")
 
+            Button { app.addRecordingMarker() } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: app.recordingMarkerCount == 0 ? "flag" : "flag.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                    if app.recordingMarkerCount > 0 {
+                        Text("\(app.recordingMarkerCount)").font(Theme.sans(11, .semibold).monospacedDigit())
+                    }
+                }
+                .foregroundStyle(Theme.muted)
+                .frame(minWidth: 30, minHeight: 30)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!app.canMarkRecording)
+            .help("Add a marker to this take")
+            .accessibilityLabel("Add marker")
+
             Button(action: app.toggleRecord) {
                 HStack(spacing: 7) {
                     if isFinishing {

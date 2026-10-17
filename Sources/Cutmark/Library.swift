@@ -11,11 +11,12 @@ import Foundation
 //       SESSION.md                human/Claude-readable summary, regenerated on every change
 //       take-01-camera.mov        or take-01-<name>-camera.mov once the take is named
 //       take-01-screen.mov
+//       .capture-events/          screen input/marker JSONL sidecars, stable by take number
 //       stills/ edits/ assets/    frames, edited videos, dropped files (see Assets.swift)
 //
 // The MCP server (mcp/cutmark_mcp.py) writes the same format. Keep the two in sync.
 
-enum TakeKind: String, Codable { case camera, screen }
+enum TakeKind: String, Codable, Sendable { case camera, screen }
 
 struct Take: Codable, Identifiable, Hashable {
     var number: Int
@@ -416,6 +417,7 @@ final class SessionDoc {
             try? FileManager.default.trashItem(at: fileURL(t), resultingItemURL: nil)
             try? FileManager.default.trashItem(at: Transcript.file(for: fileURL(t)), resultingItemURL: nil)
         }
+        CaptureEventLog.trash(in: url, take: number)
         meta.takes.removeAll { $0.number == number }
         save()
     }

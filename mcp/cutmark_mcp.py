@@ -11591,6 +11591,81 @@ def output_to_source(timeline, output_time):
     return None
 
 
+CAPTURE_EVENT_TYPES = {"recording_started", "recording_stopped", "move", "down", "up", "scroll", "marker"}
+
+
+def capture_events_file(s, take):
+    """Stable per-take event log. It does not follow a take's optional display name."""
+    return os.path.join(s, ".capture-events", "take-%02d-screen.jsonl" % int(take))
+
+
+def read_capture_events(s, take):
+    """Complete, known lines from a take's append-only event log.
+
+    A crash can interrupt the final JSON write. That line, unknown future event kinds and malformed
+    hand edits are skipped without hiding the earlier signals. Keystrokes are intentionally not part
+    of the current public event contract.
+    """
+    path = capture_events_file(s, take)
+    out = []
+    try:
+        f = open(path, encoding="utf-8")
+    except OSError:
+        return out
+    with f:
+        try:
+            header = json.loads(f.readline())
+        except (TypeError, ValueError):
+            return []
+        # V1 begins with source/clock/display geometry. A missing or foreign header makes the
+        # sidecar unusable rather than silently interpreting coordinates on the wrong clock.
+        display = header.get("display") if isinstance(header, dict) else None
+        if (not isinstance(header, dict) or header.get("type") != "header" or header.get("v") != 1
+                or header.get("take") != int(take) or header.get("source") != "screen"
+                or header.get("clock") != "screen_pts" or header.get("coordinates") != "display_normalized_top_left"
+                or not isinstance(display, dict)
+                or not isinstance(display.get("width"), (int, float)) or float(display["width"]) <= 0
+                or not isinstance(display.get("height"), (int, float)) or float(display["height"]) <= 0):
+            return []
+        for line in f:
+            try:
+                e = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(e, dict) or e.get("type") not in CAPTURE_EVENT_TYPES or e.get("source") != "screen":
+                continue
+            if not isinstance(e.get("t"), (int, float)) or not math.isfinite(float(e["t"])) or float(e["t"]) < 0:
+                continue
+            out.append(e)
+    # Crash recovery can keep the last completed movie fragment while the JSONL contains events from
+    # the unfinished tail. Once session metadata knows the playable screen duration, trim to it.
+    meta = read_meta(s) or {}
+    screen = next((x for x in meta.get("takes", [])
+                   if x.get("number") == int(take) and x.get("kind") == "screen"), None)
+    duration = (screen or {}).get("duration")
+    if isinstance(duration, (int, float)) and math.isfinite(float(duration)):
+        out = [e for e in out if float(e["t"]) <= float(duration) + 0.001]
+    return out
+
+
+def map_capture_events(timeline, take, events):
+    """Capture events on the edit clock.
+
+    V1 has one identity: `(take, screen)` and the screen-file PTS clock. Reused source ranges
+    intentionally make more than one output occurrence; events inside cuts make none.
+    """
+    take = int(take)
+    out = []
+    for e in events:
+        if e.get("source") != "screen":
+            continue
+        source_time = float(e["t"])
+        for output_time in source_to_outputs(timeline, take, "screen", source_time):
+            out.append({"event": e, "kind": "screen", "source_time": source_time, "output": output_time})
+    out.sort(key=lambda x: x["output"])
+    return out
+
+
 def render_words(s, r, cut, lead):
     """The final edit's words, from the takes' word times, and made_from for check_edit."""
     timeline = edit_time_map(cut, lead)
