@@ -46,5 +46,6 @@ jobs:
       - name: Build Cutmark.app
         env:
           CUTMARK_ADHOC_SIGN: '1'
+          CUTMARK_VERIFY_NATIVE_SET: '1'
           SKIP_TESTS: '1'
         run: ./build.sh

@@ -3,6 +3,11 @@
 # ~/Applications and opens it, or stages it so Cutmark shows Update in its sidebar.
 set -euo pipefail
 cd "$(dirname "$0")"
+if [[ "${CUTMARK_DEVELOPER_SIGN:-}" == 1 ]]; then
+  : "${CUTMARK_SIGN_IDENTITY:?Production signing requires CUTMARK_SIGN_IDENTITY}"
+  : "${CUTMARK_SIGN_KEYCHAIN:?Production signing requires CUTMARK_SIGN_KEYCHAIN}"
+  : "${CUTMARK_TEAM_ID:?Production signing requires CUTMARK_TEAM_ID}"
+fi
 # Several agents build Cutmark from their own worktrees, and each install replaces the last one
 # (2026-10-04: a branch build dropped a feature that was on main). So install only main as it
 # is on GitHub: commit, merge origin/main, push HEAD:main, then install. Each install is then
@@ -137,10 +142,34 @@ fi
 # 2 MB smaller. The dSYM keeps the names for crash reports. After signing, a strip breaks the signature.
 dsymutil .build/release/Cutmark -o build.noindex/Cutmark.dSYM 2>/dev/null || true
 strip -x "$APP/Contents/MacOS/Cutmark" "$APP/Contents/MacOS/cutmark-faces"
-# A stable certificate keeps camera, mic and screen permissions across installs (scripts/setup-signing.sh).
-# Without it, fall back to ad-hoc signing, and macOS asks for the permissions again after each install.
+# Production releases use a real Developer ID identity, hardened runtime and a secure timestamp.
+# Development installs keep the existing stable local certificate path; ordinary CI/source builds
+# may still opt into ad-hoc signing. Production mode is deliberately fail-closed.
 KC="$HOME/Library/Keychains/cutmark-signing.keychain-db"
-if [[ "${CUTMARK_ADHOC_SIGN:-}" != 1 && -f "$KC" && -f "$HOME/.config/cutmark/keychain-pass" ]]; then
+if [[ "${CUTMARK_DEVELOPER_SIGN:-}" == 1 || "${CUTMARK_VERIFY_NATIVE_SET:-}" == 1 ]]; then
+  unexpected="$(find "$APP/Contents" -type f -print0 | while IFS= read -r -d '' f; do
+    file -b "$f" 2>/dev/null | grep -q 'Mach-O' || continue
+    case "$f" in
+      "$APP/Contents/MacOS/Cutmark"|"$APP/Contents/MacOS/cutmark-faces"|"$APP/Contents/MacOS/cutmark-embed") ;;
+      *) printf '%s\n' "$f" ;;
+    esac
+  done)"
+  [[ -z "$unexpected" ]] || { echo "Unexpected nested Mach-O must get an explicit signing rule:" >&2; echo "$unexpected" >&2; exit 1; }
+fi
+if [[ "${CUTMARK_DEVELOPER_SIGN:-}" == 1 ]]; then
+  [[ -f "$CUTMARK_SIGN_KEYCHAIN" ]] || { echo "Production signing keychain is missing." >&2; exit 1; }
+  developer_sign() {
+    codesign --force --sign "$CUTMARK_SIGN_IDENTITY" --keychain "$CUTMARK_SIGN_KEYCHAIN" \
+      --options runtime --timestamp --identifier "$1" "$2"
+  }
+  [[ -f "$APP/Contents/MacOS/cutmark-embed" ]] && developer_sign com.triherm.cutmark.embed "$APP/Contents/MacOS/cutmark-embed"
+  developer_sign com.triherm.cutmark.faces "$APP/Contents/MacOS/cutmark-faces"
+  plutil -insert CutmarkSigningTeamIdentifier -string "$CUTMARK_TEAM_ID" "$APP/Contents/Info.plist"
+  developer_sign com.triherm.cutmark "$APP"
+  SIGN_INFO="$(codesign -dv --verbose=4 "$APP" 2>&1)"
+  grep -q "TeamIdentifier=$CUTMARK_TEAM_ID" <<< "$SIGN_INFO" || { echo "Developer ID TeamIdentifier mismatch." >&2; exit 1; }
+  grep -q 'runtime' <<< "$SIGN_INFO" || { echo "Hardened runtime is missing from the production signature." >&2; exit 1; }
+elif [[ "${CUTMARK_ADHOC_SIGN:-}" != 1 && -f "$KC" && -f "$HOME/.config/cutmark/keychain-pass" ]]; then
   security unlock-keychain -p "$(cat "$HOME/.config/cutmark/keychain-pass")" "$KC"
   [[ -f "$APP/Contents/MacOS/cutmark-embed" ]] && codesign --force --sign "Cutmark Local Signing" --keychain "$KC" --identifier com.triherm.cutmark.embed "$APP/Contents/MacOS/cutmark-embed"
   codesign --force --sign "Cutmark Local Signing" --keychain "$KC" --identifier com.triherm.cutmark.faces "$APP/Contents/MacOS/cutmark-faces"

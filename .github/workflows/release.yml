@@ -40,7 +40,8 @@ jobs:
   release:
     needs: verify-ci
     runs-on: xcode-27
-    timeout-minutes: 20
+    timeout-minutes: 40
+    environment: production-release
     permissions:
       contents: write
     steps:
@@ -49,10 +50,53 @@ jobs:
           fetch-depth: 0
       - name: Ensure Metal toolchain
         run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      - name: Prepare Developer ID and notary credentials
+        env:
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          for v in APPLE_DEVELOPER_ID_P12_BASE64 APPLE_DEVELOPER_ID_P12_PASSWORD APPLE_NOTARY_KEY_P8_BASE64 APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID APPLE_TEAM_ID; do
+            [[ -n "${!v:-}" ]] || { echo "::error::production-release is missing $v"; exit 1; }
+          done
+          CERT="$RUNNER_TEMP/Cutmark-DeveloperID.p12"
+          NOTARY_KEY="$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+          python3 - "$CERT" "$NOTARY_KEY" <<'PY'
+          import base64, os, sys
+          for env, path in (("APPLE_DEVELOPER_ID_P12_BASE64", sys.argv[1]),
+                            ("APPLE_NOTARY_KEY_P8_BASE64", sys.argv[2])):
+              try:
+                  data = base64.b64decode(os.environ[env], validate=True)
+              except Exception as exc:
+                  raise SystemExit(f"{env} is not valid base64: {exc}")
+              with open(path, "wb") as f:
+                  f.write(data)
+          PY
+          chmod 600 "$CERT" "$NOTARY_KEY"
+          KEYCHAIN="$RUNNER_TEMP/cutmark-release-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          IDENTITY="$(CUTMARK_CERTIFICATE_FILE="$CERT" \
+            CUTMARK_CERTIFICATE_PASSWORD="$APPLE_DEVELOPER_ID_P12_PASSWORD" \
+            CUTMARK_TEAM_ID="$APPLE_TEAM_ID" \
+            CUTMARK_SIGN_KEYCHAIN="$KEYCHAIN" \
+            CUTMARK_SIGN_KEYCHAIN_PASSWORD="$KEYCHAIN_PASSWORD" \
+            ./scripts/setup-release-keychain.sh)"
+          [[ "$IDENTITY" =~ ^[0-9A-Fa-f]{40}$ ]] || { echo "::error::Developer ID identity setup failed"; exit 1; }
+          cat >> "$GITHUB_ENV" <<EOF
+          CUTMARK_DEVELOPER_SIGN=1
+          CUTMARK_SIGN_IDENTITY=$IDENTITY
+          CUTMARK_SIGN_KEYCHAIN=$KEYCHAIN
+          CUTMARK_TEAM_ID=$APPLE_TEAM_ID
+          CUTMARK_NOTARY_KEY_FILE=$NOTARY_KEY
+          CUTMARK_NOTARY_KEY_ID=$APPLE_NOTARY_KEY_ID
+          CUTMARK_NOTARY_ISSUER_ID=$APPLE_NOTARY_ISSUER_ID
+          EOF
       - name: Build Cutmark.app
         env:
           CUTMARK_RELEASE: ${{ github.ref_name }}
-          CUTMARK_ADHOC_SIGN: '1'
           CUTMARK_REQUIRE_EMBED: '1'
           SKIP_TESTS: '1'
         run: ./build.sh
@@ -60,6 +104,8 @@ jobs:
         run: test -x build.noindex/Cutmark.app/Contents/MacOS/cutmark-embed
       - name: Package Cutmark.dmg
         run: ./scripts/package-dmg.sh
+      - name: Notarize and verify Cutmark.dmg
+        run: ./scripts/notarize-dmg.sh
       - name: Verify release artifact
         run: |
           test -f build.noindex/Cutmark.dmg
@@ -75,3 +121,8 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --title "Cutmark ${GITHUB_REF_NAME#v}" \
             --notes-file "$notes"
+      - name: Remove release credentials
+        if: always()
+        run: |
+          security delete-keychain "${CUTMARK_SIGN_KEYCHAIN:-$RUNNER_TEMP/cutmark-release-signing.keychain-db}" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/Cutmark-DeveloperID.p12" "$RUNNER_TEMP"/AuthKey_*.p8

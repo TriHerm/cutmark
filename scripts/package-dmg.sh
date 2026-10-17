@@ -26,6 +26,12 @@ mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"
 hdiutil create -quiet -volname Cutmark -srcfolder "$tmp" -ov -format UDZO "$OUT"
 hdiutil verify -quiet "$OUT"
-codesign --force --sign - "$OUT"
+if [[ "${CUTMARK_DEVELOPER_SIGN:-}" == 1 ]]; then
+  : "${CUTMARK_SIGN_IDENTITY:?Production signing requires CUTMARK_SIGN_IDENTITY}"
+  : "${CUTMARK_SIGN_KEYCHAIN:?Production signing requires CUTMARK_SIGN_KEYCHAIN}"
+  codesign --force --sign "$CUTMARK_SIGN_IDENTITY" --keychain "$CUTMARK_SIGN_KEYCHAIN" --timestamp "$OUT"
+else
+  codesign --force --sign - "$OUT"
+fi
 codesign --verify "$OUT"
 echo "Built $OUT"
