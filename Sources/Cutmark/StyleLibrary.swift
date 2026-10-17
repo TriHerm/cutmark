@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import CoreText
+import CryptoKit
 import SwiftUI
 
 // The style library: a style guide, design tokens and reusable assets, for Claude to build on and for
@@ -34,28 +35,79 @@ enum StyleLib {
     static func styles(root: URL) -> URL { user(root: root).appending(path: "styles") }
     static func style(_ name: String, root: URL) -> URL { styles(root: root).appending(path: name) }
 
-    /// Your styles, A–Z.
-    static func styleNames(root: URL) -> [String] {
+    /// Exact trees shipped by Takes/Cutmark before the bundled Magazine demo was retired.
+    static let legacyMagazineDigests: Set<String> = [
+        "623a7cc28ffb320ca585687b0c3f2e6a320eaf4a979d3c7e6d6462655fd4953a",
+        "efd4fe67a19503a3a66b680d9fc3d808fc1deaf947d7fd74ec0e7e2d07491544",
+    ]
+
+    /// Every style folder on disk, including retired built-in samples that an old saved pick may
+    /// still reference. New choices use styleNames instead.
+    static func allStyleNames(root: URL) -> [String] {
         ((try? FileManager.default.contentsOfDirectory(at: styles(root: root), includingPropertiesForKeys: nil,
                                                        options: [.skipsHiddenFiles])) ?? [])
             .filter(\.hasDirectoryPath).map(\.lastPathComponent)
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
-    /// The style a project uses: its pick, else Magazine, else the first one.
-    static func chosen(project: URL, root: URL) -> String? {
-        let names = styleNames(root: root)
+    /// Your styles, A–Z. An unchanged bundled demo stays on disk for compatibility but does not
+    /// appear as a user style after Cutmark stops shipping it.
+    static func styleNames(root: URL, retiredDigests: Set<String>? = nil) -> [String] {
+        let retiredDigests = retiredDigests ?? legacyMagazineDigests
+        return allStyleNames(root: root).filter { !isLegacyShippedStyle(style($0, root: root), digests: retiredDigests) }
+    }
+
+    static func styleExists(_ name: String, root: URL) -> Bool { allStyleNames(root: root).contains(name) }
+
+    /// Magazine was a Takes-era sample that older Cutmark builds copied into each library. Only an
+    /// exact shipped tree is retired. A changed or extended copy remains visible as the user's work.
+    static func isLegacyShippedStyle(_ dir: URL, digests: Set<String>) -> Bool {
+        guard dir.lastPathComponent == "Magazine" else { return false }
+        let meta = json(dir.appending(path: "style.json"))
+        guard meta["shipped"] as? Bool == true, meta["template"] as? String == "magazine",
+              let digest = treeDigest(dir) else { return false }
+        return digests.contains(digest)
+    }
+
+    /// Stable digest of every regular file, including its relative path. Any edit, add or removal
+    /// changes the result, which lets us distinguish an untouched demo from a customized copy.
+    static func treeDigest(_ dir: URL) -> String? {
+        let fm = FileManager.default
+        guard let e = fm.enumerator(atPath: dir.path) else { return nil }
+        var files: [(path: String, url: URL)] = []
+        for case let path as String in e {
+            let url = dir.appending(path: path)
+            guard let type = (try? fm.attributesOfItem(atPath: url.path)[.type]) as? FileAttributeType else { return nil }
+            if type == .typeDirectory { continue }
+            guard type == .typeRegular else { return nil }
+            files.append((path, url))
+        }
+        files.sort { $0.path < $1.path }
+        var hash = SHA256()
+        for file in files {
+            guard let path = file.path.data(using: .utf8), let data = try? Data(contentsOf: file.url) else { return nil }
+            hash.update(data: path)
+            hash.update(data: Data([0]))
+            hash.update(data: data)
+            hash.update(data: Data([0]))
+        }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The style a project uses: an existing saved pick (including a retired sample), else a visible default.
+    static func chosen(project: URL, root: URL, retiredDigests: Set<String>? = nil) -> String? {
         let file = self.project(project).appending(path: "project.json")
         if let data = try? Data(contentsOf: file),
            let pick = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["style"] as? String,
-           names.contains(pick) { return pick }
+           styleExists(pick, root: root) { return pick }
+        let names = styleNames(root: root, retiredDigests: retiredDigests)
         return names.contains("Magazine") ? "Magazine" : names.first
     }
 
     /// The style a video uses: its own pick, else its project's.
-    static func chosen(session: URL, pick: String?, root: URL) -> String? {
-        if let pick, styleNames(root: root).contains(pick) { return pick }
-        return chosen(project: session.deletingLastPathComponent(), root: root)
+    static func chosen(session: URL, pick: String?, root: URL, retiredDigests: Set<String>? = nil) -> String? {
+        if let pick, styleExists(pick, root: root) { return pick }
+        return chosen(project: session.deletingLastPathComponent(), root: root, retiredDigests: retiredDigests)
     }
 
     /// Every style with what the Styles gallery shows. Walks the sessions: call it off the main thread.
@@ -95,10 +147,10 @@ enum StyleLib {
         return (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] ?? [:]
     }
 
-    /// The styles Cutmark ships, in the app's Resources/styles (2026-10-08: a new user saw an empty
-    /// Styles board). Each is copied into the library once. A style of the same name that is already
-    /// there stays as it is, and one you delete does not come back: "seededStyles" remembers, per
-    /// library folder. Returns the names it copied.
+    /// Compatibility hook for builds that carry styles in Resources/styles. Each is copied into the
+    /// library once. A style of the same name that is already there stays as it is, and one you delete
+    /// does not come back: "seededStyles" remembers, per library folder. Current builds ship none.
+    /// Returns the names it copied.
     static let seededKey = "seededStyles"
 
     @discardableResult
@@ -728,17 +780,18 @@ struct StyleChip: View {
     var doc: SessionDoc
     var showLink = false
     @State private var names: [String] = []
+    @State private var allNames: [String] = []
 
     private var projectURL: URL { doc.url.deletingLastPathComponent() }
     private var rootURL: URL { projectURL.deletingLastPathComponent() }
     /// Read from disk on appear and on changes, not in every draw (it lists the styles folder).
     @State private var projectStyle: String?
-    private var own: String? { doc.meta.style.flatMap { names.contains($0) ? $0 : nil } }
+    private var own: String? { doc.meta.style.flatMap { allNames.contains($0) ? $0 : nil } }
 
     var body: some View {
         HStack(spacing: 8) {
             Text("Style").font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.faint)
-            if names.isEmpty {
+            if names.isEmpty && own == nil && projectStyle == nil {
                 Text("none yet").font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
             } else {
                 let own = own, projectStyle = projectStyle, names = names
@@ -755,11 +808,13 @@ struct StyleChip: View {
                     .contentShape(Rectangle())
                 } content: {
                     MenuButton("Same as the project (\(projectStyle ?? "none"))", icon: "folder", checked: own == nil) { set(nil) }
-                    MenuDivider()
-                    for n in names {
-                        MenuButton(n, icon: "paintpalette", checked: n == own) { set(n) }
+                    if !names.isEmpty {
+                        MenuDivider()
+                        for n in names {
+                            MenuButton(n, icon: "paintpalette", checked: n == own) { set(n) }
+                        }
                     }
-                    if let own, own != projectStyle {
+                    if let own, names.contains(own), own != projectStyle {
                         MenuDivider()
                         MenuButton("Use \(own) for All of \(projectURL.lastPathComponent)", icon: "square.stack") {
                             StyleLib.choose(own, project: projectURL)
@@ -779,9 +834,14 @@ struct StyleChip: View {
                     .help("See every style side by side")
             }
         }
-        .onAppear { names = StyleLib.styleNames(root: rootURL); readProjectStyle() }
-        .onFilesChanged(in: StyleLib.user(root: rootURL)) { names = StyleLib.styleNames(root: rootURL); readProjectStyle() }
+        .onAppear { readNames(); readProjectStyle() }
+        .onFilesChanged(in: StyleLib.user(root: rootURL)) { readNames(); readProjectStyle() }
         .onFilesChanged(in: projectURL) { readProjectStyle() }
+    }
+
+    private func readNames() {
+        allNames = StyleLib.allStyleNames(root: rootURL)
+        names = StyleLib.styleNames(root: rootURL)
     }
 
     private func readProjectStyle() {
@@ -1324,7 +1384,7 @@ struct NewStyleSheet: View {
     @AppStorage("styleSheetSeen") private var seen = false
     @State private var showSteps = false
 
-    private static let ideas = ["Yellow captions, black cards", "Magazine, serif titles", "Fast cuts, bold words"]
+    private static let ideas = ["Yellow captions, black cards", "Muted palette, serif titles", "Fast cuts, bold words"]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {

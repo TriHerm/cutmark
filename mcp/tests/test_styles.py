@@ -12,6 +12,7 @@ import cutmark_mcp as t  # noqa: E402
 
 class Styles(unittest.TestCase):
     def setUp(self):
+        self.legacy_digests = t.LEGACY_MAGAZINE_DIGESTS
         self.root = tempfile.mkdtemp()
         os.environ["CUTMARK_ROOT"] = self.root
         self.s = os.path.join(self.root, "Proj", "2026-10-02-test")
@@ -21,6 +22,7 @@ class Styles(unittest.TestCase):
         t.write_meta(self.s, t.read_meta(self.s))
 
     def tearDown(self):
+        t.LEGACY_MAGAZINE_DIGESTS = self.legacy_digests
         shutil.rmtree(self.root)
         os.environ.pop("CUTMARK_ROOT", None)
 
@@ -54,6 +56,50 @@ class Styles(unittest.TestCase):
     def test_create_style_refuses_a_taken_name(self):
         with self.assertRaises(ValueError):
             t.t_create_style({"name": "Magazine", "description": "x"})
+
+    def test_legacy_style_is_hidden_but_saved_picks_still_resolve(self):
+        legacy = os.path.join(self.root, "_library", "styles", "Magazine")
+        with open(os.path.join(legacy, "style.json"), "w") as f:
+            json.dump({"template": "magazine", "shipped": True}, f)
+        with open(os.path.join(legacy, "README.md"), "w") as f:
+            f.write("legacy\n")
+        t.LEGACY_MAGAZINE_DIGESTS = {t.style_tree_digest(legacy)}
+
+        self.assertEqual(t.style_names(), [])
+        self.assertIsNone(t.default_style())
+        with self.assertRaises(ValueError):
+            t.t_set_style({"session": self.s, "style": "Magazine"})
+        with self.assertRaises(ValueError):
+            t.t_set_style({"project": "Proj", "style": "Magazine"})
+
+        meta = t.read_meta(self.s)
+        meta["style"] = "Magazine"
+        t.write_meta(self.s, meta)
+        self.assertEqual(t.style_pick(os.path.dirname(self.s), self.s), ("Magazine", "session"))
+        lib = t.t_get_library({"session": self.s})
+        self.assertEqual(lib["style"], "Magazine")
+        self.assertEqual(lib["styles"], [])
+
+        meta.pop("style")
+        t.write_meta(self.s, meta)
+        project_lib = os.path.join(self.root, "Proj", "_library")
+        os.makedirs(project_lib, exist_ok=True)
+        with open(os.path.join(project_lib, "project.json"), "w") as f:
+            json.dump({"style": "Magazine"}, f)
+        self.assertEqual(t.style_pick(os.path.join(self.root, "Proj")), ("Magazine", "project"))
+
+        t.t_create_style({"name": "Custom", "description": "mine"})
+        self.assertEqual(t.style_names(), ["Custom"])
+        self.assertEqual(t.default_style(), "Custom")
+        self.assertEqual(t.style_pick(os.path.join(self.root, "Proj")), ("Magazine", "project"))
+        catalog = t.t_get_library({})
+        self.assertEqual(catalog["default"], "Custom")
+        self.assertEqual([x["name"] for x in catalog["styles"]], ["Custom"])
+        self.assertEqual(t.t_get_library({"project": "Proj"})["style"], "Magazine")
+
+        with open(os.path.join(legacy, "README.md"), "a") as f:
+            f.write("customized\n")
+        self.assertEqual(t.style_names(), ["Custom", "Magazine"])
 
 
 if __name__ == "__main__":

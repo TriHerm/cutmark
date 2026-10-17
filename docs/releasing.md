@@ -4,6 +4,25 @@ Public production releases are built from a green `main` commit and use Apple De
 hardened runtime, secure timestamps, notarization, and Gatekeeper verification before GitHub Release
 publishes `Cutmark.dmg`.
 
+## Batch changes for a release
+
+Collect related improvements in one local release-candidate branch. Make small, reviewable commits,
+and run focused checks locally after each change. Before sharing the candidate, run `./test.sh`
+and inspect the resulting app UI for visual changes. Then open one pull request for the candidate,
+resolve review findings locally, and push the completed candidate for CI. Avoid pushing each
+intermediate implementation attempt: the CI workflow runs on pull requests and on every push to
+`main`, so each push can consume additional macOS runner time.
+
+Once the pull request passes and the candidate is merged, wait for successful CI on the exact
+`main` commit before tagging that commit once. The Release workflow checks the existing successful
+CI result rather than repeating the entire test suite. A GitHub release is a distribution event,
+not the place to bypass the reviewed source changes or validation. Do not create a tag to test
+an unfinished candidate.
+
+The historical `v0.2.0` tag alone uses the legacy ad-hoc release job. All later versions use the
+protected production signing and notarization gate described below; an ad-hoc test build is not
+a substitute for the required release credentials.
+
 ## GitHub environment
 
 Create a protected GitHub Actions environment named `production-release`. Configure:

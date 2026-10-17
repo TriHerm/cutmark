@@ -1027,6 +1027,13 @@ struct DetailView: View {
     /// on the Script tab instead.
     private var recordOnly: Bool { rightTab == "script" }
 
+    /// The screen viewfinder is useful only while preparing a camera + screen take. It stops before
+    /// warming/countdown so the real recording owns ScreenCaptureKit by itself.
+    private var screenPreviewWanted: Bool {
+        recordOnly && cover == nil && app.mode == .cameraScreen && !app.isRecording
+            && library.selectedSessions.count <= 1
+    }
+
     /// Record with one session open, a script in it, and no welcome card over it: the notch opens
     /// by itself. No script, no notch (2026-10-08): an empty black panel over the camera only
     /// got in the way. Write one and it opens; clear it and the notch it opened goes again.
@@ -1050,10 +1057,15 @@ struct DetailView: View {
         // A shot waiting on Record: another tab lets it go (and stays that tab).
         .onChange(of: rightTab) { _, tab in if tab != "script" && !app.isRecording { app.shot = nil } }
         .onChange(of: notchRecord, initial: true) { _, on in NotchPanel.shared.follow(record: on, app) }
+        .onChange(of: screenPreviewWanted, initial: true) { _, on in screen.setPreviewing(on) }
+        .onChange(of: screen.displayID) { _, _ in if screenPreviewWanted { screen.setPreviewing(true) } }
         // A take that ran on while you left Record: the notch goes once it ends.
         .onChange(of: app.isRecording) { _, _ in NotchPanel.shared.follow(record: notchRecord, app) }
         // Another board (Plugins, Performance…) replaces this view: the notch goes too.
-        .onDisappear { NotchPanel.shared.follow(record: false, app) }
+        .onDisappear {
+            screen.setPreviewing(false)
+            NotchPanel.shared.follow(record: false, app)
+        }
     }
 
     /// Post always covers the stage. Assets and Sound cover it until you open a file:
@@ -1175,6 +1187,23 @@ struct DetailView: View {
                         // The live preview stays mounted, even under the player or while paused.
                         // Removing its layer while the session stops or starts deadlocks AVFoundation.
                         CameraCard(camera: camera, doc: library.current, corner: plugged?.camera, accessory: stageButtons)
+                        if screenPreviewWanted {
+                            VStack {
+                                HStack {
+                                    Spacer()
+                                    ScreenPreviewCard(
+                                        feed: screen.preview,
+                                        displayName: screen.displays.first { $0.id == screen.displayID }?.name ?? "Display"
+                                    )
+                                    .frame(width: min(260, max(180, stageSize.width * 0.34)))
+                                }
+                                Spacer()
+                            }
+                            .padding(.top, max(60, notchReach + 12))
+                            .padding(.trailing, 18)
+                            .allowsHitTesting(false)
+                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
+                        }
                         if app.preview != nil {
                             // Dark at once under a file: the player fades in on the stage, not
                             // over the daylight Record page and the camera (2026-10-04).
@@ -1228,10 +1257,9 @@ struct DetailView: View {
                             .transition(.opacity)
                         }
                     }
-                    .overlay(alignment: .bottom) {
+                    .overlay {
                         if app.preview == nil || app.isRecording {
                             RecordPill(camera: camera, screen: screen)
-                                .padding(.bottom, 18)
                                 .transition(.opacity.combined(with: .offset(y: 10)))
                         }
                     }
@@ -1483,13 +1511,118 @@ private struct StageHoverBar: ViewModifier {
     }
 }
 
+/// The selected display as a small picture-in-picture while preparing a camera + screen take.
+/// ScreenRecorder publishes frames through a separate object so only this thumbnail redraws.
+private struct ScreenPreviewCard: View {
+    @ObservedObject var feed: ScreenPreviewFeed
+    let displayName: String
+
+    private var aspect: CGFloat {
+        guard let image = feed.image, image.height > 0 else { return 16.0 / 10.0 }
+        return CGFloat(image.width) / CGFloat(image.height)
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        VStack(spacing: 0) {
+            ZStack {
+                Theme.stage
+                if let image = feed.image {
+                    Image(decorative: image, scale: 1)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    VStack(spacing: 7) {
+                        Image(systemName: "display").font(.system(size: 22, weight: .medium))
+                        Text(feed.message).font(Theme.sans(11.5, .medium)).multilineTextAlignment(.center)
+                    }
+                    .foregroundStyle(.white.opacity(0.75))
+                    .padding(14)
+                }
+            }
+            .aspectRatio(aspect, contentMode: .fit)
+            HStack(spacing: 6) {
+                Image(systemName: "display")
+                Text(displayName).lineLimit(1)
+                Spacer(minLength: 6)
+                Text("PREVIEW").font(Theme.mono(9)).foregroundStyle(Theme.faint)
+            }
+            .font(Theme.sans(10.5, .medium))
+            .foregroundStyle(Theme.ink)
+            .padding(.horizontal, 9)
+            .frame(height: 28)
+            .background(Theme.paper)
+        }
+        .background(shape.fill(Theme.paper).shadow(color: Theme.shadow.opacity(1.4), radius: 12, y: 6))
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
+    }
+}
+
+/// Record controls remember a normalized centre so resizing keeps them in the same part of the
+/// stage. The clamp uses the measured control size, so the capsule cannot be dragged off-screen.
+struct RecordPillPlacement {
+    private static func limits(total: CGFloat, control: CGFloat, margin: CGFloat) -> (CGFloat, CGFloat) {
+        let low = control / 2 + margin
+        let high = total - control / 2 - margin
+        guard low <= high else {
+            let middle = total / 2
+            return (middle, middle)
+        }
+        return (low, high)
+    }
+
+    static func point(normalized: CGPoint, stage: CGSize, control: CGSize, margin: CGFloat = 18) -> CGPoint {
+        let x = limits(total: stage.width, control: control.width, margin: margin)
+        let y = limits(total: stage.height, control: control.height, margin: margin)
+        let nx = min(1, max(0, normalized.x))
+        let ny = min(1, max(0, normalized.y))
+        return CGPoint(x: x.0 + (x.1 - x.0) * nx, y: y.0 + (y.1 - y.0) * ny)
+    }
+
+    static func clamped(point: CGPoint, stage: CGSize, control: CGSize, margin: CGFloat = 18) -> CGPoint {
+        let x = limits(total: stage.width, control: control.width, margin: margin)
+        let y = limits(total: stage.height, control: control.height, margin: margin)
+        return CGPoint(x: min(x.1, max(x.0, point.x)), y: min(y.1, max(y.0, point.y)))
+    }
+
+    static func normalized(point: CGPoint, stage: CGSize, control: CGSize, margin: CGFloat = 18) -> CGPoint {
+        let p = clamped(point: point, stage: stage, control: control, margin: margin)
+        let x = limits(total: stage.width, control: control.width, margin: margin)
+        let y = limits(total: stage.height, control: control.height, margin: margin)
+        let nx = x.1 > x.0 ? (p.x - x.0) / (x.1 - x.0) : 0.5
+        let ny = y.1 > y.0 ? (p.y - y.0) / (y.1 - y.0) : 0.5
+        return CGPoint(x: nx, y: ny)
+    }
+}
+
+enum RecordPillLayout: Equatable {
+    case regular, compact
+
+    /// The full pill needs room for its text controls and, with multiple displays, the selected
+    /// display chip. Compact stays comfortably inside Record's 380 pt minimum stage.
+    static func choose(stageWidth: CGFloat, showsDisplayPicker: Bool, textScale: CGFloat = 1) -> Self {
+        // Regular uses Theme.sans, so its text grows with Settings > Text size. Keep the same
+        // conservative width budget at Normal and scale it with the supported 1/1.12/1.25 factors.
+        let regularWidth: CGFloat = (showsDisplayPicker ? 590 : 470) * max(1, textScale)
+        return stageWidth >= regularWidth + 36 ? .regular : .compact
+    }
+
+    static let compactWidth: CGFloat = 292
+}
+
 /// Floats on the stage: the time, the record button, the shape, the screen and the devices.
 struct RecordPill: View {
     @Environment(AppModel.self) var app
     @ObservedObject var camera: CameraRecorder
     @ObservedObject var screen: ScreenRecorder
+    @AppStorage("recordPillX") private var savedX = 0.5
+    @AppStorage("recordPillY") private var savedY = 1.0
     @State private var devices = false
     @State private var hover = false
+    @State private var pillSize = CGSize(width: 420, height: 60)
+    @State private var dragOrigin: CGPoint?
+    @State private var dragPoint: CGPoint?
 
     private var recording: Bool { if case .recording = app.phase { return true }; return false }
     private var stoppable: Bool {
@@ -1500,23 +1633,86 @@ struct RecordPill: View {
 
     var body: some View {
         let _ = Perf.body("RecordPill")
-        HStack(spacing: 12) {
-            clock
-            Button(action: app.toggleRecord) {
-                ZStack {
-                    Circle().strokeBorder(Theme.danger.opacity(recording ? 0.9 : 0.3), lineWidth: 2.5)
-                    RoundedRectangle(cornerRadius: recording ? 4 : 15)
-                        .fill(Theme.danger)
-                        .frame(width: recording ? 16 : 30, height: recording ? 16 : 30)
+        GeometryReader { stage in
+            let displayPicker = app.mode == .cameraScreen && screen.displays.count > 1
+            let layout = RecordPillLayout.choose(stageWidth: stage.size.width, showsDisplayPicker: displayPicker,
+                                                 textScale: TextSize.shared.factor)
+            let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
+            let resting = RecordPillPlacement.point(normalized: saved, stage: stage.size, control: pillSize)
+            controls(stage: stage.size, layout: layout)
+                .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                    if size.width > 0, size.height > 0, size != pillSize { pillSize = size }
                 }
-                .frame(width: 44, height: 44)
-                .scaleEffect(hover ? 1.06 : 1)
-                .contentShape(Circle())
+                .position(dragPoint ?? resting)
+        }
+    }
+
+    @ViewBuilder private func controls(stage: CGSize, layout: RecordPillLayout) -> some View {
+        HStack(spacing: layout == .compact ? 8 : 12) {
+            dragHandle(stage: stage)
+            clock
+            recordButton
+            if layout == .compact {
+                compactControls
+            } else {
+                regularControls
             }
-            .buttonStyle(.plain)
-            .onHover { hover = $0 }
-            .disabled(!(app.phase == .idle || stoppable))
-            .help(recording ? "Stop (⌘R)" : "Record (⌘R)")
+        }
+        .padding(.leading, 10).padding(.trailing, 10).padding(.vertical, 8)
+        .frame(width: layout == .compact ? RecordPillLayout.compactWidth : nil)
+        // Paper on the daylight stage; it follows the stage into the dark while you record.
+        .background(Capsule().fill(Theme.paper).shadow(color: Theme.shadow.opacity(1.8), radius: 18, y: 6))
+        .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
+        .foregroundStyle(Theme.ink)
+        .animation(Theme.spring, value: recording)
+        .animation(Theme.spring, value: hover)
+    }
+
+    private var recordButton: some View {
+        Button(action: app.toggleRecord) {
+            ZStack {
+                Circle().strokeBorder(Theme.danger.opacity(recording ? 0.9 : 0.3), lineWidth: 2.5)
+                RoundedRectangle(cornerRadius: recording ? 4 : 15)
+                    .fill(Theme.danger)
+                    .frame(width: recording ? 16 : 30, height: recording ? 16 : 30)
+            }
+            .frame(width: 44, height: 44)
+            .scaleEffect(hover ? 1.06 : 1)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .disabled(!(app.phase == .idle || stoppable))
+        .help(recording ? "Stop (⌘R)" : "Record (⌘R)")
+    }
+
+    private var compactControls: some View {
+        HStack(spacing: 2) {
+            HStack(spacing: 2) {
+                iconGhost(camera.orientation == .vertical ? "rectangle.portrait" : "rectangle",
+                          label: camera.orientation == .vertical ? "Vertical" : "Horizontal",
+                          help: "Switch between vertical and horizontal. \(camera.formatDescription)") {
+                    camera.orientation = camera.orientation == .vertical ? .horizontal : .vertical
+                }
+                iconGhost(app.mode == .cameraScreen ? "display.fill" : "display",
+                          label: app.mode == .cameraScreen ? "Screen on" : "Screen off",
+                          help: "Record your screen too, as a second file") {
+                    toggleScreen()
+                }
+                deviceButton
+            }
+            .disabled(app.isRecording)
+            .opacity(app.isRecording ? 0.35 : 1)
+            iconGhost(app.notchOpen ? "text.rectangle.fill" : "text.rectangle",
+                      label: app.notchOpen ? "Prompter on" : "Prompter off",
+                      help: app.notchOpen ? "Hide the prompter" : "Show the prompter") {
+                NotchPanel.shared.toggle(app)
+            }
+        }
+    }
+
+    private var regularControls: some View {
+        HStack(spacing: 2) {
             HStack(spacing: 2) {
                 ghost(camera.orientation == .vertical ? "Vertical" : "Horizontal",
                       help: "Switch between vertical and horizontal. \(camera.formatDescription)") {
@@ -1524,10 +1720,10 @@ struct RecordPill: View {
                 }
                 ghost(app.mode == .cameraScreen ? "Screen on" : "Screen off",
                       help: "Record your screen too, as a second file") {
-                    app.mode = app.mode == .cameraScreen ? .camera : .cameraScreen
+                    toggleScreen()
                 }
                 // With two displays, which one records shows here, not only in the device panel
-                // (Jeremy could not find it, 2026-10-06).
+                // (Jeremy could not find it, 2026-10-06). Compact keeps that choice in Devices.
                 if app.mode == .cameraScreen && screen.displays.count > 1 {
                     let screen = screen
                     CutmarkMenuButton(help: "Which display to record") {
@@ -1547,26 +1743,65 @@ struct RecordPill: View {
                     }
                     .fixedSize()
                 }
-                Button { devices.toggle() } label: {
-                    Image(systemName: "slider.horizontal.3").font(.system(size: 12, weight: .medium))
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(PillGhostStyle())
-                .help("Camera, microphone and screen")
-                .cutmarkMenu(isPresented: $devices, width: 270) { [app, camera, screen] in
-                    DevicePanel.rows(mode: app.mode, camera: camera, screen: screen)
-                }
+                deviceButton
             }
             .disabled(app.isRecording)
             .opacity(app.isRecording ? 0.35 : 1)
+            ghost(app.notchOpen ? "Prompter on" : "Prompter off",
+                  help: app.notchOpen ? "Hide the prompter" : "Show the prompter") {
+                NotchPanel.shared.toggle(app)
+            }
         }
-        .padding(.leading, 18).padding(.trailing, 10).padding(.vertical, 8)
-        // Paper on the daylight stage; it follows the stage into the dark while you record.
-        .background(Capsule().fill(Theme.paper).shadow(color: Theme.shadow.opacity(1.8), radius: 18, y: 6))
-        .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
-        .foregroundStyle(Theme.ink)
-        .animation(Theme.spring, value: recording)
-        .animation(Theme.spring, value: hover)
+    }
+
+    private var deviceButton: some View {
+        Button { devices.toggle() } label: {
+            Image(systemName: "slider.horizontal.3").font(.system(size: 12, weight: .medium))
+                .frame(width: 28, height: 28)
+        }
+        .buttonStyle(PillGhostStyle())
+        .help("Camera, microphone and screen")
+        .accessibilityLabel("Camera, microphone and screen")
+        .cutmarkMenu(isPresented: $devices, width: 270) { [app, camera, screen] in
+            DevicePanel.rows(mode: app.mode, camera: camera, screen: screen)
+        }
+    }
+
+    private func toggleScreen() {
+        let on = app.mode != .cameraScreen
+        app.mode = on ? .cameraScreen : .camera
+        screen.setPreviewing(on, requestPermission: on)
+    }
+
+    private func dragHandle(stage: CGSize) -> some View {
+        Image(systemName: "line.3.horizontal")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(Theme.faint)
+            .frame(width: 22, height: 28)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
+                        let base = dragOrigin ?? RecordPillPlacement.point(normalized: saved, stage: stage, control: pillSize)
+                        if dragOrigin == nil { dragOrigin = base }
+                        let proposed = CGPoint(x: base.x + value.translation.width, y: base.y + value.translation.height)
+                        dragPoint = RecordPillPlacement.clamped(point: proposed, stage: stage, control: pillSize)
+                    }
+                    .onEnded { value in
+                        let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
+                        let base = dragOrigin ?? RecordPillPlacement.point(normalized: saved, stage: stage, control: pillSize)
+                        let proposed = CGPoint(x: base.x + value.translation.width, y: base.y + value.translation.height)
+                        let final = RecordPillPlacement.clamped(point: proposed, stage: stage, control: pillSize)
+                        let normalized = RecordPillPlacement.normalized(point: final, stage: stage, control: pillSize)
+                        savedX = Double(normalized.x)
+                        savedY = Double(normalized.y)
+                        dragOrigin = nil
+                        dragPoint = nil
+                    }
+            )
+            .help("Drag to move recording controls")
+            .accessibilityLabel("Move recording controls")
     }
 
     /// The time since you started; the mic level while you wait.
@@ -1597,6 +1832,17 @@ struct RecordPill: View {
         }
         .buttonStyle(PillGhostStyle())
         .help(help)
+    }
+
+    private func iconGhost(_ systemName: String, label: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 12, weight: .medium))
+                .frame(width: 28, height: 28)
+        }
+        .buttonStyle(PillGhostStyle())
+        .help(help)
+        .accessibilityLabel(label)
     }
 }
 

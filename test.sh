@@ -24,7 +24,8 @@ if [[ -n "$FULL" && -f scripts/public/check-public-build.sh ]]; then TREE="$(tre
 MCP_ARGS=()
 [[ -n "${CUTMARK_MCP_JOBS:-}" ]] && MCP_ARGS+=(-j "$CUTMARK_MCP_JOBS")
 [[ "${CUTMARK_MCP_FAIL_FAST:-}" == 1 ]] && MCP_ARGS+=(--fail-fast)
-env -u CLAUDE_CODE_SESSION_ID python3 mcp/tests/run_parallel.py "${MCP_ARGS[@]}" || { echo "MCP tests failed"; exit 1; }
+# Bash 3.2 with `set -u` treats an empty array expansion as unbound on macOS.
+env -u CLAUDE_CODE_SESSION_ID python3 mcp/tests/run_parallel.py "${MCP_ARGS[@]+"${MCP_ARGS[@]}"}" || { echo "MCP tests failed"; exit 1; }
 DEV=/Library/Developer/CommandLineTools/Library/Developer
 run() {
   local selected

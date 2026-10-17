@@ -769,18 +769,65 @@ def t_next_path(a):
 LIB = "_library"
 LIB_SKIP = {"comments.json", ".order.json", "project.json", "assets.json"}
 STYLE_SAMPLE = "style-sample.mp4"  # in <root>/_library: the clip every style preview uses
+LEGACY_MAGAZINE_DIGESTS = {
+    "623a7cc28ffb320ca585687b0c3f2e6a320eaf4a979d3c7e6d6462655fd4953a",
+    "efd4fe67a19503a3a66b680d9fc3d808fc1deaf947d7fd74ec0e7e2d07491544",
+}
 
 
 def styles_dir():
     return os.path.join(root(), LIB, "styles")
 
 
-def style_names():
+def all_style_names():
     d = styles_dir()
     if not os.path.isdir(d):
         return []
     return sorted((x for x in os.listdir(d) if not x.startswith(".") and os.path.isdir(os.path.join(d, x))),
                   key=str.lower)
+
+
+def style_tree_digest(d):
+    """Stable digest of every regular file and relative path, matching StyleLib.treeDigest."""
+    files = []
+    for base, dirs, names in os.walk(d):
+        for entry in dirs + names:
+            if os.path.islink(os.path.join(base, entry)):
+                return None
+        for name in names:
+            path = os.path.join(base, name)
+            if not os.path.isfile(path):
+                return None
+            files.append((os.path.relpath(path, d), path))
+    h = hashlib.sha256()
+    for rel, path in sorted(files):
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        try:
+            with open(path, "rb") as f:
+                h.update(f.read())
+        except OSError:
+            return None
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def is_legacy_shipped_style(name):
+    if name != "Magazine":
+        return False
+    meta = style_meta(name)
+    if meta.get("shipped") is not True or meta.get("template") != "magazine":
+        return False
+    return style_tree_digest(os.path.join(styles_dir(), name)) in LEGACY_MAGAZINE_DIGESTS
+
+
+def style_names():
+    """Visible styles for galleries, defaults and new picks."""
+    return [name for name in all_style_names() if not is_legacy_shipped_style(name)]
+
+
+def style_exists(name):
+    return name in all_style_names()
 
 
 def default_style():
@@ -797,12 +844,12 @@ def style_pick(project, session=None):
     """(style, where the pick comes from: 'session', 'project' or 'default')."""
     if session:
         pick = read_meta(session).get("style")
-        if pick in style_names():
+        if style_exists(pick):
             return pick, "session"
     try:
         with open(os.path.join(resolve_project(project), LIB, "project.json")) as f:
             pick = json.load(f).get("style")
-        if pick in style_names():
+        if style_exists(pick):
             return pick, "project"
     except (OSError, ValueError, AttributeError):
         pass
