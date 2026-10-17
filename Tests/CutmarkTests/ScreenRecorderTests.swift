@@ -29,6 +29,16 @@ struct ScreenRecorderTests {
         #expect(ScreenMovieWriter.isNewerVideoPTS(CMTime(seconds: 2.01, preferredTimescale: 600), than: last))
     }
 
+    @Test func screenPreviewDownscalesWithoutChangingDisplayAspect() {
+        let size = ScreenRecorder.previewSize(contentRect: CGRect(x: 0, y: 0, width: 1512, height: 982), scale: 2)
+        #expect(size.width == 640)
+        #expect(size.height == 416)
+
+        let small = ScreenRecorder.previewSize(contentRect: CGRect(x: 0, y: 0, width: 320, height: 180), scale: 1)
+        #expect(small.width == 320)
+        #expect(small.height == 180)
+    }
+
     @Test func finishingBeforeTheFirstFrameIsIdempotent() throws {
         let file = FileManager.default.temporaryDirectory.appending(path: "cutmark-screen-\(UUID().uuidString).mov")
         defer { try? FileManager.default.removeItem(at: file) }

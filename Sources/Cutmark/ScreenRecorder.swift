@@ -3,6 +3,13 @@ import AppKit
 import CoreGraphics
 import ScreenCaptureKit
 
+/// A low-rate screen preview has its own observable object so new frames redraw only the thumbnail,
+/// not every Record view that already observes ScreenRecorder for devices and selection.
+final class ScreenPreviewFeed: ObservableObject {
+    @Published fileprivate(set) var image: CGImage?
+    @Published fileprivate(set) var message = "Starting screen preview…"
+}
+
 /// One display into its own .mov (HEVC, 60fps, cursor on, mic included for waveform sync).
 /// The Cutmark window itself is excluded, so the script never shows up in the screen file.
 final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStreamOutput {
@@ -18,6 +25,7 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
     @Published var displayID: CGDirectDisplayID? {
         didSet { UserDefaults.standard.set(displayID.map { Int($0) }, forKey: "display") }
     }
+    let preview = ScreenPreviewFeed()
 
     private var stream: SCStream?
     private var movie: ScreenMovieWriter?
@@ -31,6 +39,8 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
     private var lastVisualActive: Bool?
     private var visualStateSink: (@Sendable (Bool, Double) -> Void)?
     private var pendingVisualStates: [(Bool, Double)] = []
+    private var previewTask: Task<Void, Never>?
+    private var previewDisplayID: CGDirectDisplayID?
 
     override init() {
         super.init()
@@ -58,7 +68,88 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         if !displays.contains(where: { $0.id == displayID }) { displayID = displays.first?.id }
     }
 
+    /// A small, low-rate viewfinder while Record is idle. It uses the same application exclusion as
+    /// the real recording, so the Cutmark window never appears in its own preview. Record turns this
+    /// off before capture starts; there is never a second live stream competing with the take.
+    @MainActor
+    func setPreviewing(_ on: Bool, requestPermission: Bool = false) {
+        guard on else {
+            previewTask?.cancel()
+            previewTask = nil
+            previewDisplayID = nil
+            preview.image = nil
+            preview.message = "Starting screen preview…"
+            return
+        }
+
+        let allowed = CGPreflightScreenCaptureAccess() || (requestPermission && CGRequestScreenCaptureAccess())
+        guard allowed else {
+            previewTask?.cancel()
+            previewTask = nil
+            previewDisplayID = nil
+            preview.image = nil
+            preview.message = "Allow Screen Recording to see the preview."
+            return
+        }
+
+        // A normal view update can ask again for the same display. Keep the existing capture loop.
+        if previewTask != nil, previewDisplayID == displayID { return }
+        previewTask?.cancel()
+        previewDisplayID = displayID
+        preview.image = nil
+        preview.message = "Starting screen preview…"
+        let wantedDisplay = displayID
+        previewTask = Task { @MainActor [weak self] in
+            await self?.runPreview(displayID: wantedDisplay)
+        }
+    }
+
+    static func previewSize(contentRect: CGRect, scale: CGFloat, maxWidth: Int = 640) -> (width: Int, height: Int) {
+        let pixelWidth = max(1, contentRect.width * max(0.1, scale))
+        let pixelHeight = max(1, contentRect.height * max(0.1, scale))
+        let width = min(pixelWidth, CGFloat(max(1, maxWidth)))
+        let ratio = width / pixelWidth
+        return (max(1, Int(width.rounded())), max(1, Int((pixelHeight * ratio).rounded())))
+    }
+
+    @MainActor
+    private func runPreview(displayID: CGDirectDisplayID?) async {
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            guard let display = content.displays.first(where: { $0.displayID == displayID }) ?? content.displays.first else {
+                preview.message = "No display found."
+                return
+            }
+            let me = content.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
+            let filter = SCContentFilter(display: display, excludingApplications: me, exceptingWindows: [])
+            let size = Self.previewSize(contentRect: filter.contentRect, scale: CGFloat(filter.pointPixelScale))
+            let config = SCStreamConfiguration()
+            config.width = size.width
+            config.height = size.height
+            config.showsCursor = true
+            config.pixelFormat = kCVPixelFormatType_32BGRA
+
+            while !Task.isCancelled {
+                let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+                guard !Task.isCancelled else { return }
+                preview.image = image
+                preview.message = ""
+                // Enough motion to confirm the selected display without spending recording-level CPU.
+                try await Task.sleep(for: .milliseconds(350))
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !Task.isCancelled else { return }
+            preview.image = nil
+            preview.message = "Screen preview unavailable."
+        }
+    }
+
     func startRecording(to url: URL, micID: String?) async throws -> Start {
+        // AppModel normally stops the viewfinder when phase leaves idle. Also stop it here so a
+        // delayed SwiftUI update can never leave a screenshot request overlapping the real stream.
+        await MainActor.run { self.setPreviewing(false) }
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let display = content.displays.first(where: { $0.displayID == displayID }) ?? content.displays.first
         else { throw RecorderError("No display found.") }
