@@ -27,8 +27,22 @@ struct DefaultStylesTests {
         #expect(StyleLib.styleNames(root: tmp, retiredDigests: [exact]).isEmpty)
         #expect(fm.fileExists(atPath: legacy.appending(path: "README.md").path))
 
+        let project = tmp.appending(path: "Project")
+        StyleLib.choose("Magazine", project: project)
+        #expect(StyleLib.chosen(project: project, root: tmp, retiredDigests: [exact]) == "Magazine")
+        #expect(StyleLib.chosen(project: tmp.appending(path: "New Project"), root: tmp, retiredDigests: [exact]) == nil)
+        let session = project.appending(path: "Session")
+        #expect(StyleLib.chosen(session: session, pick: "Magazine", root: tmp, retiredDigests: [exact]) == "Magazine")
+
+        let custom = StyleLib.style("Custom", root: tmp)
+        try fm.createDirectory(at: custom, withIntermediateDirectories: true)
+        try #"{"description":"mine"}"#.write(to: custom.appending(path: "style.json"), atomically: true, encoding: .utf8)
+        #expect(StyleLib.styleNames(root: tmp, retiredDigests: [exact]) == ["Custom"])
+        #expect(StyleLib.chosen(project: project, root: tmp, retiredDigests: [exact]) == "Magazine")
+        #expect(StyleLib.chosen(project: tmp.appending(path: "New Project"), root: tmp, retiredDigests: [exact]) == "Custom")
+
         try "customized".write(to: legacy.appending(path: "README.md"), atomically: true, encoding: .utf8)
-        #expect(StyleLib.styleNames(root: tmp, retiredDigests: [exact]) == ["Magazine"])
+        #expect(StyleLib.styleNames(root: tmp, retiredDigests: [exact]) == ["Custom", "Magazine"])
 
         let userRoot = fm.temporaryDirectory.appending(path: "user-style-\(UUID().uuidString)")
         defer { try? fm.removeItem(at: userRoot) }

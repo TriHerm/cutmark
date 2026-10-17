@@ -41,15 +41,23 @@ enum StyleLib {
         "efd4fe67a19503a3a66b680d9fc3d808fc1deaf947d7fd74ec0e7e2d07491544",
     ]
 
+    /// Every style folder on disk, including retired built-in samples that an old saved pick may
+    /// still reference. New choices use styleNames instead.
+    static func allStyleNames(root: URL) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(at: styles(root: root), includingPropertiesForKeys: nil,
+                                                       options: [.skipsHiddenFiles])) ?? [])
+            .filter(\.hasDirectoryPath).map(\.lastPathComponent)
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
     /// Your styles, A–Z. An unchanged bundled demo stays on disk for compatibility but does not
     /// appear as a user style after Cutmark stops shipping it.
     static func styleNames(root: URL, retiredDigests: Set<String>? = nil) -> [String] {
         let retiredDigests = retiredDigests ?? legacyMagazineDigests
-        return ((try? FileManager.default.contentsOfDirectory(at: styles(root: root), includingPropertiesForKeys: nil,
-                                                              options: [.skipsHiddenFiles])) ?? [])
-            .filter { $0.hasDirectoryPath && !isLegacyShippedStyle($0, digests: retiredDigests) }.map(\.lastPathComponent)
-            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        return allStyleNames(root: root).filter { !isLegacyShippedStyle(style($0, root: root), digests: retiredDigests) }
     }
+
+    static func styleExists(_ name: String, root: URL) -> Bool { allStyleNames(root: root).contains(name) }
 
     /// Magazine was a Takes-era sample that older Cutmark builds copied into each library. Only an
     /// exact shipped tree is retired. A changed or extended copy remains visible as the user's work.
@@ -86,20 +94,20 @@ enum StyleLib {
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    /// The style a project uses: its pick, else Magazine, else the first one.
-    static func chosen(project: URL, root: URL) -> String? {
-        let names = styleNames(root: root)
+    /// The style a project uses: an existing saved pick (including a retired sample), else a visible default.
+    static func chosen(project: URL, root: URL, retiredDigests: Set<String>? = nil) -> String? {
         let file = self.project(project).appending(path: "project.json")
         if let data = try? Data(contentsOf: file),
            let pick = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["style"] as? String,
-           names.contains(pick) { return pick }
+           styleExists(pick, root: root) { return pick }
+        let names = styleNames(root: root, retiredDigests: retiredDigests)
         return names.contains("Magazine") ? "Magazine" : names.first
     }
 
     /// The style a video uses: its own pick, else its project's.
-    static func chosen(session: URL, pick: String?, root: URL) -> String? {
-        if let pick, styleNames(root: root).contains(pick) { return pick }
-        return chosen(project: session.deletingLastPathComponent(), root: root)
+    static func chosen(session: URL, pick: String?, root: URL, retiredDigests: Set<String>? = nil) -> String? {
+        if let pick, styleExists(pick, root: root) { return pick }
+        return chosen(project: session.deletingLastPathComponent(), root: root, retiredDigests: retiredDigests)
     }
 
     /// Every style with what the Styles gallery shows. Walks the sessions: call it off the main thread.
@@ -772,17 +780,18 @@ struct StyleChip: View {
     var doc: SessionDoc
     var showLink = false
     @State private var names: [String] = []
+    @State private var allNames: [String] = []
 
     private var projectURL: URL { doc.url.deletingLastPathComponent() }
     private var rootURL: URL { projectURL.deletingLastPathComponent() }
     /// Read from disk on appear and on changes, not in every draw (it lists the styles folder).
     @State private var projectStyle: String?
-    private var own: String? { doc.meta.style.flatMap { names.contains($0) ? $0 : nil } }
+    private var own: String? { doc.meta.style.flatMap { allNames.contains($0) ? $0 : nil } }
 
     var body: some View {
         HStack(spacing: 8) {
             Text("Style").font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.faint)
-            if names.isEmpty {
+            if names.isEmpty && own == nil && projectStyle == nil {
                 Text("none yet").font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
             } else {
                 let own = own, projectStyle = projectStyle, names = names
@@ -799,11 +808,13 @@ struct StyleChip: View {
                     .contentShape(Rectangle())
                 } content: {
                     MenuButton("Same as the project (\(projectStyle ?? "none"))", icon: "folder", checked: own == nil) { set(nil) }
-                    MenuDivider()
-                    for n in names {
-                        MenuButton(n, icon: "paintpalette", checked: n == own) { set(n) }
+                    if !names.isEmpty {
+                        MenuDivider()
+                        for n in names {
+                            MenuButton(n, icon: "paintpalette", checked: n == own) { set(n) }
+                        }
                     }
-                    if let own, own != projectStyle {
+                    if let own, names.contains(own), own != projectStyle {
                         MenuDivider()
                         MenuButton("Use \(own) for All of \(projectURL.lastPathComponent)", icon: "square.stack") {
                             StyleLib.choose(own, project: projectURL)
@@ -823,9 +834,14 @@ struct StyleChip: View {
                     .help("See every style side by side")
             }
         }
-        .onAppear { names = StyleLib.styleNames(root: rootURL); readProjectStyle() }
-        .onFilesChanged(in: StyleLib.user(root: rootURL)) { names = StyleLib.styleNames(root: rootURL); readProjectStyle() }
+        .onAppear { readNames(); readProjectStyle() }
+        .onFilesChanged(in: StyleLib.user(root: rootURL)) { readNames(); readProjectStyle() }
         .onFilesChanged(in: projectURL) { readProjectStyle() }
+    }
+
+    private func readNames() {
+        allNames = StyleLib.allStyleNames(root: rootURL)
+        names = StyleLib.styleNames(root: rootURL)
     }
 
     private func readProjectStyle() {

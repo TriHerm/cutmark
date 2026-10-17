@@ -1601,8 +1601,10 @@ enum RecordPillLayout: Equatable {
 
     /// The full pill needs room for its text controls and, with multiple displays, the selected
     /// display chip. Compact stays comfortably inside Record's 380 pt minimum stage.
-    static func choose(stageWidth: CGFloat, showsDisplayPicker: Bool) -> Self {
-        let regularWidth: CGFloat = showsDisplayPicker ? 590 : 470
+    static func choose(stageWidth: CGFloat, showsDisplayPicker: Bool, textScale: CGFloat = 1) -> Self {
+        // Regular uses Theme.sans, so its text grows with Settings > Text size. Keep the same
+        // conservative width budget at Normal and scale it with the supported 1/1.12/1.25 factors.
+        let regularWidth: CGFloat = (showsDisplayPicker ? 590 : 470) * max(1, textScale)
         return stageWidth >= regularWidth + 36 ? .regular : .compact
     }
 
@@ -1633,7 +1635,8 @@ struct RecordPill: View {
         let _ = Perf.body("RecordPill")
         GeometryReader { stage in
             let displayPicker = app.mode == .cameraScreen && screen.displays.count > 1
-            let layout = RecordPillLayout.choose(stageWidth: stage.size.width, showsDisplayPicker: displayPicker)
+            let layout = RecordPillLayout.choose(stageWidth: stage.size.width, showsDisplayPicker: displayPicker,
+                                                 textScale: TextSize.shared.factor)
             let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
             let resting = RecordPillPlacement.point(normalized: saved, stage: stage.size, control: pillSize)
             controls(stage: stage.size, layout: layout)

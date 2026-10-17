@@ -4,11 +4,23 @@ import Testing
 
 struct RecordControlsTests {
     @Test func minimumStageUsesCompactRecordingControls() {
-        #expect(RecordPillLayout.choose(stageWidth: 380, showsDisplayPicker: false) == .compact)
-        #expect(RecordPillLayout.choose(stageWidth: 380, showsDisplayPicker: true) == .compact)
+        #expect(RecordPillLayout.choose(stageWidth: 380, showsDisplayPicker: false, textScale: 1) == .compact)
+        #expect(RecordPillLayout.choose(stageWidth: 380, showsDisplayPicker: true, textScale: 1) == .compact)
         #expect(RecordPillLayout.compactWidth == 292)
         #expect(RecordPillLayout.compactWidth <= 380 - 36)
-        #expect(RecordPillLayout.choose(stageWidth: 640, showsDisplayPicker: true) == .regular)
+        #expect(RecordPillLayout.choose(stageWidth: 640, showsDisplayPicker: true, textScale: 1) == .regular)
+    }
+
+    @Test func largerTextKeepsWideRecordingControlsCompactUntilTheyFit() {
+        #expect(RecordPillLayout.choose(stageWidth: 640, showsDisplayPicker: true, textScale: 1.12) == .compact)
+
+        let larger: CGFloat = 1.25
+        #expect(RecordPillLayout.choose(stageWidth: 626, showsDisplayPicker: true, textScale: larger) == .compact)
+        #expect(RecordPillLayout.choose(stageWidth: 689, showsDisplayPicker: true, textScale: larger) == .compact)
+        #expect(RecordPillLayout.choose(stageWidth: 774, showsDisplayPicker: true, textScale: larger) == .regular)
+
+        #expect(RecordPillLayout.choose(stageWidth: 546, showsDisplayPicker: false, textScale: larger) == .compact)
+        #expect(RecordPillLayout.choose(stageWidth: 624, showsDisplayPicker: false, textScale: larger) == .regular)
     }
 
     @Test func savedRecordControlsStayInsideStage() {
