@@ -37,7 +37,51 @@ jobs:
           fi
           echo "Reusing successful CI run $run_id for $GITHUB_SHA."
 
+  legacy-release:
+    if: github.ref_name == 'v0.2.0'
+    needs: verify-ci
+    runs-on: xcode-27
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Ensure Metal toolchain
+        run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      - name: Build Cutmark.app
+        env:
+          CUTMARK_RELEASE: ${{ github.ref_name }}
+          CUTMARK_ADHOC_SIGN: '1'
+          CUTMARK_REQUIRE_EMBED: '1'
+          SKIP_TESTS: '1'
+        run: ./build.sh
+      - name: Verify semantic search helper
+        run: test -x build.noindex/Cutmark.app/Contents/MacOS/cutmark-embed
+      - name: Package Cutmark.dmg
+        run: ./scripts/package-dmg.sh
+      - name: Verify legacy release artifact
+        run: |
+          test -f build.noindex/Cutmark.dmg
+          codesign --verify --deep --strict build.noindex/Cutmark.app
+          hdiutil verify -quiet build.noindex/Cutmark.dmg
+          codesign --verify build.noindex/Cutmark.dmg
+          shasum -a 256 build.noindex/Cutmark.dmg
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          test -f "$notes"
+          gh release create "${GITHUB_REF_NAME}" \
+            build.noindex/Cutmark.dmg \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Cutmark ${GITHUB_REF_NAME#v}" \
+            --notes-file "$notes"
+
   release:
+    if: github.ref_name != 'v0.2.0'
     needs: verify-ci
     runs-on: xcode-27
     timeout-minutes: 90
