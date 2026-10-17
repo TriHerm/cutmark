@@ -149,10 +149,12 @@ KC="$HOME/Library/Keychains/cutmark-signing.keychain-db"
 if [[ "${CUTMARK_DEVELOPER_SIGN:-}" == 1 || "${CUTMARK_VERIFY_NATIVE_SET:-}" == 1 ]]; then
   unexpected="$(find "$APP/Contents" -type f -print0 | while IFS= read -r -d '' f; do
     file -b "$f" 2>/dev/null | grep -q 'Mach-O' || continue
-    case "$f" in
-      "$APP/Contents/MacOS/Cutmark"|"$APP/Contents/MacOS/cutmark-faces"|"$APP/Contents/MacOS/cutmark-embed") ;;
-      *) printf '%s\n' "$f" ;;
-    esac
+    if [[ "$f" == "$APP/Contents/MacOS/Cutmark" \
+       || "$f" == "$APP/Contents/MacOS/cutmark-faces" \
+       || "$f" == "$APP/Contents/MacOS/cutmark-embed" ]]; then
+      continue
+    fi
+    printf '%s\n' "$f"
   done)"
   [[ -z "$unexpected" ]] || { echo "Unexpected nested Mach-O must get an explicit signing rule:" >&2; echo "$unexpected" >&2; exit 1; }
 fi
