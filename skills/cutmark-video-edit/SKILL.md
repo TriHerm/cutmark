@@ -29,8 +29,10 @@ time in a chat; `get_rules area=edit,thumbnail` gives them all. A rule the user 
 2. **Edit the keeper** (the starred take). No star: ask which take. Do not pick one yourself.
    A recording made outside Cutmark (phone, QuickTime, a download): add it with `import_take`
    first. Never edit `session.json` by hand.
-3. **Camera + screen takes:** both files of one take share a number. Both carry the mic, so
-   line them up by their audio if they drift.
+3. **Capture sources:** a take may have camera only, screen only, or camera + screen under the same
+   take number. Never assume the camera file exists. For paired captures, compare the separate
+   `startedAt` timestamps (camera uses first video frames where supported) and verify actual
+   audio/visual alignment; macOS 15.0/15.1 camera timestamps remain approximate.
 4. **`stills/` and `assets/` belong to the user.** Read them, never write there. `stills/` holds
    frames the user saved from a take: try them first for the thumbnail.
 5. **Style:** call `get_library session=<session>` before you design captions, a thumbnail or a
@@ -67,6 +69,23 @@ next version from that file, not from memory.
 Times in `over`, `music` and `sfx` are seconds of the cut; a `cover` adds its 0.1 s by itself. Music and
 sound effects come from `list_music` (`@library/...` paths). `get_edit_recipe` shows any version's
 recipe and the versions before it.
+
+## Edit segments from the timeline
+
+When the user requests a split, trim, reorder, duplicate, or deletion in an existing published edit,
+use `plan_timeline_edit` with the exact published `base` and ordered `actions`. An action has `op` and
+the zero-based `index` **in the cut list after previous actions**. `split` uses `at`, `trim` uses
+`in`/`out` (seconds in the original source), and `move` uses `to`. This tool is **read-only**:
+inspect its returned source-to-output spans and warnings before calling `render_edit` with its
+`render_edit` arguments. A render is a candidate, not a published version: inspect the video,
+audio and checks, then call `publish_edit` only when the user accepts it.
+
+The app's timeline is also an unpublished, recoverable draft. Its player still displays the
+**last published render** until a new candidate has been rendered; do not claim that moving a
+segment immediately changes that preview. Never overwrite the user's source takes or edit recipes.
+For a screen edit, `suggest_auto_zooms` is read-only; new zooms must be explicitly accepted and
+applied through `apply_auto_zooms`. `suggest_smart_speed` is planner-only: it does not render speed
+changes yet.
 
 ## Cut a talking-head video
 
