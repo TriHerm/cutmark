@@ -53,11 +53,13 @@ final class TimelineEditorPlayback: ObservableObject {
     init() {
         observer = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.08, preferredTimescale: 600),
                                                   queue: .main) { [weak self] point in
-            guard let self else { return }
-            // Never publish an old media clock while the timeline already shows a new cut.
-            guard !self.loading else { return }
-            if point.seconds.isFinite { self.time = max(0, point.seconds) }
-            self.playing = self.player.rate != 0
+            // AVPlayer's callback is Sendable even when queue=.main; enter actor isolation
+            // explicitly rather than mutating @Published UI state from that callback.
+            Task { @MainActor [weak self] in
+                guard let self, !self.loading else { return }
+                if point.seconds.isFinite { self.time = max(0, point.seconds) }
+                self.playing = self.player.rate != 0
+            }
         }
     }
 
@@ -84,8 +86,8 @@ final class TimelineEditorPlayback: ObservableObject {
             guard !Task.isCancelled else { return }
             player.replaceCurrentItem(with: item)
             let restored = min(max(0, oldTime), max(0, draft.duration - 1 / max(1, draft.fps)))
-            player.seek(to: CMTime(seconds: restored, preferredTimescale: 600), toleranceBefore: .zero,
-                        toleranceAfter: .zero)
+            await player.seek(to: CMTime(seconds: restored, preferredTimescale: 600),
+                              toleranceBefore: .zero, toleranceAfter: .zero)
             time = restored
             if wasPlaying { player.play() }
         } catch {

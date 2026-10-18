@@ -25,7 +25,7 @@ enum TimelineMedia {
     /// Resolve a recipe segment through session.json first, because named takes no longer have the
     /// canonical `take-03-camera.mov` spelling. The fallback keeps recovered older sessions useful.
     static func sourceURL(for segment: EditTimelineDraft.Segment, session: URL) -> URL? {
-        guard let kind = TakeKind(rawValue: segment.kind) else { return nil }
+        guard segment.take > 0, let kind = TakeKind(rawValue: segment.kind) else { return nil }
         let root = session.standardizedFileURL.resolvingSymlinksInPath()
         let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
         let metadata = root.appending(path: "session.json").standardizedFileURL.resolvingSymlinksInPath()
@@ -45,7 +45,9 @@ enum TimelineMedia {
         // session.json is authoritative when it has this take. If that exact file is gone or
         // unsafe, show no media rather than silently substituting a stale canonical recording.
         if let take { return resolvedSource(take.file) }
-        return resolvedSource(SessionDoc.takeFile(number: segment.take, slug: "", kind: kind))
+        // SessionDoc.takeFile is @MainActor due to the UI-facing session model. This pure
+        // fallback runs safely off-main, with the exact same two-digit canonical spelling.
+        return resolvedSource(String(format: "take-%02d-%@.mov", segment.take, kind.rawValue))
     }
 
     /// Sample evenly across a source interval. Work is capped even when a caller accidentally asks
