@@ -110,12 +110,22 @@ struct Storyboard: Decodable, Equatable {
 
     /// One visible take tile per recording, including screen-only, with paired camera preferred.
     nonisolated static func shotTakes(_ all: [Take]) -> [String: [Take]] {
-        Dictionary(grouping: all.filter { $0.shot != nil }, by: { $0.shot! })
-            .mapValues { shots in
-                Dictionary(grouping: shots, by: \.number).values
-                    .compactMap { pair in pair.first(where: { $0.kind == .camera }) ?? pair.first }
-                    .sorted { $0.number < $1.number }
+        var grouped: [String: [Int: Take]] = [:]
+        for take in all {
+            guard let shot = take.shot else { continue }
+            var numbers = grouped[shot] ?? [:]
+            if let previous = numbers[take.number] {
+                if previous.kind != .camera && take.kind == .camera { numbers[take.number] = take }
+            } else {
+                numbers[take.number] = take
             }
+            grouped[shot] = numbers
+        }
+        var result: [String: [Take]] = [:]
+        for (shot, numbers) in grouped {
+            result[shot] = numbers.values.sorted { $0.number < $1.number }
+        }
+        return result
     }
 
     /// Not every supported chat provider exposes installed skills the same way. Give all of them
