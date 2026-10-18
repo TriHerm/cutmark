@@ -30,6 +30,13 @@ struct ScreenRecorderTests {
         #expect(ScreenMovieWriter.isNewerVideoPTS(CMTime(seconds: 2.01, preferredTimescale: 600), than: last))
     }
 
+    @Test func captureClockKeepsFirstFrameOffsetIndependentOfCallbackDelay() throws {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let camera = try #require(CaptureClock.date(hostTime: 100, now: base.addingTimeInterval(10), currentHostTime: 110))
+        let screen = try #require(CaptureClock.date(hostTime: 100.18, now: base.addingTimeInterval(11), currentHostTime: 111))
+        #expect(abs(screen.timeIntervalSince(camera) - 0.18) < 0.000_1)
+    }
+
     @Test func screenPreviewDownscalesWithoutChangingDisplayAspect() {
         let size = ScreenRecorder.previewSize(contentRect: CGRect(x: 0, y: 0, width: 1512, height: 982), scale: 2)
         #expect(size.width == 640)

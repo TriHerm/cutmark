@@ -13,4 +13,18 @@ struct CameraBitrateTests {
     @Test func recordingFragmentsBoundTheCrashTail() {
         #expect(CameraRecorder.fragmentSeconds == 2)
     }
+
+    @Test func captureModesChooseOnlyTheirRequestedSources() {
+        #expect(Mode.camera.recordsCamera && !Mode.camera.recordsScreen)
+        #expect(!Mode.screen.recordsCamera && Mode.screen.recordsScreen)
+        #expect(Mode.cameraScreen.recordsCamera && Mode.cameraScreen.recordsScreen)
+        #expect(Mode.cameraScreen.captureMode(cameraPaused: true) == .screen)
+        #expect(Mode.cameraScreen.captureMode(cameraPaused: false) == .cameraScreen)
+        #expect(Mode.camera.captureMode(cameraPaused: true) == .camera)
+    }
+
+    @Test func screenOnlyKeepsTheCameraHeldWhileRecording() {
+        #expect(AppModel.holdsCamera(idle: false, preview: false, seen: true, recordsCamera: false))
+        #expect(AppModel.holdsCamera(idle: true, preview: false, seen: true, recordsCamera: false))
+    }
 }

@@ -3,6 +3,16 @@ import AppKit
 import CoreGraphics
 import ScreenCaptureKit
 
+/// Converts capture host timestamps to the wall clock stored in Take.startedAt. Camera and screen
+/// use this same mapping so their offset reflects media timing instead of callback latency.
+enum CaptureClock {
+    static func date(hostTime: Double, now: Date = Date(),
+                     currentHostTime: Double = CMClockGetTime(CMClockGetHostTimeClock()).seconds) -> Date? {
+        guard hostTime.isFinite, currentHostTime.isFinite else { return nil }
+        return now.addingTimeInterval(hostTime - currentHostTime)
+    }
+}
+
 /// A low-rate screen preview has its own observable object so new frames redraw only the thumbnail,
 /// not every Record view that already observes ScreenRecorder for devices and selection.
 final class ScreenPreviewFeed: ObservableObject {
@@ -170,6 +180,7 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
     }
 
     func startRecording(to url: URL, micID: String?) async throws -> Start {
+        try Task.checkCancellation()
         // AppModel normally stops the viewfinder when phase leaves idle. Also stop it here so a
         // delayed SwiftUI update can never leave a screenshot request overlapping the real stream.
         await MainActor.run { self.setPreviewing(false) }
@@ -207,21 +218,26 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         pendingVisualStates.removeAll(keepingCapacity: true)
         visualStateSink = nil
         startFiller()
-        return try await withCheckedThrowingContinuation { cont in
-            lock.withLock { startCont = cont }
-            stream.startCapture { [weak self] error in
-                if let error {
-                    self?.captureQueue.async { [weak self] in self?.movie?.cancel() }
-                    self?.resumeStart(.failure(error))
-                    return
-                }
-                // A stream that starts without producing a frame is not a recording. Do not invent a
-                // start time: AppModel will stop both recorders and keep the recovery claim coherent.
-                DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
-                    self?.resumeStart(.failure(RecorderError("Screen recording did not receive a frame.")))
+        try Task.checkCancellation()
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Start, Error>) in
+                lock.withLock { startCont = cont }
+                stream.startCapture { [weak self] error in
+                    if let error {
+                        self?.captureQueue.async { [weak self] in self?.movie?.cancel() }
+                        self?.resumeStart(.failure(error))
+                        return
+                    }
+                    // A stream that starts without producing a frame is not a recording. Do not invent a
+                    // start time: AppModel will stop both recorders and keep the recovery claim coherent.
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
+                        self?.resumeStart(.failure(RecorderError("Screen recording did not receive a frame.")))
+                    }
                 }
             }
-        }
+        }, onCancel: {
+            self.cancelStart()
+        })
     }
 
     func stopRecording() async {
@@ -289,11 +305,21 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         let timer = DispatchSource.makeTimerSource(queue: captureQueue)
         timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(50))
         timer.setEventHandler { [weak self] in
-            guard let movie = self?.movie else { return }
-            try? movie.appendFiller(at: CMClockGetTime(CMClockGetHostTimeClock()))
+            guard let self, let movie = self.movie else { return }
+            if let started = try? movie.appendFiller(at: CMClockGetTime(CMClockGetHostTimeClock())) {
+                self.noteStarted(started)
+            }
         }
         timer.resume()
         filler = timer
+    }
+
+    private func noteStarted(_ started: (date: Date, hostTime: Double)?) {
+        guard let started else { return }
+        visualOriginHost = started.hostTime
+        if let displayID = recordingDisplayID {
+            resumeStart(.success(Start(date: started.date, hostTime: started.hostTime, displayID: displayID)))
+        }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -304,13 +330,10 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
                 switch Self.frameStatus(sampleBuffer) {
                 case .complete:
                     let started = try movie.appendScreen(sampleBuffer)
-                    if let started { visualOriginHost = started.hostTime }
+                    noteStarted(started)
                     noteVisualState(active: true, at: sampleBuffer.presentationTimeStamp)
-                    if let started, let displayID = recordingDisplayID {
-                        resumeStart(.success(Start(date: started.date, hostTime: started.hostTime, displayID: displayID)))
-                    }
                 case .idle:
-                    try movie.appendFiller(at: sampleBuffer.presentationTimeStamp)
+                    noteStarted(try movie.appendFiller(at: sampleBuffer.presentationTimeStamp))
                     noteVisualState(active: false, at: sampleBuffer.presentationTimeStamp)
                 default:
                     break
@@ -420,45 +443,48 @@ final class ScreenMovieWriter {
         }
     }
 
-    /// Returns both clocks once, when the first real screen frame starts the movie. The PTS is the
-    /// canonical source origin for input events; Date remains session metadata for camera/screen sync.
+    /// Returns both clocks once, for the first screen buffer that actually enters the movie. The PTS
+    /// is the canonical source origin for input events; Date remains metadata for camera/screen sync.
     func appendScreen(_ sampleBuffer: CMSampleBuffer) throws -> (date: Date, hostTime: Double)? {
         guard sampleBuffer.isValid, CMSampleBufferDataIsReady(sampleBuffer), let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
         let pts = sampleBuffer.presentationTimeStamp
         guard pts.isNumeric else { return nil }
-        var began: (date: Date, hostTime: Double)?
         if !started {
             guard writer.startWriting() else { throw failure("Screen recording could not start") }
             writer.startSession(atSourceTime: pts)
             startPTS = pts
             started = true
-            began = (Date(), pts.seconds)
         }
-        guard !isFinishing else { return began }
+        guard !isFinishing else { return nil }
         // A synthetic filler can run before a delayed SCStream callback. Keep the delayed frame as
         // the picture for future filler, but never feed AVAssetWriter a PTS at or behind one already
         // appended: AVAssetWriter may accept that append and only fail later at finishWriting().
         lastPixelBuffer = pixelBuffer
-        guard Self.isNewerVideoPTS(pts, than: lastVideoPTS) else { return began }
-        if video.isReadyForMoreMediaData {
-            if !videoBuffers.append(pixelBuffer, withPresentationTime: pts), writer.status == .failed {
-                throw failure("Screen video encoder stopped")
-            }
-            lastVideoPTS = pts
+        guard Self.isNewerVideoPTS(pts, than: lastVideoPTS), video.isReadyForMoreMediaData else { return nil }
+        guard videoBuffers.append(pixelBuffer, withPresentationTime: pts) else {
+            if writer.status == .failed { throw failure("Screen video encoder stopped") }
+            return nil
         }
-        return began
+        let first = lastVideoPTS == nil
+        lastVideoPTS = pts
+        guard first, let date = CaptureClock.date(hostTime: pts.seconds) else { return nil }
+        return (date, pts.seconds)
     }
 
     /// Advance a static screen with the last picture. This keeps the video aligned with the mic and
     /// gives AVAssetWriter samples from which it can close its ~2 s movie fragments.
-    func appendFiller(at pts: CMTime) throws {
-        guard started, !isFinishing, pts.isNumeric, let lastPixelBuffer else { return }
-        if let lastVideoPTS, CMTimeCompare(pts, lastVideoPTS + CMTime(seconds: 0.75, preferredTimescale: 600)) <= 0 { return }
-        guard video.isReadyForMoreMediaData else { return }
-        if !videoBuffers.append(lastPixelBuffer, withPresentationTime: pts), writer.status == .failed {
-            throw failure("Screen video encoder stopped")
+    func appendFiller(at pts: CMTime) throws -> (date: Date, hostTime: Double)? {
+        guard started, !isFinishing, pts.isNumeric, let lastPixelBuffer else { return nil }
+        if let lastVideoPTS, CMTimeCompare(pts, lastVideoPTS + CMTime(seconds: 0.75, preferredTimescale: 600)) <= 0 { return nil }
+        guard video.isReadyForMoreMediaData else { return nil }
+        guard videoBuffers.append(lastPixelBuffer, withPresentationTime: pts) else {
+            if writer.status == .failed { throw failure("Screen video encoder stopped") }
+            return nil
         }
+        let first = lastVideoPTS == nil
         lastVideoPTS = pts
+        guard first, let date = CaptureClock.date(hostTime: pts.seconds) else { return nil }
+        return (date, pts.seconds)
     }
 
     func appendMicrophone(_ sampleBuffer: CMSampleBuffer) throws {
