@@ -38,7 +38,8 @@ jobs:
           echo "Reusing successful CI run $run_id for $GITHUB_SHA."
 
   legacy-release:
-    if: github.ref_name == 'v0.2.0'
+    # Explicit, version-scoped ad-hoc distribution; never weaken the protected production gate.
+    if: github.ref_name == 'v0.2.0' || github.ref_name == 'v0.3.0'
     needs: verify-ci
     runs-on: xcode-27
     timeout-minutes: 20
@@ -64,10 +65,15 @@ jobs:
       - name: Verify legacy release artifact
         run: |
           test -f build.noindex/Cutmark.dmg
+          app=build.noindex/Cutmark.app
+          plist="$app/Contents/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :ReleaseTag' "$plist")" = "$GITHUB_REF_NAME"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "${GITHUB_REF_NAME#v}"
+          codesign --display --verbose=4 "$app" 2>&1 | grep -F 'Signature=adhoc'
           codesign --verify --deep --strict build.noindex/Cutmark.app
           hdiutil verify -quiet build.noindex/Cutmark.dmg
           codesign --verify build.noindex/Cutmark.dmg
-          shasum -a 256 build.noindex/Cutmark.dmg
+          (cd build.noindex && shasum -a 256 Cutmark.dmg > SHA256SUMS && shasum -a 256 -c SHA256SUMS)
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -76,12 +82,13 @@ jobs:
           test -f "$notes"
           gh release create "${GITHUB_REF_NAME}" \
             build.noindex/Cutmark.dmg \
+            build.noindex/SHA256SUMS \
             --repo "${GITHUB_REPOSITORY}" \
             --title "Cutmark ${GITHUB_REF_NAME#v}" \
             --notes-file "$notes"
 
   release:
-    if: github.ref_name != 'v0.2.0'
+    if: github.ref_name != 'v0.2.0' && github.ref_name != 'v0.3.0'
     needs: verify-ci
     runs-on: xcode-27
     timeout-minutes: 90
