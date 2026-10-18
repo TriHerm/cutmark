@@ -170,7 +170,7 @@ private struct TimelineEditorWorkspace: View {
             }
             Spacer()
             if let draft {
-                Text("\(draft.segments.count) clips  ·  \(SessionDoc.clock(draft.duration))")
+                Text("\(draft.segments.count) clips  ·  \(SessionDoc.clock(draft.duration)) output")
                     .font(Theme.mono(12)).foregroundStyle(Theme.muted)
             }
             Button("Reset") { reset() }.disabled(draft?.actions.isEmpty ?? true)
@@ -287,35 +287,54 @@ private struct TimelineEditorWorkspace: View {
             .background(Theme.paper)
             Divider()
             if let draft {
-                ScrollView(.horizontal) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ruler(draft)
-                        ZStack(alignment: .topLeading) {
-                            VStack(spacing: 0) {
-                                HStack(spacing: 0) {
-                                    ForEach(Array(draft.segments.enumerated()), id: \.offset) { index, clip in
-                                        clipView(clip, index: index)
+                GeometryReader { viewport in
+                    let canvasWidth = TimelineCanvasLayout.width(
+                        outputDuration: draft.duration, pixelsPerSecond: pixelsPerSecond,
+                        viewportWidth: viewport.size.width)
+                    ScrollView(.horizontal) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ruler
+                            ZStack(alignment: .topLeading) {
+                                VStack(spacing: 0) {
+                                    HStack(spacing: 0) {
+                                        ForEach(Array(draft.segments.enumerated()), id: \.offset) { index, clip in
+                                            clipView(clip, index: index)
+                                        }
                                     }
-                                }
-                                .frame(height: 74)
-                                HStack(spacing: 0) {
-                                    ForEach(Array(draft.segments.enumerated()), id: \.offset) { index, clip in
-                                        TimelineWaveformBar(amplitudes: media.waveform[index] ?? [],
-                                                            tint: Theme.accent)
-                                            .frame(width: width(for: clip), height: 46)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .frame(height: 74)
+                                    .background(Theme.surface.opacity(0.5))
+                                    HStack(spacing: 0) {
+                                        ForEach(Array(draft.segments.enumerated()), id: \.offset) { index, clip in
+                                            TimelineWaveformBar(amplitudes: media.waveform[index] ?? [],
+                                                                tint: Theme.accent)
+                                                .frame(width: width(for: clip), height: 46)
+                                        }
                                     }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .frame(height: 46)
+                                    .background(Theme.paper)
                                 }
-                                .background(Theme.paper)
-                                .frame(height: 46)
+                                // This boundary marks the render end; the remainder is only
+                                // empty workspace for scrolling/zooming, never exported media.
+                                Rectangle().fill(Theme.muted.opacity(0.65))
+                                    .frame(width: 1, height: 120)
+                                    .offset(x: CGFloat(draft.duration * pixelsPerSecond))
+                                    .allowsHitTesting(false)
+                                Text("End of output")
+                                    .font(Theme.sans(10, .medium))
+                                    .foregroundStyle(Theme.muted)
+                                    .offset(x: CGFloat(draft.duration * pixelsPerSecond) + 10, y: 5)
+                                    .allowsHitTesting(false)
+                                Rectangle().fill(Theme.danger).frame(width: 2, height: 120)
+                                    .offset(x: CGFloat(playback.time) * pixelsPerSecond)
+                                    .allowsHitTesting(false)
                             }
-                            Rectangle().fill(Theme.danger).frame(width: 2, height: 120)
-                                .offset(x: CGFloat(playback.time) * pixelsPerSecond)
-                                .allowsHitTesting(false)
                         }
+                        .frame(width: canvasWidth, alignment: .leading)
                     }
-                    .frame(width: max(700, CGFloat(draft.duration * pixelsPerSecond)), alignment: .leading)
+                    .scrollIndicators(.visible)
                 }
-                .scrollIndicators(.visible)
             } else {
                 Text(problem ?? "Opening source video…")
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted).frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -324,10 +343,10 @@ private struct TimelineEditorWorkspace: View {
         .frame(height: 218)
     }
 
-    private func ruler(_ draft: EditTimelineDraft) -> some View {
+    private var ruler: some View {
         Canvas { context, size in
             let step = pixelsPerSecond >= 60 ? 1.0 : pixelsPerSecond >= 35 ? 2.0 : 5.0
-            let count = min(6000, Int((draft.duration / step).rounded(.up)))
+            let count = Int(min(6000, (Double(size.width) / pixelsPerSecond / step).rounded(.down)))
             for n in 0...count {
                 let seconds = Double(n) * step
                 let x = CGFloat(seconds * pixelsPerSecond)
@@ -343,9 +362,11 @@ private struct TimelineEditorWorkspace: View {
         .background(Theme.canvas)
         .contentShape(Rectangle())
         .gesture(DragGesture(minimumDistance: 0).onChanged { move in
-            playback.seek(Double(move.location.x) / pixelsPerSecond, duration: duration)
+            playback.seek(TimelineCanvasLayout.seekTime(
+                at: move.location.x, pixelsPerSecond: pixelsPerSecond, outputDuration: duration),
+                duration: duration)
         })
-        .help("Click or drag to move playhead")
+        .help("Drag to seek. Empty timeline after the output boundary is not exported.")
     }
 
     private func clipView(_ segment: EditTimelineDraft.Segment, index: Int) -> some View {
