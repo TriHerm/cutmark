@@ -1028,10 +1028,10 @@ struct DetailView: View {
     /// on the Script tab instead.
     private var recordOnly: Bool { rightTab == "script" }
 
-    /// The screen viewfinder is useful only while preparing a camera + screen take. It stops before
+    /// The screen viewfinder is useful while preparing a screen take. It stops before
     /// warming/countdown so the real recording owns ScreenCaptureKit by itself.
     private var screenPreviewWanted: Bool {
-        recordOnly && cover == nil && app.mode == .cameraScreen && !app.isRecording
+        recordOnly && cover == nil && app.mode.recordsScreen && !app.isRecording
             && library.selectedSessions.count <= 1 && screenPreviewVisible
     }
 
@@ -1217,7 +1217,20 @@ struct DetailView: View {
                                 } else if Asset.kind(of: url) == .image {
                                     StillView(url: url)
                                 } else if Asset.kind(of: url) == .video, let commentRoot {
-                                    ReviewPlayer(url: url, session: commentRoot).id(url)
+                                    if rightTab == "assets", let doc = library.current,
+                                       url.deletingLastPathComponent().standardizedFileURL.path
+                                        == doc.url.appending(path: "edits").standardizedFileURL.path {
+                                        // Give editing its own space below the review player: overlaying the
+                                        // timeline obscured the seek bar and review controls on short stages.
+                                        VStack(spacing: 0) {
+                                            ReviewPlayer(url: url, session: commentRoot).id(url)
+                                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                            EditTimelinePanel(video: url, doc: doc)
+                                                .padding(.horizontal, 12).padding(.bottom, 10)
+                                        }
+                                    } else {
+                                        ReviewPlayer(url: url, session: commentRoot).id(url)
+                                    }
                                 } else if PDFStage.handles(url) {
                                     PDFStage(url: url).id(url)
                                 } else if DocReview.handles(url), let commentRoot {
@@ -1254,14 +1267,6 @@ struct DetailView: View {
                             .help("Close the file and show the whole list")
                             .padding(12)
                             .transition(.opacity)
-                        }
-                    }
-                    .overlay(alignment: .bottom) {
-                        if rightTab == "assets", let video = app.preview, let doc = library.current,
-                           video.deletingLastPathComponent().lastPathComponent == "edits" {
-                            EditTimelinePanel(video: video, doc: doc)
-                                .padding(.horizontal, 16).padding(.bottom, 18)
-                                .transition(.opacity)
                         }
                     }
                     .overlay {
@@ -1307,8 +1312,7 @@ struct DetailView: View {
     @ViewBuilder private var overlay: some View {
         switch app.phase {
         case .warming:
-            // The camera comes on (it was off on the Storyboard): the picture shows, then the count.
-            Text(app.warmedUp ? "Get ready" : "Camera starting…")
+            Text(app.warmedUp ? "Get ready" : app.mode.recordsCamera ? "Camera starting…" : "Preparing screen…")
                 .font(Theme.sans(15, .semibold)).foregroundStyle(.white)
                 .padding(.horizontal, 16).padding(.vertical, 9)
                 .background(.black.opacity(0.45), in: .capsule)
@@ -1324,7 +1328,7 @@ struct DetailView: View {
         case .starting, .finishing:
             ProgressView().controlSize(.large).tint(.white)
         case .idle:
-            if let p = camera.permissionProblem {
+            if let p = camera.permissionProblem, app.mode.recordsCamera {
                 Text(p).foregroundStyle(.white).padding().background(Theme.stage.opacity(0.9), in: .rect(cornerRadius: Theme.radius))
             } else if let e = app.error {
                 Text(e).foregroundStyle(.white).padding().background(Theme.accent, in: .rect(cornerRadius: Theme.radius))
@@ -1353,11 +1357,16 @@ struct CameraCard: View {
     private var ratio: CGFloat { camera.orientation == .vertical ? 9.0 / 16.0 : 16.0 / 9.0 }
     private var next: Int { (doc?.meta.takes.map(\.number).max() ?? 0) + 1 }
     private var rolling: Bool { if case .recording = app.phase { return true }; return false }
+    private var cameraVisible: Bool { app.mode.recordsCamera && !camera.paused }
 
     var body: some View {
         ZStack {
-                CameraPreview(session: camera.session, fill: true, rotation: camera.previewRotation, corner: Self.corner)
-                if camera.paused {
+                if app.mode.recordsCamera {
+                    CameraPreview(session: camera.session, fill: true, rotation: camera.previewRotation, corner: Self.corner)
+                } else {
+                    Theme.stage
+                }
+                if !cameraVisible {
                     resting.transition(.opacity)
                 } else if !app.lightsDown {
                     FrameMarks().stroke(.white.opacity(0.6), style: StrokeStyle(lineWidth: 2, lineCap: .round))
@@ -1365,7 +1374,7 @@ struct CameraCard: View {
                 }
             }
             .clipShape(shape)
-            .background(shape.fill(Theme.stage).shadow(color: app.lightsDown ? .black.opacity(0.5) : Theme.shadow.opacity(camera.paused ? 0 : 2.2),
+            .background(shape.fill(Theme.stage).shadow(color: app.lightsDown ? .black.opacity(0.5) : Theme.shadow.opacity(cameraVisible ? 2.2 : 0),
                                                        radius: app.lightsDown ? 30 : 22, y: app.lightsDown ? 0 : 10))
             .overlay(shape.strokeBorder(rolling ? Theme.danger.opacity(0.7) : Theme.border.opacity(app.lightsDown ? 0 : 1),
                                         lineWidth: rolling ? 2 : 1))
@@ -1387,10 +1396,11 @@ struct CameraCard: View {
                 .contentTransition(.opacity)
             Spacer(minLength: 8)
             if let accessory, !rolling, !app.lightsDown { accessory.transition(.opacity) }
-            if app.mode == .cameraScreen {
-                Label("Screen too", systemImage: "display").font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.muted)
+            if app.mode.recordsScreen {
+                Label(app.mode == .screen || camera.paused ? "Screen only" : "Screen too", systemImage: "display")
+                    .font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.muted)
             }
-            if !camera.formatDescription.isEmpty && !camera.paused {
+            if !camera.formatDescription.isEmpty && cameraVisible {
                 Text(camera.formatDescription).font(Theme.mono(11)).foregroundStyle(Theme.faint).lineLimit(1)
             }
         }
@@ -1407,7 +1417,8 @@ struct CameraCard: View {
                     LiveMascot(mood: .idle, size: 44)
                     Color.clear.frame(height: 0)
                 }
-                Text("Camera off").font(Theme.sans(15, .semibold)).foregroundStyle(Theme.ink)
+                Text(app.mode == .screen ? "Screen only" : "Camera off")
+                    .font(Theme.sans(15, .semibold)).foregroundStyle(Theme.ink)
                     .lineLimit(1).minimumScaleFactor(0.8)
                 // A narrow card drops the icon before the words wrap.
                 ViewThatFits(in: .horizontal) {
@@ -1420,8 +1431,18 @@ struct CameraCard: View {
     }
 
     private func turnOn(_ label: some View) -> some View {
-        Button { camera.setPaused(false) } label: { label.lineLimit(1).fixedSize() }
+        Button {
+            if app.mode == .screen { app.mode = .cameraScreen }
+            camera.setPaused(false)
+        } label: {
+            Group {
+                if app.mode == .screen { Label("Add camera", systemImage: "video") }
+                else { label }
+            }
+            .lineLimit(1).fixedSize()
+        }
             .buttonStyle(AccentButtonStyle(kind: .quiet))
+            .disabled(app.isRecording)
     }
 }
 
@@ -1745,7 +1766,7 @@ struct RecordPill: View {
     var body: some View {
         let _ = Perf.body("RecordPill")
         GeometryReader { stage in
-            let displayPicker = app.mode == .cameraScreen && screen.displays.count > 1
+            let displayPicker = app.mode.recordsScreen && screen.displays.count > 1
             let layout = RecordPillLayout.choose(stageWidth: stage.size.width, showsDisplayPicker: displayPicker,
                                                  textScale: TextSize.shared.factor)
             let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
@@ -1805,9 +1826,9 @@ struct RecordPill: View {
                           help: "Switch between vertical and horizontal. \(camera.formatDescription)") {
                     camera.orientation = camera.orientation == .vertical ? .horizontal : .vertical
                 }
-                iconGhost(app.mode == .cameraScreen ? "display.fill" : "display",
-                          label: app.mode == .cameraScreen ? "Screen on" : "Screen off",
-                          help: "Record your screen too, as a second file") {
+                iconGhost(app.mode.recordsScreen ? "display.fill" : "display",
+                          label: app.mode == .screen ? "Screen only" : app.mode.recordsScreen ? "Screen on" : "Screen off",
+                          help: "Include or exclude the selected screen in recording") {
                     toggleScreen()
                 }
                 deviceButton
@@ -1829,13 +1850,13 @@ struct RecordPill: View {
                       help: "Switch between vertical and horizontal. \(camera.formatDescription)") {
                     camera.orientation = camera.orientation == .vertical ? .horizontal : .vertical
                 }
-                ghost(app.mode == .cameraScreen ? "Screen on" : "Screen off",
-                      help: "Record your screen too, as a second file") {
+                ghost(app.mode == .screen ? "Screen only" : app.mode.recordsScreen ? "Screen on" : "Screen off",
+                      help: "Include or exclude the selected screen in recording") {
                     toggleScreen()
                 }
                 // With two displays, which one records shows here, not only in the device panel
                 // (Jeremy could not find it, 2026-10-06). Compact keeps that choice in Devices.
-                if app.mode == .cameraScreen && screen.displays.count > 1 {
+                if app.mode.recordsScreen && screen.displays.count > 1 {
                     let screen = screen
                     CutmarkMenuButton(help: "Which display to record") {
                         HStack(spacing: 4) {
@@ -1875,7 +1896,15 @@ struct RecordPill: View {
         .accessibilityLabel("Camera, microphone and screen")
         .cutmarkMenu(isPresented: $devices, width: 270) { [app, camera, screen] in
             DevicePanel.rows(mode: app.mode, camera: camera, screen: screen,
-                             previewVisible: screenPreviewVisible) {
+                             previewVisible: screenPreviewVisible,
+                             selectMode: { chosen in
+                                app.mode = chosen
+                                if chosen.recordsScreen {
+                                    screen.setPreviewing(screenPreviewVisible, requestPermission: screenPreviewVisible)
+                                } else {
+                                    screen.setPreviewing(false)
+                                }
+                             }) {
                 screenPreviewVisible.toggle()
                 screen.setPreviewing(screenPreviewVisible, requestPermission: screenPreviewVisible)
             }
@@ -1883,7 +1912,7 @@ struct RecordPill: View {
     }
 
     private func toggleScreen() {
-        let on = app.mode != .cameraScreen
+        let on = !app.mode.recordsScreen
         app.mode = on ? .cameraScreen : .camera
         screen.setPreviewing(on, requestPermission: on)
     }
@@ -2009,7 +2038,14 @@ struct LivePill: View {
 enum DevicePanel {
     @MainActor @MenuBuilder
     static func rows(mode: Mode, camera: CameraRecorder, screen: ScreenRecorder,
-                     previewVisible: Bool, togglePreview: @escaping () -> Void) -> [MenuItem] {
+                     previewVisible: Bool, selectMode: @escaping (Mode) -> Void,
+                     togglePreview: @escaping () -> Void) -> [MenuItem] {
+        MenuLabel("Recording sources")
+        for source in Mode.allCases {
+            MenuButton(source.rawValue, icon: source == .camera ? "video" : source == .screen ? "display" : "rectangle.on.rectangle",
+                       checked: mode == source) { selectMode(source) }
+        }
+        MenuDivider()
         MenuLabel("Camera")
         for d in camera.videoDevices {
             MenuButton(d.localizedName, icon: "video", checked: d.uniqueID == camera.videoID) { camera.chooseVideo(d.uniqueID) }
@@ -2024,7 +2060,7 @@ enum DevicePanel {
                 .padding(.leading, 33).padding(.trailing, 10).padding(.vertical, 4)
                 .help("Microphone level")
         }
-        if mode == .cameraScreen {
+        if mode.recordsScreen {
             MenuLabel("Screen")
             for d in screen.displays {
                 MenuButton(d.name, icon: "display", checked: d.id == screen.displayID) { screen.displayID = d.id }

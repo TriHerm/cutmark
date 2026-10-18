@@ -28,6 +28,53 @@ struct EditTimelineDraft: Codable {
 
     var duration: Double { segments.reduce(0) { $0 + $1.duration } }
 
+    /// The lead is the optional cover duration; cut ranges remain on each original source clock.
+    func outputStart(of index: Int, lead: Double = 0) -> Double? {
+        guard (0..<segments.count).contains(index), lead.isFinite, lead >= 0 else { return nil }
+        return lead + segments.prefix(index).reduce(0) { $0 + $1.duration }
+    }
+
+    /// Half-open mapping from the rendered video playhead into one specific clip occurrence.
+    func sourcePoint(atOutput seconds: Double, lead: Double = 0) -> (index: Int, source: Double)? {
+        guard seconds.isFinite, lead.isFinite, lead >= 0 else { return nil }
+        let local = seconds - lead
+        guard local >= 0 && local < duration else { return nil }
+        var cursor = 0.0
+        for (index, segment) in segments.enumerated() {
+            if local < cursor + segment.duration {
+                return (index, segment.start + local - cursor)
+            }
+            cursor += segment.duration
+        }
+        return nil
+    }
+
+    /// The player shows the immutable published cut until a new render exists. Translate its
+    /// playhead against source, not the reordered draft, or split would target the wrong footage.
+    func originalSourcePoint(atOutput seconds: Double, lead: Double = 0)
+        -> (take: Int, kind: String, source: Double)? {
+        let original = Self(base: base, fps: fps, source: source, segments: source)
+        guard let point = original.sourcePoint(atOutput: seconds, lead: lead) else { return nil }
+        let segment = source[point.index]
+        return (segment.take, segment.kind, point.source)
+    }
+
+    /// Seek to a selected draft segment's source position in the *original* published video.
+    /// Duplicate occurrences reuse their existing first matching source preview until rendering.
+    func originalOutputStart(of index: Int, lead: Double = 0) -> Double? {
+        guard segments.indices.contains(index), lead.isFinite, lead >= 0 else { return nil }
+        let selected = segments[index]
+        var elapsed = lead
+        for original in source {
+            if original.take == selected.take && original.kind == selected.kind
+                && original.start <= selected.start && selected.start < original.end {
+                return elapsed + selected.start - original.start
+            }
+            elapsed += original.duration
+        }
+        return nil
+    }
+
     static func read(video: URL) -> EditTimelineDraft? {
         guard let r = EditRecipe.read(video),
               let cuts = r["cut"] as? [[String: Any]],
@@ -77,6 +124,18 @@ struct EditTimelineDraft: Codable {
             return false
         }
         actions.append(action)
+        return true
+    }
+
+    /// Undo reconstructs from the immutable recipe's cut, not a possibly rounded intermediate.
+    mutating func undoLast() -> Bool {
+        guard !actions.isEmpty else { return false }
+        let history = actions.dropLast()
+        var replay = Self(base: base, fps: fps, source: source, segments: source)
+        for action in history {
+            guard replay.apply(action) else { return false }
+        }
+        self = replay
         return true
     }
 

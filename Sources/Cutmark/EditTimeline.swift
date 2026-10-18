@@ -44,7 +44,7 @@ struct EditTimelinePanel: View {
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text("\(seg.kind == "screen" ? "Screen" : "Camera") · Take \(seg.take)")
                                             .lineLimit(1)
-                                        Text("\(SessionDoc.clock(seg.start)) – \(SessionDoc.clock(seg.end))")
+                                        Text("At \(SessionDoc.clock(startTime(i))) · \(String(format: "%.1f", seg.duration))s")
                                             .font(Theme.mono(10))
                                     }
                                     .font(Theme.sans(11, .medium))
@@ -76,6 +76,11 @@ struct EditTimelinePanel: View {
                             timelineButton("trash", "Remove segment", draft.segments.count > 1) {
                                 apply(.init(op: "remove", index: selected)); choose(max(0, selected - 1))
                             }
+                            timelineButton("arrow.uturn.backward", "Undo last change", !draft.actions.isEmpty) {
+                                undo()
+                            }
+                            Button("Split at playhead") { splitAtPlayhead() }
+                                .buttonStyle(AccentButtonStyle(kind: .quiet))
                             Text("Source seconds").font(Theme.sans(10)).foregroundStyle(Theme.faint)
                             timeField("In", $trimIn)
                             timeField("Out", $trimOut)
@@ -91,7 +96,8 @@ struct EditTimelinePanel: View {
                         if let problem {
                             Text(problem).font(Theme.sans(11)).foregroundStyle(Theme.danger).lineLimit(1)
                         } else {
-                            Text("Original remains unchanged until a new version passes review.")
+                            Text(draft.actions.isEmpty ? "Edit non-destructively; sources stay unchanged."
+                                 : "Preview plays the original; render your draft to see the reordered edit.")
                                 .font(Theme.sans(11)).foregroundStyle(Theme.faint)
                         }
                         Spacer(minLength: 8)
@@ -120,8 +126,7 @@ struct EditTimelinePanel: View {
 
     private func startTime(_ index: Int) -> Double {
         guard let draft else { return 0 }
-        return draft.segments.prefix(index).reduce(0) { $0 + $1.duration }
-            + (EditRecipe.cover(for: video)?.seconds ?? 0)
+        return draft.outputStart(of: index, lead: EditRecipe.cover(for: video)?.seconds ?? 0) ?? 0
     }
 
     private func choose(_ index: Int) {
@@ -131,7 +136,9 @@ struct EditTimelinePanel: View {
         trimIn = String(format: "%.3f", seg.start)
         trimOut = String(format: "%.3f", seg.end)
         splitAt = String(format: "%.3f", (seg.start + seg.end) / 2)
-        app.player?.seek(to: CMTime(seconds: startTime(selected), preferredTimescale: 600))
+        if let original = draft.originalOutputStart(of: selected, lead: EditRecipe.cover(for: video)?.seconds ?? 0) {
+            app.player?.seek(to: CMTime(seconds: original, preferredTimescale: 600))
+        }
     }
 
     private func apply(_ action: EditTimelineDraft.Action) {
@@ -160,11 +167,46 @@ struct EditTimelinePanel: View {
         choose(selected)
     }
 
+    private func splitAtPlayhead() {
+        guard let draft, let played = app.player?.currentTime().seconds,
+              let point = draft.originalSourcePoint(atOutput: played, lead: EditRecipe.cover(for: video)?.seconds ?? 0)
+        else {
+            problem = "Move the playhead into the cut timeline, then split."
+            return
+        }
+        let index = draft.segments.indices.contains(selected)
+            && draft.segments[selected].take == point.take
+            && draft.segments[selected].kind == point.kind
+            && draft.segments[selected].start <= point.source
+            && point.source < draft.segments[selected].end
+            ? selected
+            : draft.segments.firstIndex { $0.take == point.take && $0.kind == point.kind
+                && $0.start <= point.source && point.source < $0.end }
+        guard let index else {
+            problem = "The playhead is outside your current draft. Select a kept segment."
+            return
+        }
+        apply(.init(op: "split", index: index, at: point.source))
+        choose(index)
+    }
+
     private func reset() {
         EditTimelineDraft.clear(video: video, session: doc.url)
         draft = EditTimelineDraft.read(video: video)
         choose(0)
         problem = nil
+    }
+
+    private func undo() {
+        guard var copy = draft, copy.undoLast() else { return }
+        do {
+            try copy.save(video: video, session: doc.url)
+            draft = copy
+            choose(min(selected, copy.segments.count - 1))
+            problem = nil
+        } catch {
+            problem = "Could not save the timeline draft. Check the session folder."
+        }
     }
 
     private func render() {

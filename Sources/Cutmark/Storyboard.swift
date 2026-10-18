@@ -111,7 +111,10 @@ struct Storyboard: Decodable, Equatable {
     /// Not every supported chat provider exposes installed skills the same way. Give all of them
     /// the concrete MCP workflow, so storyboard generation never depends on Claude's Skill tool.
     nonisolated static let request = "Storyboard this video using the cutmark MCP. Read get_session first; "
-        + "write or update script.md with create_session/update_session, then call set_storyboard with "
+        + "preserve the existing script.md and any existing shots unless changes are actually needed "
+        + "for this request. Use update_session only if the script needs to be written or revised, "
+        + "never create a duplicate session. "
+        + "then call set_storyboard with "
         + "the full ordered shots (hook, main, end), each with say, do, sketch and stable ids. "
         + "Use cutmark-storyboard skill instructions if available, but do not require a Skill tool. "
         + "An image generation API key is optional: always save the text storyboard even when sketches "

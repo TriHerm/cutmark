@@ -102,10 +102,18 @@ private struct CaptureControlBar: View {
                 Image(systemName: "mic.fill")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Theme.muted)
-                LevelMeter(meter: camera.meter, track: Theme.border, fill: Theme.live)
-                    .frame(width: 58, height: 4)
-                    .clipShape(Capsule())
-                    .help("Microphone level")
+                if app.mode.captureMode(cameraPaused: camera.paused).recordsCamera {
+                    LevelMeter(meter: camera.meter, track: Theme.border, fill: Theme.live)
+                        .frame(width: 58, height: 4)
+                        .clipShape(Capsule())
+                        .help("Microphone level")
+                } else {
+                    // ScreenCaptureKit owns the microphone in screen-only mode. The camera meter
+                    // is stopped, so showing it at zero would falsely imply silent audio.
+                    Text(camera.audioID == nil ? "Mic off" : "Mic selected")
+                        .font(Theme.sans(10.5, .medium)).foregroundStyle(Theme.muted)
+                        .help("Screen recording handles the microphone. Live level is unavailable.")
+                }
             }
 
             HStack(spacing: 6) {

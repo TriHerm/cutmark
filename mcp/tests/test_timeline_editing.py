@@ -5,7 +5,9 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))
 import cutmark_mcp as t  # noqa: E402
+from test_edit_recipe import Base  # noqa: E402
 
 
 class TimelineEditing(unittest.TestCase):
@@ -61,6 +63,32 @@ class TimelineEditing(unittest.TestCase):
         self.assertEqual(out["timeline"]["duration"], 6.0)
         self.assertTrue(any(n == "plan_timeline_edit" for n, *_ in t.TOOLS))
         self.assertIn("plan_timeline_edit", t.READ_ONLY)
+
+
+class TimelineRenderIntegration(Base):
+    def test_plan_changes_generate_checked_unpublished_render_without_overwriting_base(self):
+        self.add_take(1, secs=6)
+        first = self.render(recipe={"name": "demo", "cut": [
+            {"take": 1, "in": 0.5, "out": 2.5},
+            {"take": 1, "in": 3.5, "out": 5.5},
+        ]})
+        published = t.t_publish_edit({"session": self.s, "render": first["job"], "note": "Initial cut."})
+        recipe_path = os.path.join(self.s, published["recipe"])
+        with open(recipe_path, "rb") as f:
+            original = f.read()
+        actions = [{"op": "split", "index": 0, "at": 1.5},
+                   {"op": "remove", "index": 1},
+                   {"op": "move", "index": 1, "to": 0},
+                   {"op": "trim", "index": 1, "out": 1.25}]
+        plan = t.t_plan_timeline_edit({"session": self.s, "base": "demo", "actions": actions})
+        self.assertEqual(plan["timeline"]["duration"], 2.75)
+        render_args = dict(plan["render_edit"], wait_s=120)
+        output = t.t_render_edit(render_args)
+        self.assertEqual(output.get("status"), "done", output)
+        self.assertTrue(os.path.isfile(os.path.join(self.s, output["render"])))
+        with open(recipe_path, "rb") as f:
+            self.assertEqual(f.read(), original)
+        self.assertEqual(plan["segments"], 2)
 
 
 if __name__ == "__main__":
