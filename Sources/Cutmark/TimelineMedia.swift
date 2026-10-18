@@ -190,6 +190,37 @@ final class TimelineMediaCache: ObservableObject {
 
     private var loadTask: Task<Void, Never>?
     private var generation = 0
+    /// A clip may move to another output index without changing its source samples. Cache by
+    /// exact source interval and file identity, never by the transient timeline index.
+    struct SampleKey: Hashable {
+        let source: URL
+        let modificationDate: Date?
+        let size: Int64
+        let start: Double
+        let end: Double
+        let imageCount: Int
+        let sampleCount: Int
+
+        init?(source: URL, segment: EditTimelineDraft.Segment, imageCount: Int, sampleCount: Int) {
+            guard segment.start.isFinite, segment.end.isFinite, segment.end > segment.start,
+                  imageCount > 0, sampleCount > 0,
+                  let attributes = try? FileManager.default.attributesOfItem(atPath: source.path),
+                  let size = attributes[.size] as? NSNumber else { return nil }
+            self.source = source.standardizedFileURL
+            self.modificationDate = attributes[.modificationDate] as? Date
+            self.size = size.int64Value
+            self.start = segment.start
+            self.end = segment.end
+            self.imageCount = imageCount
+            self.sampleCount = sampleCount
+        }
+    }
+
+    private struct Samples {
+        let thumbnails: [TimelineThumbnail]
+        let waveform: [CGFloat]
+    }
+    private var retained: [SampleKey: Samples] = [:]
 
     func load(draft: EditTimelineDraft, session: URL) async {
         cancel()
@@ -205,12 +236,21 @@ final class TimelineMediaCache: ObservableObject {
 
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
+            var visibleKeys = Set<SampleKey>()
             for (index, segment) in draft.segments.enumerated() {
                 guard !Task.isCancelled, self.generation == mine else { return }
                 guard let url = TimelineMedia.sourceURL(for: segment, session: session) else { continue }
                 let share = segment.duration / totalDuration
                 let imageCount = min(12, max(1, Int(ceil(Double(thumbnailBudget) * share))))
                 let sampleCount = min(512, max(24, Int(ceil(Double(waveformBudget) * share))))
+                guard let key = SampleKey(source: url, segment: segment,
+                                          imageCount: imageCount, sampleCount: sampleCount) else { continue }
+                visibleKeys.insert(key)
+                if let cached = self.retained[key] {
+                    if !cached.thumbnails.isEmpty { self.thumbnails[index] = cached.thumbnails }
+                    if !cached.waveform.isEmpty { self.waveform[index] = cached.waveform }
+                    continue
+                }
 
                 async let sampledThumbnails = try? TimelineMedia.thumbnails(
                     url: url, start: segment.start, end: segment.end, imageCount: imageCount)
@@ -219,9 +259,18 @@ final class TimelineMediaCache: ObservableObject {
                 let (frames, amplitudes) = await (sampledThumbnails, sampledWaveform)
 
                 guard !Task.isCancelled, self.generation == mine else { return }
+                // A failed decode may be transient. Do not negative-cache an error as if it
+                // were a valid silent track or an intentionally empty image request.
+                if let frames, let amplitudes {
+                    self.retained[key] = Samples(thumbnails: frames, waveform: amplitudes)
+                }
                 if let frames, !frames.isEmpty { self.thumbnails[index] = frames }
                 if let amplitudes, !amplitudes.isEmpty { self.waveform[index] = amplitudes }
             }
+            // Keep at most the samples used by the current edit, not every past trim revision.
+            // Reordering reuses everything; changing a source range invalidates only that range.
+            guard !Task.isCancelled, self.generation == mine else { return }
+            self.retained = self.retained.filter { visibleKeys.contains($0.key) }
         }
         loadTask = task
         await task.value

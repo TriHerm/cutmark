@@ -3,6 +3,29 @@ import Testing
 @testable import Cutmark
 
 struct TimelineMediaTests {
+    @MainActor @Test func sampleCacheReusesReorderedClipsButInvalidatesEditsAndSourceChanges() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appending(path: "cutmark-media-cache-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let source = folder.appending(path: "take-01-screen.mov")
+        try Data("original".utf8).write(to: source)
+        let first = EditTimelineDraft.Segment(take: 1, kind: "screen", start: 0, end: 4)
+        let moved = EditTimelineDraft.Segment(take: 1, kind: "screen", start: 0, end: 4)
+        let trimmed = EditTimelineDraft.Segment(take: 1, kind: "screen", start: 1, end: 4)
+        func key(_ segment: EditTimelineDraft.Segment, images: Int = 4) throws -> TimelineMediaCache.SampleKey {
+            try #require(TimelineMediaCache.SampleKey(source: source, segment: segment,
+                                                      imageCount: images, sampleCount: 80))
+        }
+        let originalKey = try key(first)
+        #expect(try key(moved) == originalKey) // same take placed at another timeline index
+        #expect(try key(trimmed) != originalKey)
+        #expect(try key(first, images: 8) != originalKey)
+
+        try Data("replaced different size".utf8).write(to: source)
+        #expect(try key(first) != originalKey) // never show stale frames for replaced footage
+    }
+
     @Test func sourceURLFollowsRenamedTakeFromSessionMetadata() throws {
         let session = FileManager.default.temporaryDirectory
             .appending(path: "cutmark-timeline-media-\(UUID().uuidString)")

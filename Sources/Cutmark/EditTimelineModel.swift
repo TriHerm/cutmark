@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 /// An unpublished, recoverable timeline plan. Published recipes are immutable; the render agent
@@ -8,7 +9,46 @@ struct EditTimelineDraft: Codable {
         let kind: String
         var start: Double
         var end: Double
-        var duration: Double { max(0, end - start) }
+        /// Derived from the real take file when the editor opens. These three values deliberately
+        /// stay out of the saved draft JSON: they are a cache of renderer clock facts, not edits.
+        var sourceFPS: Double? = nil
+        var renderSourceStart: Double? = nil
+        var renderDuration: Double? = nil
+
+        var sourceDuration: Double { max(0, end - start) }
+        /// Timeline/output duration, matching render_cut once the source clock is known.
+        var duration: Double { renderDuration ?? sourceDuration }
+
+        init(take: Int, kind: String, start: Double, end: Double, sourceFPS: Double? = nil) {
+            self.take = take
+            self.kind = kind
+            self.start = start
+            self.end = end
+            self.sourceFPS = sourceFPS
+        }
+
+        private enum CodingKeys: String, CodingKey { case take, kind, start, end }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            take = try c.decode(Int.self, forKey: .take)
+            kind = try c.decode(String.self, forKey: .kind)
+            start = try c.decode(Double.self, forKey: .start)
+            end = try c.decode(Double.self, forKey: .end)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(take, forKey: .take)
+            try c.encode(kind, forKey: .kind)
+            try c.encode(start, forKey: .start)
+            try c.encode(end, forKey: .end)
+        }
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.take == rhs.take && lhs.kind == rhs.kind
+                && lhs.start == rhs.start && lhs.end == rhs.end
+        }
     }
 
     struct Action: Codable, Equatable {
@@ -31,11 +71,100 @@ struct EditTimelineDraft: Codable {
     /// agent to create an edit; rendering it later starts a *new* named recipe.
     var isRawTake: Bool { base.hasPrefix("takes/") }
 
+    init(base: String, fps: Double, source: [Segment], segments: [Segment], actions: [Action] = []) {
+        self.base = base
+        self.fps = fps
+        self.source = Self.withRenderClock(source)
+        self.segments = Self.withRenderClock(segments)
+        self.actions = actions
+        recomputeRenderClock()
+    }
+
     static func fromTake(_ take: Take, duration: Double, fps: Double = 30) -> Self? {
         guard duration.isFinite, fps.isFinite, fps > 0, duration >= 2 / fps,
               !take.file.contains("/"), !take.file.contains("..") else { return nil }
-        let segment = Segment(take: take.number, kind: take.kind.rawValue, start: 0, end: duration)
+        guard let sourceFPS = rendererFPS(observed: fps) else { return nil }
+        let segment = Segment(take: take.number, kind: take.kind.rawValue,
+                              start: 0, end: duration, sourceFPS: sourceFPS)
         return Self(base: "takes/" + take.file, fps: fps, source: [segment], segments: [segment])
+    }
+
+    struct RendererSpan: Equatable {
+        let sourceStart: Double
+        let declaredSourceEnd: Double
+        let outputDuration: Double
+    }
+
+    /// Same integer-FPS normalization as take_clock when the renderer's source rate is already
+    /// known (raw takes pass their capture rate directly).
+    static func rendererFPS(observed: Double) -> Double? {
+        guard observed.isFinite, observed > 0 else { return nil }
+        if observed >= 24, observed <= 60 {
+            return observed.rounded(.toNearestOrEven)
+        }
+        let choices = [24.0, 25.0, 30.0, 50.0, 60.0]
+        return choices.min { abs($0 - observed) < abs($1 - observed) }
+    }
+
+    /// Resolve the real source clock from AVFoundation without confusing VFR average/nominal rate
+    /// with ffprobe's `r_frame_rate`. For Cutmark media, `1 / minFrameDuration` matches that rate;
+    /// e.g. a VFR file may report nominal 30 fps while minFrameDuration is 1/60 and ffprobe r=60.
+    /// If the minimum duration cannot establish the renderer's 24...60 r_frame_rate branch, fail
+    /// closed instead of substituting nominalFrameRate and silently shifting the edit clock.
+    static func rendererFPS(nominalFrameRate: Double, minFrameDuration: CMTime) -> Double? {
+        guard minFrameDuration.isNumeric, minFrameDuration > .zero else { return nil }
+        let seconds = minFrameDuration.seconds
+        guard seconds.isFinite, seconds > 0 else { return nil }
+        let rFrameRate = 1 / seconds
+        guard rFrameRate.isFinite, rFrameRate >= 24, rFrameRate <= 60 else { return nil }
+        let resolved = rFrameRate.rounded(.toNearestOrEven)
+        guard resolved >= 24, resolved <= 60 else { return nil }
+        _ = nominalFrameRate // diagnostic input only; never substitute an average/nominal VFR rate.
+        return resolved
+    }
+
+    /// Port of mcp/cutmark_mcp.py:rounded_cut_for_render. Python round() is ties-to-even, not
+    /// Swift's default away-from-zero rounding. Endpoints snap on the source's clock; output length
+    /// then snaps on the first *current cut source* clock with the renderer's two-frame minimum.
+    static func rendererSpan(segment: Segment, sourceFPS: Double, outputFPS: Double) -> RendererSpan? {
+        guard segment.start.isFinite, segment.end.isFinite, segment.end > segment.start,
+              sourceFPS.isFinite, sourceFPS > 0, outputFPS.isFinite, outputFPS > 0 else { return nil }
+        let a = (segment.start * sourceFPS).rounded(.toNearestOrEven) / sourceFPS
+        let b = (segment.end * sourceFPS).rounded(.toNearestOrEven) / sourceFPS
+        let frames = max(2, Int(((b - a) * outputFPS).rounded(.toNearestOrEven)))
+        return RendererSpan(sourceStart: a, declaredSourceEnd: b,
+                            outputDuration: Double(frames) / outputFPS)
+    }
+
+    /// Recompute only derived renderer facts. Raw source in/out stay untouched so trim/extend,
+    /// draft persistence and the eventual render request keep the user's exact source decisions.
+    private mutating func recomputeRenderClock() {
+        segments = Self.withRenderClock(segments)
+    }
+
+    private static func withRenderClock(_ input: [Segment]) -> [Segment] {
+        guard let firstFPS = input.first?.sourceFPS,
+              firstFPS.isFinite, firstFPS > 0 else {
+            return input.map {
+                var s = $0
+                s.renderSourceStart = nil
+                s.renderDuration = nil
+                return s
+            }
+        }
+        return input.map { segment in
+            var s = segment
+            guard let sourceFPS = segment.sourceFPS,
+                  let span = rendererSpan(segment: segment, sourceFPS: sourceFPS, outputFPS: firstFPS)
+            else {
+                s.renderSourceStart = nil
+                s.renderDuration = nil
+                return s
+            }
+            s.renderSourceStart = span.sourceStart
+            s.renderDuration = span.outputDuration
+            return s
+        }
     }
 
     enum TrimEdge { case start, end }
@@ -47,7 +176,7 @@ struct EditTimelineDraft: Codable {
                                   bounds: Segment, pixelsPerSecond: Double, fps: Double) -> Double {
         guard proposedPixels.isFinite, pixelsPerSecond.isFinite, pixelsPerSecond > 0,
               fps.isFinite, fps > 0 else { return 0 }
-        let shrink = max(0, (segment.duration - 2 / fps) * pixelsPerSecond)
+        let shrink = max(0, (segment.sourceDuration - 2 / fps) * pixelsPerSecond)
         switch edge {
         case .start:
             return min(shrink, max((bounds.start - segment.start) * pixelsPerSecond, proposedPixels))
@@ -70,7 +199,8 @@ struct EditTimelineDraft: Codable {
                 let span = bounds[a.index]
                 guard at >= span.start, at <= span.end else { return nil }
                 bounds[a.index].end = at
-                bounds.insert(.init(take: span.take, kind: span.kind, start: at, end: span.end), at: a.index + 1)
+                bounds.insert(.init(take: span.take, kind: span.kind, start: at, end: span.end,
+                                    sourceFPS: span.sourceFPS), at: a.index + 1)
             case "duplicate": bounds.insert(bounds[a.index], at: a.index + 1)
             case "move":
                 guard let to = a.to, bounds.indices.contains(to) else { return nil }
@@ -132,7 +262,7 @@ struct EditTimelineDraft: Codable {
         var cursor = 0.0
         for (index, segment) in segments.enumerated() {
             if local < cursor + segment.duration {
-                return (index, segment.start + local - cursor)
+                return (index, (segment.renderSourceStart ?? segment.start) + local - cursor)
             }
             cursor += segment.duration
         }
@@ -158,7 +288,8 @@ struct EditTimelineDraft: Codable {
         for original in source {
             if original.take == selected.take && original.kind == selected.kind
                 && original.start <= selected.start && selected.start < original.end {
-                return elapsed + selected.start - original.start
+                return elapsed + (selected.renderSourceStart ?? selected.start)
+                    - (original.renderSourceStart ?? original.start)
             }
             elapsed += original.duration
         }
@@ -171,17 +302,49 @@ struct EditTimelineDraft: Codable {
               let frame = r["frame"] as? [String: Any],
               let fps = (frame["fps"] as? NSNumber)?.doubleValue, fps > 0,
               !cuts.isEmpty else { return nil }
+        guard let session = sessionRoot(for: video),
+              let meta = Store.readMeta(session) else { return nil }
+        let root = session.standardizedFileURL.resolvingSymlinksInPath()
+        let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        var clocks: [String: Double] = [:]
         var segments: [Segment] = []
         for g in cuts {
             guard let take = (g["take"] as? NSNumber)?.intValue,
                   let start = (g["in"] as? NSNumber)?.doubleValue,
                   let end = (g["out"] as? NSNumber)?.doubleValue,
-                  end > start else { return nil }
-            segments.append(Segment(take: take, kind: g["kind"] as? String ?? "camera",
-                                    start: start, end: end))
+                  end > start,
+                  let kind = TakeKind(rawValue: g["kind"] as? String ?? "camera")
+            else { return nil }
+            let key = "\(take):\(kind.rawValue)"
+            let sourceFPS: Double
+            if let cached = clocks[key] {
+                sourceFPS = cached
+            } else {
+                guard let sourceTake = meta.takes.last(where: { $0.number == take && $0.kind == kind }),
+                      !sourceTake.file.isEmpty else { return nil }
+                let sourceURL = root.appending(path: sourceTake.file).standardizedFileURL.resolvingSymlinksInPath()
+                guard sourceURL.path.hasPrefix(rootPath),
+                      FileManager.default.fileExists(atPath: sourceURL.path),
+                      let track = AVURLAsset(url: sourceURL).tracks(withMediaType: .video).first,
+                      let resolved = rendererFPS(nominalFrameRate: Double(track.nominalFrameRate),
+                                                 minFrameDuration: track.minFrameDuration)
+                else { return nil }
+                clocks[key] = resolved
+                sourceFPS = resolved
+            }
+            segments.append(Segment(take: take, kind: kind.rawValue, start: start, end: end,
+                                    sourceFPS: sourceFPS))
         }
         return EditTimelineDraft(base: "edits/" + video.lastPathComponent, fps: fps,
                                  source: segments, segments: segments)
+    }
+
+    private static func sessionRoot(for video: URL) -> URL? {
+        let folder = video.deletingLastPathComponent().standardizedFileURL
+        if folder.lastPathComponent == "edits" {
+            return folder.deletingLastPathComponent().standardizedFileURL
+        }
+        return folder
     }
 
     /// The index always refers to the list as it exists *after* all prior actions.
@@ -203,7 +366,8 @@ struct EditTimelineDraft: Codable {
             guard let at = action.at, at.isFinite,
                   at - item.start >= minDuration, item.end - at >= minDuration else { return false }
             segments[index].end = at
-            segments.insert(Segment(take: item.take, kind: item.kind, start: at, end: item.end), at: index + 1)
+            segments.insert(Segment(take: item.take, kind: item.kind, start: at, end: item.end,
+                                    sourceFPS: item.sourceFPS), at: index + 1)
         case "trim", "extend":
             let start = action.in ?? item.start, end = action.out ?? item.end
             guard start.isFinite, end.isFinite, end - start >= minDuration else { return false }
@@ -220,6 +384,7 @@ struct EditTimelineDraft: Codable {
             return false
         }
         actions.append(action)
+        recomputeRenderClock()
         return true
     }
 

@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Testing
 @testable import Cutmark
@@ -193,6 +194,74 @@ struct EditTimelineTests {
         let beforeSplit = draft.apply(.init(op: "extend", index: 0, in: 3, out: 8))
         let pastSource = draft.apply(.init(op: "extend", index: 0, in: 4, out: 11))
         #expect(!beforeSplit && !pastSource)
+    }
+
+    @Test func rendererClockMatchesPythonMixedFPSRoundingWithoutChangingSourceEdits() throws {
+        let camera = EditTimelineDraft.Segment(take: 1, kind: "camera",
+                                               start: 0.011, end: 1.019, sourceFPS: 30)
+        let screen = EditTimelineDraft.Segment(take: 2, kind: "screen",
+                                               start: 0.007, end: 1.014, sourceFPS: 60)
+        var draft = EditTimelineDraft(base: "edits/mixed-v1.mp4", fps: 30,
+                                      source: [camera, screen], segments: [camera, screen])
+
+        // Python rounded_cut_for_render for these exact inputs:
+        // camera 0...1.033333 @ 30 -> 31 frames; screen 0...1.016667 @ 60
+        // -> 30 output frames on the first/current cut source's 30 fps clock.
+        #expect(abs(draft.segments[0].duration - 31.0 / 30.0) < 0.000_000_1)
+        #expect(abs(draft.segments[1].duration - 1.0) < 0.000_000_1)
+        #expect(abs(draft.duration - 61.0 / 30.0) < 0.000_000_1)
+        #expect(abs((draft.outputStart(of: 1) ?? -1) - 31.0 / 30.0) < 0.000_000_1)
+        let second = draft.sourcePoint(atOutput: 31.0 / 30.0 + 0.5)
+        #expect(second?.index == 1)
+        #expect(abs((second?.source ?? -1) - 0.5) < 0.000_000_1)
+
+        // Renderer metadata is derived only: source decisions remain byte-for-byte the values
+        // that plan_timeline_edit/render_edit will validate.
+        #expect(draft.segments[0].start == 0.011 && draft.segments[0].end == 1.019)
+        #expect(draft.segments[1].start == 0.007 && draft.segments[1].end == 1.014)
+
+        // Reordering changes the renderer output grid because Python uses the first CURRENT cut
+        // source FPS, not recipe frame.fps. Screen-first therefore becomes a 60 fps output clock.
+        let moved = draft.apply(.init(op: "move", index: 1, to: 0))
+        #expect(moved)
+        #expect(abs(draft.segments[0].duration - 61.0 / 60.0) < 0.000_000_1)
+        #expect(abs(draft.segments[1].duration - 62.0 / 60.0) < 0.000_000_1)
+        #expect(abs(draft.duration - 123.0 / 60.0) < 0.000_000_1)
+    }
+
+    @Test func rendererFrameRateUsesMinimumFrameDurationForVFRAndFailsClosedWithoutIt() {
+        let vfr = EditTimelineDraft.rendererFPS(
+            nominalFrameRate: 30,
+            minFrameDuration: CMTime(value: 1, timescale: 60))
+        #expect(vfr == 60)
+
+        let uncertain = EditTimelineDraft.rendererFPS(
+            nominalFrameRate: 30,
+            minFrameDuration: .invalid)
+        #expect(uncertain == nil)
+    }
+
+    @Test func rendererClockMetadataIsNotPersistedAndRawTrimRulesStaySourceBased() throws {
+        let segment = EditTimelineDraft.Segment(take: 4, kind: "screen",
+                                                start: 1, end: 4, sourceFPS: 60)
+        var draft = EditTimelineDraft(base: "edits/runtime-clock-v1.mp4", fps: 30,
+                                      source: [segment], segments: [segment])
+        let encoded = try JSONEncoder().encode(draft)
+        let text = String(decoding: encoded, as: UTF8.self)
+        #expect(!text.contains("sourceFPS"))
+        #expect(!text.contains("renderSourceStart"))
+        #expect(!text.contains("renderDuration"))
+
+        let decoded = try JSONDecoder().decode(EditTimelineDraft.self, from: encoded)
+        #expect(decoded.segments[0].sourceFPS == nil)
+        #expect(decoded.segments[0].start == 1 && decoded.segments[0].end == 4)
+
+        // Runtime output length must not weaken source trim/extend validation.
+        let trimmed = draft.apply(.init(op: "trim", index: 0, in: 2, out: 3))
+        let rejectedExtend = draft.apply(.init(op: "extend", index: 0, in: 0.9, out: 3))
+        #expect(trimmed)
+        #expect(!rejectedExtend)
+        #expect(draft.segments[0].start == 2 && draft.segments[0].end == 3)
     }
 
     @Test func outwardTrimSavesAndRestoresExactActionHistory() throws {

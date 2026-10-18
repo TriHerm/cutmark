@@ -16,6 +16,8 @@ enum TimelinePlayback {
         case missingVideo(String)
         case invalidRange(take: Int, start: Double, end: Double)
         case rangeOutsideSource(take: Int, end: Double, duration: Double)
+        case unresolvedSourceFrameRate(take: Int)
+        case sourceFrameRateChanged(take: Int, expected: Double, actual: Double)
 
         var errorDescription: String? {
             switch self {
@@ -37,6 +39,10 @@ enum TimelinePlayback {
                 return String(format: "Take %d has an invalid preview range %.3f–%.3f s.", take, start, end)
             case .rangeOutsideSource(let take, let end, let duration):
                 return String(format: "Take %d is %.3f s long; the preview asks for %.3f s.", take, duration, end)
+            case .unresolvedSourceFrameRate(let take):
+                return "Take \(take) has an uncertain source frame rate, so Cutmark cannot promise an exact preview."
+            case .sourceFrameRateChanged(let take, let expected, let actual):
+                return String(format: "Take %d changed frame rate (timeline %.0f fps, source %.0f fps). Reopen the editor.", take, expected, actual)
             }
         }
     }
@@ -55,6 +61,7 @@ enum TimelinePlayback {
         let naturalSize: CGSize
         let preferredTransform: CGAffineTransform
         let audio: [(track: AVAssetTrack, range: CMTimeRange)]
+        let sourceFPS: Double
     }
 
     private struct VideoSlice {
@@ -106,6 +113,11 @@ enum TimelinePlayback {
                     throw Failure.missingVideo(take.file)
                 }
                 let (videoRange, naturalSize, preferredTransform) = try await video.load(.timeRange, .naturalSize, .preferredTransform)
+                let (nominalFrameRate, minFrameDuration) = try await video.load(.nominalFrameRate, .minFrameDuration)
+                guard let sourceFPS = EditTimelineDraft.rendererFPS(
+                    nominalFrameRate: Double(nominalFrameRate), minFrameDuration: minFrameDuration) else {
+                    throw Failure.unresolvedSourceFrameRate(take: segment.take)
+                }
                 var audio: [(AVAssetTrack, CMTimeRange)] = []
                 for track in try await asset.loadTracks(withMediaType: .audio) {
                     audio.append((track, try await track.load(.timeRange)))
@@ -113,18 +125,23 @@ enum TimelinePlayback {
                 try Task.checkCancellation()
                 source = LoadedSource(url: url, asset: asset, duration: duration, video: video,
                                       videoRange: videoRange, naturalSize: naturalSize,
-                                      preferredTransform: preferredTransform, audio: audio)
+                                      preferredTransform: preferredTransform, audio: audio,
+                                      sourceFPS: sourceFPS)
                 loaded[key] = source
             }
 
+            if let expected = segment.sourceFPS, abs(expected - source.sourceFPS) > 0.001 {
+                throw Failure.sourceFrameRateChanged(take: segment.take, expected: expected, actual: source.sourceFPS)
+            }
             let end = CMTime(seconds: segment.end, preferredTimescale: 60_000)
             // Permit only sub-frame metadata drift; never silently preview a materially shorter clip.
-            let tolerance = CMTime(seconds: 1 / max(1, draft.fps), preferredTimescale: 60_000)
+            let tolerance = CMTime(seconds: 1 / max(1, source.sourceFPS), preferredTimescale: 60_000)
             if end > source.duration + tolerance {
                 throw Failure.rangeOutsideSource(take: segment.take, end: segment.end, duration: source.duration.seconds)
             }
             requested.append((segment, source))
         }
+        guard let outputFPS = requested.first?.source.sourceFPS else { throw Failure.emptyTimeline }
 
         let composition = AVMutableComposition()
         guard let videoTrack = composition.addMutableTrack(withMediaType: .video,
@@ -137,14 +154,21 @@ enum TimelinePlayback {
 
         for (segment, source) in requested {
             try Task.checkCancellation()
-            let start = CMTime(seconds: segment.start, preferredTimescale: 60_000)
-            let duration = CMTime(seconds: segment.duration, preferredTimescale: 60_000)
+            guard let span = EditTimelineDraft.rendererSpan(segment: segment,
+                                                            sourceFPS: source.sourceFPS,
+                                                            outputFPS: outputFPS) else {
+                throw Failure.invalidRange(take: segment.take, start: segment.start, end: segment.end)
+            }
+            let start = CMTime(seconds: span.sourceStart, preferredTimescale: 60_000)
+            let duration = CMTime(seconds: span.outputDuration, preferredTimescale: 60_000)
             let wanted = CMTimeRange(start: start, duration: duration)
             let videoOverlap = CMTimeRangeGetIntersection(wanted, otherRange: source.videoRange)
             let missingVideo = CMTimeAbsoluteValue(videoOverlap.duration - duration)
-            let tolerance = CMTime(seconds: 1 / max(1, draft.fps), preferredTimescale: 60_000)
+            let tolerance = CMTime(seconds: 1 / max(1, outputFPS), preferredTimescale: 60_000)
             guard videoOverlap.duration > .zero, missingVideo <= tolerance else {
-                throw Failure.rangeOutsideSource(take: segment.take, end: segment.end, duration: source.duration.seconds)
+                throw Failure.rangeOutsideSource(take: segment.take,
+                                                 end: span.sourceStart + span.outputDuration,
+                                                 duration: source.duration.seconds)
             }
 
             // A tiny track-start offset is represented as a tiny blank lead rather than shifting the edit clock.
@@ -187,7 +211,7 @@ enum TimelinePlayback {
         guard canvas.width > 0, canvas.height > 0 else { throw Failure.missingVideo(requested[0].source.url.lastPathComponent) }
         let videoComposition = AVMutableVideoComposition()
         videoComposition.renderSize = canvas
-        videoComposition.frameDuration = CMTime(seconds: 1 / max(1, draft.fps), preferredTimescale: 60_000)
+        videoComposition.frameDuration = CMTime(seconds: 1 / max(1, outputFPS), preferredTimescale: 60_000)
         videoComposition.instructions = slices.map { slice in
             let instruction = AVMutableVideoCompositionInstruction()
             instruction.timeRange = slice.range
