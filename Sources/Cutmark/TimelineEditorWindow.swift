@@ -302,6 +302,14 @@ private struct TimelineEditorWorkspace: View {
             Image(systemName: "film.stack").foregroundStyle(Theme.accent)
             Text(video.deletingPathExtension().lastPathComponent)
                 .font(Theme.sans(13, .semibold)).lineLimit(1).truncationMode(.middle)
+            // Smoke builds use a distinct bundle ID; surface their actual CI checkout stamp so
+            // a retained editor window from an older test cannot be mistaken for this candidate.
+            if Bundle.main.bundleIdentifier?.contains(".smoke.") == true,
+               let stamp = Bundle.main.infoDictionary?["BuildStamp"] as? String {
+                Text("SMOKE · \(stamp.prefix(7))")
+                    .font(Theme.mono(10)).foregroundStyle(Theme.muted)
+                    .help("This is a separate test build, not the installed Cutmark.app")
+            }
             Spacer()
             if let draft {
                 Text("\(draft.segments.count) clips · \(SessionDoc.clock(draft.duration))")

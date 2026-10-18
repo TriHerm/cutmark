@@ -45,8 +45,13 @@ struct CutmarkApp: App {
         .commands {
             CommandGroup(replacing: .appInfo) {
                 AboutButton()
-                Button("Check for Updates…") { Updater.shared.checkForUpdates { app.show(toast: $0) } }
+            }
+            // Keep this in its own application-menu section. Extra items inside .appInfo
+            // were not discoverable on the hardware build even though About was.
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { checkForCutmarkUpdates(app: app) }
                 if Releaser.available {
+                    Divider()
                     Button(Releaser.shared.menuTitle) { Releaser.shared.confirmAndRun { app.show(toast: $0) } }
                         .disabled(Releaser.shared.running)
                 }
@@ -136,6 +141,89 @@ struct CutmarkApp: App {
                 .tint(Theme.accent)
                 .font(Theme.body)
         }
+    }
+}
+
+/// One manual update action for both the native app menu and Cutmark's own brand menu.
+/// The normal stage toast remains useful in the main window, while this floating status stays
+/// visible when the timeline editor or another Cutmark window is in front.
+@MainActor
+func checkForCutmarkUpdates(app: AppModel) {
+    Updater.shared.checkForUpdates { message in
+        app.show(toast: message)
+        UpdateCheckFeedback.shared.show(message)
+    }
+}
+
+@MainActor
+private final class UpdateCheckFeedback {
+    static let shared = UpdateCheckFeedback()
+    private var panel: NSPanel?
+    private var dismiss: DispatchWorkItem?
+
+    private init() {}
+
+    func show(_ message: String) {
+        dismiss?.cancel()
+
+        let view = NSHostingView(rootView: UpdateCheckFeedbackBubble(message: message))
+        view.layoutSubtreeIfNeeded()
+        let fit = view.fittingSize
+        let size = CGSize(width: min(max(fit.width, 240), 520),
+                          height: min(max(fit.height, 44), 120))
+
+        let panel: NSPanel
+        if let current = self.panel {
+            panel = current
+        } else {
+            panel = NSPanel(contentRect: CGRect(origin: .zero, size: size),
+                            styleMask: [.borderless, .nonactivatingPanel],
+                            backing: .buffered, defer: false)
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.hasShadow = true
+            panel.level = .floating
+            panel.hidesOnDeactivate = false
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            self.panel = panel
+        }
+        panel.contentView = view
+        panel.setContentSize(size)
+
+        let host = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible })
+        if let host {
+            panel.setFrameOrigin(NSPoint(x: host.frame.midX - size.width / 2,
+                                         y: host.frame.maxY - size.height - 52))
+        } else if let screen = NSScreen.main {
+            panel.setFrameOrigin(NSPoint(x: screen.visibleFrame.midX - size.width / 2,
+                                         y: screen.visibleFrame.maxY - size.height - 36))
+        }
+        panel.orderFrontRegardless()
+
+        let work = DispatchWorkItem { [weak self] in self?.panel?.orderOut(nil) }
+        dismiss = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: work)
+    }
+}
+
+private struct UpdateCheckFeedbackBubble: View {
+    let message: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: message == "Checking for updates…" ? "arrow.triangle.2.circlepath" : "info.circle")
+            Text(message)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(Theme.sans(12, .medium))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: 500, alignment: .leading)
+        .background(Color(nsColor: Theme.stageNS).opacity(0.92), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+        .environment(\.colorScheme, .dark)
+        .padding(8)
     }
 }
 
@@ -1797,12 +1885,29 @@ struct RecordPill: View {
             let position = RecordPillPlacement.stagePosition(recording: recording,
                 livePosition: activeDragPoint ?? activeRestingPoint,
                 stage: stage.size, control: pillSize)
-            controls(stage: stage.size, layout: layout)
-                .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
-                    if size.width > 0, size.height > 0, size != pillSize { pillSize = size }
+            if recording {
+                // The live on-stage controller is the ONLY draggable one. It owns its own
+                // position, independent of the preparation pill below.
+                controls(stage: stage.size, layout: layout)
+                    .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                        if size.width > 0, size.height > 0, size != pillSize { pillSize = size }
+                    }
+                    .position(position)
+                    .transaction { if activeDragPoint != nil { $0.animation = nil } }
+            } else {
+                // Never position the idle red Record button through the draggable controller.
+                // An explicit bottom-aligned layout stays centered even when the stage size,
+                // device picker, SwiftUI gesture tree, or a prior take's drag state changes.
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    controls(stage: stage.size, layout: layout)
+                        .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                            if size.width > 0, size.height > 0, size != pillSize { pillSize = size }
+                        }
                 }
-                .position(position)
-                .transaction { if activeDragPoint != nil { $0.animation = nil } }
+                .padding(.bottom, 18)
+                .frame(width: stage.size.width, height: stage.size.height, alignment: .bottom)
+            }
         }
         .onChange(of: recording) { _, active in
             // Preparation always returns to its fixed location; live movement is per take.
@@ -1832,10 +1937,18 @@ struct RecordPill: View {
         .padding(.leading, 10).padding(.trailing, 10).padding(.vertical, 8)
         .frame(width: layout == .compact ? RecordPillLayout.compactWidth : nil)
         // Paper on the daylight stage; it follows the stage into the dark while you record.
-        .background(Capsule().fill(Theme.paper)
-            .shadow(color: Theme.shadow.opacity(activeDragPoint == nil ? 1.8 : 0),
-                    radius: activeDragPoint == nil ? 18 : 0, y: activeDragPoint == nil ? 6 : 0)
-            .gesture(activeDrag(stage: stage, distance: 5)))
+        .background {
+            if recording {
+                Capsule().fill(Theme.paper)
+                    .shadow(color: Theme.shadow.opacity(activeDragPoint == nil ? 1.8 : 0),
+                            radius: activeDragPoint == nil ? 18 : 0, y: activeDragPoint == nil ? 6 : 0)
+                    .gesture(activeDrag(stage: stage, distance: 5))
+            } else {
+                // No DragGesture exists anywhere on the preparation capsule.
+                Capsule().fill(Theme.paper)
+                    .shadow(color: Theme.shadow.opacity(1.8), radius: 18, y: 6)
+            }
+        }
         .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
         .foregroundStyle(Theme.ink)
         .animation(Theme.spring, value: recording)

@@ -113,6 +113,21 @@ struct RecordControlsTests {
             stage: stage, control: pill) == idle)
     }
 
+    @Test func preparationPositionIgnoresPriorDragsAndStageResizes() {
+        // Screen/window changes and a past active recording must not move the idle Record
+        // control away from the stage's bottom center. The live controller may still move.
+        for stage in [CGSize(width: 380, height: 480), CGSize(width: 640, height: 640),
+                      CGSize(width: 1080, height: 770)] {
+            let pill = CGSize(width: stage.width < 500 ? 292 : 420, height: 60)
+            let expected = CGPoint(x: stage.width / 2, y: stage.height - pill.height / 2 - 18)
+            for prior in [CGPoint(x: -200, y: -200), CGPoint(x: stage.width / 4, y: 90),
+                          CGPoint(x: 5000, y: 5000)] {
+                #expect(RecordPillPlacement.stagePosition(recording: false, livePosition: prior,
+                    stage: stage, control: pill) == expected)
+            }
+        }
+    }
+
     @MainActor
     @Test func recordingStatusDragSurfaceWinsHitTestingWithoutStealingStopButton() {
         let host = NSHostingView(rootView: HStack(spacing: 0) {

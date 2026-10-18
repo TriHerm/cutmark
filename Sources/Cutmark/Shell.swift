@@ -262,6 +262,9 @@ struct BrandMenu: View {
                     .padding(.leading, 33).padding(.trailing, 8).padding(.bottom, 4)
             }
             MenuDivider()
+            MenuButton("Check for Updates…", icon: "arrow.triangle.2.circlepath") {
+                checkForCutmarkUpdates(app: app)
+            }
             MenuButton("About Cutmark", icon: "info.circle") { openWindow(id: "about") }
         }
         .frame(maxWidth: .infinity)
