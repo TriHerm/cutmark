@@ -45,6 +45,7 @@ struct CutmarkApp: App {
         .commands {
             CommandGroup(replacing: .appInfo) {
                 AboutButton()
+                Button("Check for Updates…") { Updater.shared.checkForUpdates { app.show(toast: $0) } }
                 if Releaser.available {
                     Button(Releaser.shared.menuTitle) { Releaser.shared.confirmAndRun { app.show(toast: $0) } }
                         .disabled(Releaser.shared.running)
