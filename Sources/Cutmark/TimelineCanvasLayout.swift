@@ -62,6 +62,16 @@ enum TimelineCanvasLayout {
         return min(outputDuration, max(0, Double(x) / pixelsPerSecond))
     }
 
+    /// A playhead drag is relative to where the gesture began, not to the asynchronously
+    /// updating AVPlayer clock. Otherwise the marker jumps or runs ahead of the pointer while
+    /// seeks settle. This only maps UI geometry; it never changes the export duration.
+    static func draggedPlayheadTime(start: Double, translation: CGFloat,
+                                    pixelsPerSecond: Double, outputDuration: Double) -> Double {
+        guard start.isFinite, translation.isFinite, pixelsPerSecond.isFinite,
+              pixelsPerSecond > 0, outputDuration.isFinite, outputDuration >= 0 else { return 0 }
+        return min(outputDuration, max(0, start + Double(translation) / pixelsPerSecond))
+    }
+
     static func rulerStep(pixelsPerSecond: Double) -> Double {
         guard pixelsPerSecond.isFinite, pixelsPerSecond > 0 else { return 5 }
         // Keep major ticks roughly 56+ points apart from sub-second detail through multi-hour edits.

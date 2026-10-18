@@ -64,6 +64,22 @@ struct TimelineCanvasLayoutTests {
                                               outputDuration: 4.5) == 2.5)
     }
 
+    @Test func draggablePlayheadUsesGestureOriginNotAsynchronousPlayerUpdates() {
+        // A handle grabbed at 3.2 s must follow total pointer translation even when AVPlayer
+        // has not finished an earlier exact seek. The rendered output has no blank tail.
+        #expect(abs(TimelineCanvasLayout.draggedPlayheadTime(
+            start: 3.2, translation: 144, pixelsPerSecond: 72, outputDuration: 10) - 5.2) < 0.000001)
+        #expect(TimelineCanvasLayout.draggedPlayheadTime(
+            start: 3.2, translation: -500, pixelsPerSecond: 72, outputDuration: 10) == 0)
+        #expect(TimelineCanvasLayout.draggedPlayheadTime(
+            start: 9.5, translation: 500, pixelsPerSecond: 72, outputDuration: 10) == 10)
+        #expect(TimelineCanvasLayout.draggedPlayheadTime(
+            start: 2, translation: .nan, pixelsPerSecond: 72, outputDuration: 10) == 0)
+        // Repeated updates use the *same* start, never compound the last 80ms UI clock.
+        #expect(TimelineCanvasLayout.draggedPlayheadTime(
+            start: 3.2, translation: 72, pixelsPerSecond: 72, outputDuration: 10) == 4.2)
+    }
+
     @Test func malformedCanvasGeometryNeverProducesAnInfiniteFrame() {
         #expect(TimelineCanvasLayout.width(outputDuration: .infinity, pixelsPerSecond: 72,
                                            viewportWidth: 1100) == 0)

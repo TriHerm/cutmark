@@ -35,6 +35,14 @@ struct TimelineEditorPlaybackTests {
         let stepped = try #require(await playback.commandTime(duration: 2, pause: true))
         #expect(abs(stepped - 0.75) < 0.001)
 
+        // Dragging a visible playhead sends frequent seeks. Only the last target wins, even
+        // when an earlier AVPlayer seek completion arrives out of order.
+        playback.seek(0.30, duration: 2)
+        playback.seek(1.60, duration: 2)
+        playback.seek(0.90, duration: 2)
+        let scrubbed = try #require(await playback.commandTime(duration: 2, pause: true))
+        #expect(abs(scrubbed - 0.90) < 0.001)
+
         // When this asset does not advertise reverse playback, J takes Cutmark's safe one-second
         // fallback path. It must also base that move on the settled AVPlayer clock.
         if playback.player.currentItem?.canPlayReverse == false {

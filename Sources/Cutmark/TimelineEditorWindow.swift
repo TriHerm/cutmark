@@ -211,6 +211,7 @@ private struct TimelineEditorWorkspace: View {
     @State private var timelineViewportWidth: CGFloat = 900
     @State private var zoomToFit = true
     @State private var problem: String?
+    @State private var playheadDragStart: Double?
     @FocusState private var keyboardFocus: Bool
 
     private var duration: Double { draft?.duration ?? 0 }
@@ -477,6 +478,11 @@ private struct TimelineEditorWorkspace: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .frame(height: 34)
                                     .background(Theme.paper)
+                                    .contentShape(Rectangle())
+                                    .gesture(DragGesture(minimumDistance: 0).onChanged { event in
+                                        scrubTimeline(at: event.location.x)
+                                    })
+                                    .help("Click or drag the audio lane to move the playhead")
                                 }
                                 // This boundary marks the render end; the remainder is only
                                 // empty workspace for scrolling/zooming, never exported media.
@@ -489,12 +495,23 @@ private struct TimelineEditorWorkspace: View {
                                     .foregroundStyle(Theme.muted)
                                     .offset(x: CGFloat(draft.duration * pixelsPerSecond) + 10, y: 5)
                                     .allowsHitTesting(false)
-                                Rectangle().fill(Theme.danger).frame(width: 2, height: 96)
-                                    .offset(x: CGFloat(playback.time) * pixelsPerSecond)
+                                // A bright full-height cursor stays visible above the media,
+                                // including at time zero; trim handles remain independently hit-testable.
+                                Rectangle().fill(Theme.danger)
+                                    .frame(width: 2, height: 96)
+                                    .offset(x: CGFloat(playback.time * pixelsPerSecond))
                                     .allowsHitTesting(false)
                             }
                         }
                         .frame(width: canvasWidth, alignment: .leading)
+                        // Use stable content coordinates while the handle repositions itself
+                        // after every AVPlayer seek; view-local coordinates would jump.
+                        .coordinateSpace(name: "cutmark-timeline")
+                        .overlay(alignment: .topLeading) {
+                            // Only the ruler receives the wide grab target. Clip trim handles
+                            // below remain independently hit-testable.
+                            playheadGrabber
+                        }
                     }
                     .scrollIndicators(.visible)
                     .onAppear { updateTimelineViewport(viewport.size.width) }
@@ -527,11 +544,57 @@ private struct TimelineEditorWorkspace: View {
         .background(Theme.canvas)
         .contentShape(Rectangle())
         .gesture(DragGesture(minimumDistance: 0).onChanged { move in
-            playback.seek(TimelineCanvasLayout.seekTime(
-                at: move.location.x, pixelsPerSecond: pixelsPerSecond, outputDuration: duration),
-                duration: duration)
+            scrubTimeline(at: move.location.x)
         })
-        .help("Drag to seek. Empty timeline after the output boundary is not exported.")
+        .help("Click or drag to move the playhead. The blank tail is not exported.")
+    }
+
+    /// The red handle is deliberately wider than the 2px cursor, so it can be grabbed at
+    /// any zoom level. Its position is taken from AVPlayer (via the active scrub's target),
+    /// not from any clip/source timestamp after a trim or reorder.
+    private var playheadGrabber: some View {
+        let x = CGFloat(playback.time * pixelsPerSecond)
+        return ZStack {
+            RoundedRectangle(cornerRadius: 3)
+                .fill(Theme.danger)
+                .frame(width: 17, height: 16)
+                .overlay {
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+        }
+        .frame(width: 26, height: 26)
+        .contentShape(Rectangle())
+        .offset(x: max(0, x - 12), y: 0)
+        .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("cutmark-timeline"))
+            .onChanged { gesture in
+                if playheadDragStart == nil {
+                    playheadDragStart = playback.time
+                    playback.stop()
+                }
+                let target = TimelineCanvasLayout.draggedPlayheadTime(
+                    start: playheadDragStart ?? playback.time,
+                    translation: gesture.translation.width,
+                    pixelsPerSecond: pixelsPerSecond, outputDuration: duration)
+                playback.seek(target, duration: duration)
+            }
+            .onEnded { gesture in
+                let target = TimelineCanvasLayout.draggedPlayheadTime(
+                    start: playheadDragStart ?? playback.time,
+                    translation: gesture.translation.width,
+                    pixelsPerSecond: pixelsPerSecond, outputDuration: duration)
+                playheadDragStart = nil
+                playback.seek(target, duration: duration)
+            })
+        .accessibilityLabel("Timeline playhead")
+        .help("Drag the red handle left or right to scrub the recording")
+    }
+
+    private func scrubTimeline(at x: CGFloat) {
+        playback.stop()
+        playback.seek(TimelineCanvasLayout.seekTime(
+            at: x, pixelsPerSecond: pixelsPerSecond, outputDuration: duration), duration: duration)
     }
 
     private func clipView(_ segment: EditTimelineDraft.Segment, index: Int) -> some View {
