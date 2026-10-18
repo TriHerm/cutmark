@@ -27,7 +27,7 @@ The first-run setup can guide you through missing dependencies. No AI provider i
 
 Download `Cutmark.dmg` from the latest GitHub release, open it, and copy `Cutmark.app` to Applications.
 
-The current latest public release, Cutmark 0.2.0, uses the same ad-hoc signing channel as 0.1.1 and is not notarized. On first launch, macOS may require **System Settings → Privacy & Security → Open Anyway**. The repository also has a protected Developer ID + Apple notarization path for future production-signed releases once Apple credentials are configured.
+Cutmark 0.3.0 uses an explicitly authorized ad-hoc signing channel, like 0.2.0, and is **not notarized**. On first launch, macOS may require **System Settings → Privacy & Security → Open Anyway**. The repository retains a separate, protected Developer ID + Apple notarization path for production-signed releases once Apple credentials are configured.
 
 ## Build from source
 

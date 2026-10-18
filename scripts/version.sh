@@ -5,5 +5,5 @@ cd "$(dirname "$0")/.." || exit 0
 git rev-parse --git-dir >/dev/null 2>&1 || exit 0
 release="${CUTMARK_RELEASE:-$(git tag --points-at HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -1)}"
 version="${release#v}"
-if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then version="0.2.0"; fi
+if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then version="0.3.0"; fi
 echo "$version $(git rev-list --count HEAD)"
