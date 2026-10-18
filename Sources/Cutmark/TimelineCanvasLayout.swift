@@ -7,6 +7,16 @@ enum TimelineCanvasLayout {
     static let minimumScale = 0.05
     static let maximumScale = 1000.0
     static let defaultScale = 72.0
+    static let rulerHeight: CGFloat = 34
+    static let filmstripHeight: CGFloat = 100
+    static let waveformHeight: CGFloat = 54
+
+    /// Reserve an actual editing surface at normal and compact window sizes. The preview
+    /// receives the remaining space; resizing the window never compresses the tracks.
+    static func editorHeight(windowHeight: CGFloat) -> CGFloat {
+        guard windowHeight.isFinite, windowHeight > 0 else { return 238 }
+        return min(355, max(238, windowHeight * 0.44))
+    }
 
     /// Reelbird-style fit: use almost all of the visible lane for real media and reserve only a
     /// small visual tail. Very long media may zoom below the manual slider's comfortable range,
@@ -60,6 +70,38 @@ enum TimelineCanvasLayout {
         guard x.isFinite, pixelsPerSecond.isFinite, pixelsPerSecond > 0,
               outputDuration.isFinite, outputDuration > 0 else { return 0 }
         return min(outputDuration, max(0, Double(x) / pixelsPerSecond))
+    }
+
+    /// Scrubbing, clip taps, and handle drags share one output-frame grid. Keep the exact
+    /// end boundary reachable, even when the output is not an integral frame duration.
+    static func snappedTime(_ time: Double, fps: Double, outputDuration: Double) -> Double {
+        guard time.isFinite, fps.isFinite, fps > 0, outputDuration.isFinite,
+              outputDuration > 0 else { return 0 }
+        let clamped = min(outputDuration, max(0, time))
+        if clamped == outputDuration { return outputDuration }
+        let frames = clamped * fps
+        guard frames.isFinite else { return clamped }
+        return min(outputDuration, max(0, frames.rounded() / fps))
+    }
+
+    static func snappedSeekTime(at x: CGFloat, pixelsPerSecond: Double,
+                                outputDuration: Double, fps: Double) -> Double {
+        snappedTime(seekTime(at: x, pixelsPerSecond: pixelsPerSecond,
+                             outputDuration: outputDuration), fps: fps,
+                    outputDuration: outputDuration)
+    }
+
+    /// On a cut boundary select the clip starting at that output time. The last clip
+    /// stays selected at the end marker; blank canvas does not create phantom clips.
+    static func clipIndex(at time: Double, durations: [Double]) -> Int? {
+        guard time.isFinite, !durations.isEmpty,
+              durations.allSatisfy({ $0.isFinite && $0 > 0 }) else { return nil }
+        var end = 0.0
+        for (index, duration) in durations.enumerated() {
+            end += duration
+            if time < end || index == durations.count - 1 { return index }
+        }
+        return nil
     }
 
     /// A playhead drag is relative to where the gesture began, not to the asynchronously

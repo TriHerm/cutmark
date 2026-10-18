@@ -193,6 +193,36 @@ struct TimelinePlaybackTests {
     }
 
     @MainActor
+    @Test func sparseScreenRecordingWithOutOfRangeMinFrameRateStillPreviews() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "cutmark-preview-sparse-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = "take-02-screen.mov"
+        try await makeVariableFrameRateVideo(root.appending(path: file),
+                                             size: CGSize(width: 64, height: 48), firstFrameGap: 5)
+        let asset = AVURLAsset(url: root.appending(path: file))
+        let tracks = try await asset.loadTracks(withMediaType: .video)
+        let track = try #require(tracks.first)
+        let (nominal, minimum) = try await track.load(.nominalFrameRate, .minFrameDuration)
+        #expect(minimum.seconds <= 1.0 / 60.0)
+        let clock = try #require(EditTimelineDraft.rendererFPS(
+            nominalFrameRate: Double(nominal), minFrameDuration: minimum))
+        let duration = try await asset.load(.duration).seconds
+        let take = Take(number: 2, kind: .screen, file: file,
+                        startedAt: .distantPast, duration: duration)
+        try Store.encoder.encode(SessionMeta(title: "Sparse screen", createdAt: .distantPast, takes: [take]))
+            .write(to: root.appending(path: "session.json"), options: .atomic)
+        let draft = try #require(EditTimelineDraft.fromTake(take, duration: duration,
+                                                             fps: 60, sourceFPS: clock))
+        let item = try await TimelinePlayback.playerItem(draft: draft, session: root)
+        let previewDuration = try await item.asset.load(.duration).seconds
+        // The final sparse frame may finish slightly before nominal duration. A one-frame
+        // discrepancy is acceptable for this playable preview, unlike rejecting the file.
+        #expect(abs(previewDuration - draft.duration) <= 1 / clock + 0.001)
+        #expect(item.videoComposition != nil)
+    }
+
+    @MainActor
     @Test func publishedFrameNeverReadsRecipeFromEscapedEditsSymlink() async throws {
         let parent = FileManager.default.temporaryDirectory.appending(path: "cutmark-published-symlink-\(UUID().uuidString)")
         let session = parent.appending(path: "session")
@@ -283,7 +313,8 @@ struct TimelinePlaybackTests {
 
     /// Alternating 1/60 and 1/30 presentation gaps produces a true VFR track. AVFoundation reports
     /// an average-ish nominal rate (~40 fps) but minFrameDuration 1/60, matching ffprobe r_frame_rate=60.
-    private func makeVariableFrameRateVideo(_ url: URL, size: CGSize) async throws {
+    private func makeVariableFrameRateVideo(_ url: URL, size: CGSize,
+                                            firstFrameGap: CMTimeValue = 10) async throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
@@ -318,7 +349,7 @@ struct TimelinePlaybackTests {
             guard adaptor.append(pixel, withPresentationTime: CMTime(value: pts, timescale: 600)) else {
                 throw writer.error ?? TestFailure.writer
             }
-            pts += frame.isMultiple(of: 2) ? 10 : 20
+            pts += frame == 0 ? firstFrameGap : (frame.isMultiple(of: 2) ? 10 : 20)
         }
         input.markAsFinished()
         await withCheckedContinuation { continuation in

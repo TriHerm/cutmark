@@ -229,16 +229,56 @@ struct EditTimelineTests {
         #expect(abs(draft.duration - 123.0 / 60.0) < 0.000_000_1)
     }
 
-    @Test func rendererFrameRateUsesMinimumFrameDurationForVFRAndFailsClosedWithoutIt() {
+    @Test func rendererFrameRateMirrorsFFprobeRateAndAverageFallbackBranches() {
         let vfr = EditTimelineDraft.rendererFPS(
             nominalFrameRate: 30,
             minFrameDuration: CMTime(value: 1, timescale: 60))
         #expect(vfr == 60)
 
-        let uncertain = EditTimelineDraft.rendererFPS(
+        // A sparse ScreenCaptureKit screen recording is VFR: minFrameDuration may be invalid
+        // or imply >60fps even though the recorded movie is playable. Python take_clock uses
+        // nearest of 24/25/30/50/60 to avg_frame_rate in those cases.
+        let missingMinimum = EditTimelineDraft.rendererFPS(
             nominalFrameRate: 30,
             minFrameDuration: .invalid)
-        #expect(uncertain == nil)
+        #expect(missingMinimum == 30)
+        let overSixty = EditTimelineDraft.rendererFPS(
+            nominalFrameRate: 42.3,
+            minFrameDuration: CMTime(value: 1, timescale: 120))
+        #expect(overSixty == 50)
+        let belowTwentyFour = EditTimelineDraft.rendererFPS(
+            nominalFrameRate: 19,
+            minFrameDuration: CMTime(value: 1, timescale: 15))
+        #expect(belowTwentyFour == 24)
+        let noUsableMetadata = EditTimelineDraft.rendererFPS(
+            nominalFrameRate: 0,
+            minFrameDuration: .invalid)
+        #expect(noUsableMetadata == 30)
+        // Do not treat nominalFrameRate as the source rate when a 60fps r-frame rate exists:
+        // 30fps average for VFR 60fps stays 60, matching the renderer.
+        #expect(EditTimelineDraft.rendererFPS(nominalFrameRate: 30,
+                minFrameDuration: CMTime(value: 1, timescale: 60)) == 60)
+    }
+
+    @Test func rawScreenDraftPreservesEditorGridAndUsesActualSourceClock() throws {
+        let take = Take(number: 2, kind: .screen, file: "take-02-screen.mov",
+                        startedAt: .distantPast, duration: 5.4)
+        let raw = try #require(EditTimelineDraft.fromTake(
+            take, duration: 5.4, fps: 60, sourceFPS: 30))
+        #expect(raw.fps == 60) // existing saved draft/trim compatibility
+        #expect(raw.segments[0].sourceFPS == 30) // actual renderer source clock
+        #expect(abs(raw.duration - 5.4) < 0.0001)
+        var edited = raw
+        let didTrim = edited.apply(.init(op: "trim", index: 0, in: 0, out: 3.0))
+        #expect(didTrim)
+        let root = FileManager.default.temporaryDirectory.appending(path: "cutmark-raw-source-rate-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let video = root.appending(path: take.file)
+        try edited.save(video: video, session: root)
+        let restored = try #require(EditTimelineDraft.restore(video: video, session: root, original: raw))
+        #expect(restored.fps == 60)
+        #expect(restored.segments[0].sourceFPS == 30)
+        #expect(restored.segments[0].end == 3.0)
     }
 
     @Test func rendererClockMetadataIsNotPersistedAndRawTrimRulesStaySourceBased() throws {

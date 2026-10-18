@@ -80,10 +80,15 @@ struct EditTimelineDraft: Codable {
         recomputeRenderClock()
     }
 
-    static func fromTake(_ take: Take, duration: Double, fps: Double = 30) -> Self? {
+    static func fromTake(_ take: Take, duration: Double, fps: Double = 30,
+                         sourceFPS: Double? = nil) -> Self? {
         guard duration.isFinite, fps.isFinite, fps > 0, duration >= 2 / fps,
               !take.file.contains("/"), !take.file.contains("..") else { return nil }
-        guard let sourceFPS = rendererFPS(observed: fps) else { return nil }
+        // Keep the original editor frame grid (and saved draft compatibility) independent
+        // of the actual MOV clock. ScreenCaptureKit VFR source FPS is detected from the file;
+        // assuming every recorded screen file has 60 source frames caused preview to fail.
+        guard let sourceFPS = sourceFPS ?? rendererFPS(observed: fps),
+              sourceFPS.isFinite, sourceFPS > 0 else { return nil }
         let segment = Segment(take: take.number, kind: take.kind.rawValue,
                               start: 0, end: duration, sourceFPS: sourceFPS)
         return Self(base: "takes/" + take.file, fps: fps, source: [segment], segments: [segment])
@@ -106,21 +111,27 @@ struct EditTimelineDraft: Codable {
         return choices.min { abs($0 - observed) < abs($1 - observed) }
     }
 
-    /// Resolve the real source clock from AVFoundation without confusing VFR average/nominal rate
-    /// with ffprobe's `r_frame_rate`. For Cutmark media, `1 / minFrameDuration` matches that rate;
-    /// e.g. a VFR file may report nominal 30 fps while minFrameDuration is 1/60 and ffprobe r=60.
-    /// If the minimum duration cannot establish the renderer's 24...60 r_frame_rate branch, fail
-    /// closed instead of substituting nominalFrameRate and silently shifting the edit clock.
+    /// Match mcp/cutmark_mcp.py:take_clock's two-branch clock selection. FFprobe takes
+    /// `round(r_frame_rate)` only when its rate lies in 24...60; otherwise it chooses the
+    /// nearest 24/25/30/50/60 to `avg_frame_rate` (default 30). AVFoundation's minimum
+    /// frame duration approximates r_frame_rate and its nominal rate approximates the average.
+    ///
+    /// ScreenCaptureKit produces sparse/VFR MOVs with an invalid or >60 minimum rate. Those
+    /// files are perfectly playable; rejecting them made the entire editor preview black.
+    /// A fallback is not a fabricated source: it is the *same branch* used by the renderer.
     static func rendererFPS(nominalFrameRate: Double, minFrameDuration: CMTime) -> Double? {
-        guard minFrameDuration.isNumeric, minFrameDuration > .zero else { return nil }
-        let seconds = minFrameDuration.seconds
-        guard seconds.isFinite, seconds > 0 else { return nil }
-        let rFrameRate = 1 / seconds
-        guard rFrameRate.isFinite, rFrameRate >= 24, rFrameRate <= 60 else { return nil }
-        let resolved = rFrameRate.rounded(.toNearestOrEven)
-        guard resolved >= 24, resolved <= 60 else { return nil }
-        _ = nominalFrameRate // diagnostic input only; never substitute an average/nominal VFR rate.
-        return resolved
+        if minFrameDuration.isNumeric, minFrameDuration > .zero {
+            let seconds = minFrameDuration.seconds
+            if seconds.isFinite, seconds > 0 {
+                let rFrameRate = 1 / seconds
+                if rFrameRate.isFinite, rFrameRate >= 24, rFrameRate <= 60 {
+                    return rFrameRate.rounded(.toNearestOrEven)
+                }
+            }
+        }
+        let average = nominalFrameRate.isFinite && nominalFrameRate > 0 ? nominalFrameRate : 30.0
+        let choices = [24.0, 25.0, 30.0, 50.0, 60.0]
+        return choices.min { abs($0 - average) < abs($1 - average) }
     }
 
     /// Port of mcp/cutmark_mcp.py:rounded_cut_for_render. Python round() is ties-to-even, not

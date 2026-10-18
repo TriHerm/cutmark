@@ -4,6 +4,48 @@ import Testing
 @testable import Cutmark
 
 struct TimelineCanvasLayoutTests {
+    @Test func timelineHasReadableTracksAtCompactAndStandardWindowHeights() {
+        let tracks = TimelineCanvasLayout.rulerHeight + TimelineCanvasLayout.filmstripHeight
+            + TimelineCanvasLayout.waveformHeight
+        #expect(tracks >= 180)
+        let compact = TimelineCanvasLayout.editorHeight(windowHeight: 520)
+        let standard = TimelineCanvasLayout.editorHeight(windowHeight: 680)
+        let large = TimelineCanvasLayout.editorHeight(windowHeight: 1000)
+        #expect(compact >= tracks + 44)
+        #expect(standard > compact)
+        #expect(standard >= 295)
+        #expect(large <= 355)
+        // On a small supported window there must still be room for video preview + transport.
+        #expect(520 - 50 - 34 - compact >= 190)
+    }
+
+    @Test func rulerAndLanewiseScrubbingUseTheSameFrameGrid() {
+        let fps = 30.0
+        let duration = 5.4
+        let scale = TimelineCanvasLayout.fitPixelsPerSecond(outputDuration: duration,
+                                                            viewportWidth: 900)
+        let x = CGFloat(2.49 * scale)
+        let actual = TimelineCanvasLayout.snappedSeekTime(
+            at: x, pixelsPerSecond: scale, outputDuration: duration, fps: fps)
+        #expect(abs(actual - 2.5) < 0.000001)
+        #expect(TimelineCanvasLayout.snappedSeekTime(
+            at: 9999, pixelsPerSecond: scale, outputDuration: duration, fps: fps) == duration)
+        #expect(TimelineCanvasLayout.snappedTime(0.016, fps: 30, outputDuration: duration) == 0)
+        #expect(abs(TimelineCanvasLayout.snappedTime(
+            2.49, fps: fps, outputDuration: duration) - 2.5) < 0.000001)
+    }
+
+    @Test func selectingAtCutBoundariesAndEndUsesOutputTime() {
+        let clips = [1.25, 0.75, 3.4]
+        #expect(TimelineCanvasLayout.clipIndex(at: 0, durations: clips) == 0)
+        #expect(TimelineCanvasLayout.clipIndex(at: 1.249, durations: clips) == 0)
+        #expect(TimelineCanvasLayout.clipIndex(at: 1.25, durations: clips) == 1)
+        #expect(TimelineCanvasLayout.clipIndex(at: 2, durations: clips) == 2)
+        #expect(TimelineCanvasLayout.clipIndex(at: 5.4, durations: clips) == 2)
+        #expect(TimelineCanvasLayout.clipIndex(at: 999, durations: clips) == 2)
+        #expect(TimelineCanvasLayout.clipIndex(at: 1, durations: []) == nil)
+    }
+
     @Test func shortMediaFitsViewportWithoutFakeThirtySecondWorkspace() {
         let viewport: CGFloat = 1140
         let output = 10.46

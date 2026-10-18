@@ -217,13 +217,15 @@ private struct TimelineEditorWorkspace: View {
     private var duration: Double { draft?.duration ?? 0 }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            preview
-            clipContext
-            Divider()
-            editor
+        GeometryReader { window in
+            VStack(spacing: 0) {
+                header
+                Divider()
+                preview
+                clipContext
+                Divider()
+                editor.frame(height: TimelineCanvasLayout.editorHeight(windowHeight: window.size.height))
+            }
         }
         .background(Theme.canvas)
         .frame(minWidth: 780, minHeight: 520)
@@ -455,6 +457,9 @@ private struct TimelineEditorWorkspace: View {
                     let canvasWidth = TimelineCanvasLayout.width(
                         outputDuration: draft.duration, pixelsPerSecond: pixelsPerSecond,
                         viewportWidth: viewport.size.width)
+                    let tracksHeight = max(
+                        TimelineCanvasLayout.filmstripHeight + TimelineCanvasLayout.waveformHeight,
+                        viewport.size.height - TimelineCanvasLayout.rulerHeight)
                     ScrollView(.horizontal) {
                         VStack(alignment: .leading, spacing: 0) {
                             ruler
@@ -464,44 +469,65 @@ private struct TimelineEditorWorkspace: View {
                                         ForEach(Array(draft.segments.enumerated()), id: \.offset) { index, clip in
                                             clipView(clip, index: index)
                                         }
+                                        // Only the free tail gets this gesture. Clip bodies still
+                                        // receive selection/reorder; edge grips still receive trim.
+                                        Rectangle().fill(Theme.surface.opacity(0.5))
+                                            .contentShape(Rectangle())
+                                            .frame(maxWidth: .infinity)
+                                            .gesture(DragGesture(minimumDistance: 0).onChanged { event in
+                                                let clipPixels = CGFloat(draft.duration * pixelsPerSecond)
+                                                scrubTimeline(at: clipPixels + event.location.x)
+                                            })
                                     }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .frame(height: 62)
-                                    .background(Theme.surface.opacity(0.5))
+                                    .frame(height: TimelineCanvasLayout.filmstripHeight)
                                     HStack(spacing: 0) {
                                         ForEach(Array(draft.segments.enumerated()), id: \.offset) { index, clip in
                                             TimelineWaveformBar(amplitudes: media.waveform[index] ?? [],
                                                                 tint: Theme.accent)
-                                                .frame(width: width(for: clip), height: 34)
+                                                .frame(width: width(for: clip),
+                                                       height: TimelineCanvasLayout.waveformHeight)
                                         }
                                     }
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                    .frame(height: 34)
+                                    .frame(height: TimelineCanvasLayout.waveformHeight)
                                     .background(Theme.paper)
                                     .contentShape(Rectangle())
                                     .gesture(DragGesture(minimumDistance: 0).onChanged { event in
                                         scrubTimeline(at: event.location.x)
                                     })
                                     .help("Click or drag the audio lane to move the playhead")
+                                    Rectangle()
+                                        .fill(Theme.canvas)
+                                        .contentShape(Rectangle())
+                                        .frame(height: max(0, tracksHeight - TimelineCanvasLayout.filmstripHeight
+                                                                - TimelineCanvasLayout.waveformHeight))
+                                        .gesture(DragGesture(minimumDistance: 0).onChanged { event in
+                                            scrubTimeline(at: event.location.x)
+                                        })
+                                        .help("Drag in the empty workspace to scrub the recording")
                                 }
+                                .frame(height: tracksHeight, alignment: .top)
                                 // This boundary marks the render end; the remainder is only
                                 // empty workspace for scrolling/zooming, never exported media.
                                 Rectangle().fill(Theme.muted.opacity(0.65))
-                                    .frame(width: 1, height: 96)
+                                    .frame(width: 1, height: tracksHeight)
                                     .offset(x: CGFloat(draft.duration * pixelsPerSecond))
                                     .allowsHitTesting(false)
                                 Text("End of output")
                                     .font(Theme.sans(10, .medium))
                                     .foregroundStyle(Theme.muted)
-                                    .offset(x: CGFloat(draft.duration * pixelsPerSecond) + 10, y: 5)
+                                    .offset(x: CGFloat(draft.duration * pixelsPerSecond) + 9,
+                                            y: TimelineCanvasLayout.filmstripHeight + 6)
                                     .allowsHitTesting(false)
                                 // A bright full-height cursor stays visible above the media,
                                 // including at time zero; trim handles remain independently hit-testable.
                                 Rectangle().fill(Theme.danger)
-                                    .frame(width: 2, height: 96)
+                                    .frame(width: 2.5, height: tracksHeight)
                                     .offset(x: CGFloat(playback.time * pixelsPerSecond))
+                                    .shadow(color: Theme.danger.opacity(0.5), radius: 2)
                                     .allowsHitTesting(false)
                             }
+                            .frame(height: tracksHeight, alignment: .top)
                         }
                         .frame(width: canvasWidth, alignment: .leading)
                         // Use stable content coordinates while the handle repositions itself
@@ -522,7 +548,6 @@ private struct TimelineEditorWorkspace: View {
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(height: 164)
     }
 
     private var ruler: some View {
@@ -532,15 +557,18 @@ private struct TimelineEditorWorkspace: View {
             for n in 0...count {
                 let seconds = Double(n) * step
                 let x = CGFloat(seconds * pixelsPerSecond)
+                let pastOutput = seconds > duration
                 var line = Path()
                 line.move(to: CGPoint(x: x, y: 18))
                 line.addLine(to: CGPoint(x: x, y: 26))
-                context.stroke(line, with: .color(Theme.muted.opacity(0.8)), lineWidth: 0.7)
-                let label = context.resolve(Text(formatTime(seconds)).font(Theme.mono(9.5)).foregroundStyle(Theme.muted))
-                context.draw(label, at: CGPoint(x: x + 3, y: 7), anchor: .leading)
+                context.stroke(line, with: .color(Theme.muted.opacity(pastOutput ? 0.25 : 0.8)),
+                               lineWidth: 0.7)
+                let label = context.resolve(Text(formatTime(seconds)).font(Theme.mono(9.5))
+                    .foregroundStyle(Theme.muted.opacity(pastOutput ? 0.35 : 1)))
+                context.draw(label, at: CGPoint(x: x + (n == 0 ? 20 : 3), y: 7), anchor: .leading)
             }
         }
-        .frame(height: 26)
+        .frame(height: TimelineCanvasLayout.rulerHeight)
         .background(Theme.canvas)
         .contentShape(Rectangle())
         .gesture(DragGesture(minimumDistance: 0).onChanged { move in
@@ -557,16 +585,16 @@ private struct TimelineEditorWorkspace: View {
         return ZStack {
             RoundedRectangle(cornerRadius: 3)
                 .fill(Theme.danger)
-                .frame(width: 17, height: 16)
+                .frame(width: 21, height: 23)
                 .overlay {
-                    Image(systemName: "line.3.horizontal")
-                        .font(.system(size: 8, weight: .bold))
+                    Image(systemName: "arrow.left.and.right")
+                        .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(.white)
                 }
         }
-        .frame(width: 26, height: 26)
+        .frame(width: 34, height: TimelineCanvasLayout.rulerHeight)
         .contentShape(Rectangle())
-        .offset(x: max(0, x - 12), y: 0)
+        .offset(x: max(0, x - 17), y: 0)
         .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("cutmark-timeline"))
             .onChanged { gesture in
                 if playheadDragStart == nil {
@@ -577,7 +605,7 @@ private struct TimelineEditorWorkspace: View {
                     start: playheadDragStart ?? playback.time,
                     translation: gesture.translation.width,
                     pixelsPerSecond: pixelsPerSecond, outputDuration: duration)
-                playback.seek(target, duration: duration)
+                seekAndSelect(target)
             }
             .onEnded { gesture in
                 let target = TimelineCanvasLayout.draggedPlayheadTime(
@@ -585,7 +613,7 @@ private struct TimelineEditorWorkspace: View {
                     translation: gesture.translation.width,
                     pixelsPerSecond: pixelsPerSecond, outputDuration: duration)
                 playheadDragStart = nil
-                playback.seek(target, duration: duration)
+                seekAndSelect(target)
             })
         .accessibilityLabel("Timeline playhead")
         .help("Drag the red handle left or right to scrub the recording")
@@ -593,8 +621,18 @@ private struct TimelineEditorWorkspace: View {
 
     private func scrubTimeline(at x: CGFloat) {
         playback.stop()
-        playback.seek(TimelineCanvasLayout.seekTime(
-            at: x, pixelsPerSecond: pixelsPerSecond, outputDuration: duration), duration: duration)
+        seekAndSelect(TimelineCanvasLayout.seekTime(
+            at: x, pixelsPerSecond: pixelsPerSecond, outputDuration: duration))
+    }
+
+    private func seekAndSelect(_ time: Double) {
+        let snapped = TimelineCanvasLayout.snappedTime(
+            time, fps: draft?.fps ?? 30, outputDuration: duration)
+        if let draft, let index = TimelineCanvasLayout.clipIndex(
+            at: snapped, durations: draft.segments.map(\.duration)) {
+            selected = index
+        }
+        playback.seek(snapped, duration: duration)
     }
 
     private func clipView(_ segment: EditTimelineDraft.Segment, index: Int) -> some View {
@@ -606,7 +644,8 @@ private struct TimelineEditorWorkspace: View {
                              seek: { fraction in
                                 guard let draft, let start = draft.outputStart(of: index) else { return }
                                 selected = index
-                                playback.seek(start + segment.duration * fraction, duration: draft.duration)
+                                playback.stop()
+                                seekAndSelect(start + segment.duration * fraction)
                              }, trim: { edge, delta in
                                 guard let draft,
                                       let operation = draft.trimProposal(index: index, edge: edge,
@@ -637,13 +676,24 @@ private struct TimelineEditorWorkspace: View {
     }
 
     private func restore() async {
-        let duration = try? await AVURLAsset(url: video).load(.duration)
+        let asset = AVURLAsset(url: video)
+        let duration = try? await asset.load(.duration)
+        let videoTrack = try? await asset.loadTracks(withMediaType: .video).first
+        let sourceRate: Double?
+        if let videoTrack,
+           let clock = try? await videoTrack.load(.nominalFrameRate, .minFrameDuration) {
+            sourceRate = EditTimelineDraft.rendererFPS(
+                nominalFrameRate: Double(clock.0), minFrameDuration: clock.1)
+        } else {
+            sourceRate = nil
+        }
         guard !Task.isCancelled else { return }
         let raw = doc.meta.takes.first { $0.file == video.lastPathComponent }
             .flatMap { take -> EditTimelineDraft? in
                 let seconds = duration?.seconds ?? take.duration ?? 0
                 return EditTimelineDraft.fromTake(take, duration: seconds,
-                                                   fps: take.kind == .screen ? Double(ScreenMovieWriter.frameRate) : 30)
+                                                   fps: take.kind == .screen ? Double(ScreenMovieWriter.frameRate) : 30,
+                                                   sourceFPS: sourceRate)
             }
         draft = EditTimelineDraft.restore(video: video, session: doc.url, original: raw)
         if draft == nil {
@@ -816,12 +866,13 @@ private struct TimelineFilmstripBar: View {
                     ForEach(Array(thumbs.enumerated()), id: \.offset) { _, thumb in
                         Image(decorative: thumb.image, scale: 1)
                             .resizable().scaledToFill()
-                            .frame(width: width / CGFloat(thumbs.count), height: 62)
+                            .frame(width: width / CGFloat(thumbs.count),
+                                   height: TimelineCanvasLayout.filmstripHeight)
                             .clipped()
                     }
                 }
             }
-            .frame(width: width, height: 62)
+            .frame(width: width, height: TimelineCanvasLayout.filmstripHeight)
             .clipped()
             Text("\(number)")
                 .font(Theme.mono(10, .semibold)).foregroundStyle(.white)
@@ -829,7 +880,7 @@ private struct TimelineFilmstripBar: View {
                 .padding(.leading, 9).padding(.top, 5)
                 .allowsHitTesting(false)
         }
-        .frame(width: width, height: 62)
+        .frame(width: width, height: TimelineCanvasLayout.filmstripHeight)
         .overlay(alignment: .leading) {
             Rectangle().fill(.black.opacity(0.58)).frame(width: leadingDrag).allowsHitTesting(false)
         }
@@ -841,14 +892,16 @@ private struct TimelineFilmstripBar: View {
         .overlay(alignment: .leading) {
             if leadingDrag < 0 {
                 Rectangle().fill(Theme.accent.opacity(0.25))
-                    .frame(width: -leadingDrag, height: 62).offset(x: leadingDrag)
+                    .frame(width: -leadingDrag, height: TimelineCanvasLayout.filmstripHeight)
+                    .offset(x: leadingDrag)
                     .allowsHitTesting(false)
             }
         }
         .overlay(alignment: .trailing) {
             if trailingDrag > 0 {
                 Rectangle().fill(Theme.accent.opacity(0.25))
-                    .frame(width: trailingDrag, height: 62).offset(x: trailingDrag)
+                    .frame(width: trailingDrag, height: TimelineCanvasLayout.filmstripHeight)
+                    .offset(x: trailingDrag)
                     .allowsHitTesting(false)
             }
         }
@@ -882,8 +935,8 @@ private struct TimelineFilmstripBar: View {
     private func handle(_ edge: EditTimelineDraft.TrimEdge) -> some View {
         RoundedRectangle(cornerRadius: 3)
             .fill(Theme.accent.opacity(0.95))
-            .frame(width: 7, height: 42)
-            .frame(width: min(18, width / 2), height: 62)
+            .frame(width: 7, height: TimelineCanvasLayout.filmstripHeight - 24)
+            .frame(width: min(18, width / 2), height: TimelineCanvasLayout.filmstripHeight)
             .offset(x: edge == .start ? leadingDrag : trailingDrag)
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 3)
