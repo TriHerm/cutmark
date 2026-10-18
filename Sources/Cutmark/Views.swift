@@ -1256,6 +1256,14 @@ struct DetailView: View {
                             .transition(.opacity)
                         }
                     }
+                    .overlay(alignment: .bottom) {
+                        if rightTab == "assets", let video = app.preview, let doc = library.current,
+                           video.deletingLastPathComponent().lastPathComponent == "edits" {
+                            EditTimelinePanel(video: video, doc: doc)
+                                .padding(.horizontal, 16).padding(.bottom, 18)
+                                .transition(.opacity)
+                        }
+                    }
                     .overlay {
                         if app.preview == nil || app.isRecording {
                             RecordPill(camera: camera, screen: screen)
