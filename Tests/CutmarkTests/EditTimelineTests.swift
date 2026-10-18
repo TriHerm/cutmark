@@ -79,4 +79,48 @@ struct EditTimelineTests {
         EditTimelineDraft.clear(video: video, session: root)
         #expect(!FileManager.default.fileExists(atPath: file.path))
     }
+
+    @Test func recordedTakeOpensEditableTimelineBeforeAnyPublishedRecipe() throws {
+        let take = Take(number: 7, kind: .screen, file: "take-07-screen.mov",
+                        startedAt: Date(timeIntervalSince1970: 0), duration: 8)
+        let raw = try #require(EditTimelineDraft.fromTake(take, duration: 8, fps: 30))
+        #expect(raw.isRawTake)
+        #expect(raw.source.count == 1)
+        #expect(raw.source[0].kind == "screen")
+        var edited = raw
+        let split = edited.apply(.init(op: "split", index: 0, at: 4))
+        let moved = edited.apply(.init(op: "move", index: 1, to: 0))
+        #expect(split && moved)
+        let recipe = try #require(edited.initialRecipe())
+        let cuts = try #require(recipe["cut"] as? [[String: Any]])
+        #expect(cuts.count == 2)
+        #expect(cuts[0]["in"] as? Double == 4)
+
+        let root = FileManager.default.temporaryDirectory.appending(path: "cutmark-raw-timeline-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let video = root.appending(path: take.file)
+        try edited.save(video: video, session: root)
+        let recovered = try #require(EditTimelineDraft.restore(video: video, session: root, original: raw))
+        #expect(recovered.segments == edited.segments)
+        #expect(!FileManager.default.fileExists(atPath: EditRecipe.url(for: video).path))
+    }
+
+    @Test func draggedTrimHandlesClampToTwoFramesAndUndo() throws {
+        let take = Take(number: 1, kind: .camera, file: "take-01-camera.mov",
+                        startedAt: Date(timeIntervalSince1970: 0), duration: 10)
+        let raw = try #require(EditTimelineDraft.fromTake(take, duration: 10, fps: 30))
+        let start = try #require(raw.trimProposal(index: 0, edge: .start, dragSeconds: 3.04))
+        #expect(abs((start.in ?? 0) - 3.033_333) < 0.000_01)
+        var edited = raw
+        let trimmed = edited.apply(start)
+        #expect(trimmed)
+        let end = try #require(edited.trimProposal(index: 0, edge: .end, dragSeconds: -50))
+        #expect(abs((end.out ?? 0) - (edited.segments[0].start + 2.0 / 30)) < 0.000_01)
+        let valid = edited.apply(end)
+        #expect(valid)
+        #expect(edited.segments[0].duration >= 2.0 / 30 - 0.000_01)
+        let restored = edited.undoLast()
+        #expect(restored)
+        #expect(edited.segments[0].end == 10)
+    }
 }

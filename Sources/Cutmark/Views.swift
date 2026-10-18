@@ -985,7 +985,7 @@ struct DetailView: View {
     @ObservedObject var camera: CameraRecorder
     @ObservedObject var screen: ScreenRecorder
     @AppStorage("rightTab") private var rightTab = "script"
-    @AppStorage("screenPreviewVisible") private var screenPreviewVisible = true
+    @AppStorage("screenPreviewVisible") private var screenPreviewVisible = false
     @Environment(\.colorScheme) private var scheme
     /// The full-window tabs opened in this session so far. They stay mounted.
     @State private var opened = KeptTabs()
@@ -1028,8 +1028,8 @@ struct DetailView: View {
     /// on the Script tab instead.
     private var recordOnly: Bool { rightTab == "script" }
 
-    /// The screen viewfinder is useful while preparing a screen take. It stops before
-    /// warming/countdown so the real recording owns ScreenCaptureKit by itself.
+    /// The screen preview is explicitly requested while choosing a source, not a continuous
+    /// viewfinder. ScreenCaptureKit is released after its one-shot thumbnail and before Record.
     private var screenPreviewWanted: Bool {
         recordOnly && cover == nil && app.mode.recordsScreen && !app.isRecording
             && library.selectedSessions.count <= 1 && screenPreviewVisible
@@ -1059,7 +1059,7 @@ struct DetailView: View {
         .onChange(of: rightTab) { _, tab in if tab != "script" && !app.isRecording { app.shot = nil } }
         .onChange(of: notchRecord, initial: true) { _, on in NotchPanel.shared.follow(record: on, app) }
         .onChange(of: screenPreviewWanted, initial: true) { _, on in screen.setPreviewing(on) }
-        .onChange(of: screen.displayID) { _, _ in if screenPreviewWanted { screen.setPreviewing(true) } }
+        .onChange(of: screen.selectedSource) { _, _ in if screenPreviewWanted { screen.setPreviewing(true) } }
         .onChange(of: screen.displays) { _, _ in
             if screenPreviewWanted {
                 // A detached display may reconnect without changing its saved selection.
@@ -1198,7 +1198,7 @@ struct DetailView: View {
                         if screenPreviewWanted {
                             ScreenPreviewFloating(
                                 feed: screen.preview,
-                                displayName: screen.displays.first { $0.id == screen.displayID }?.name ?? "Display",
+                                displayName: screen.selectedSourceName,
                                 topInset: max(60, notchReach + 12)
                             )
                             .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
@@ -1217,11 +1217,11 @@ struct DetailView: View {
                                 } else if Asset.kind(of: url) == .image {
                                     StillView(url: url)
                                 } else if Asset.kind(of: url) == .video, let commentRoot {
-                                    if rightTab == "assets", let doc = library.current,
-                                       url.deletingLastPathComponent().standardizedFileURL.path
-                                        == doc.url.appending(path: "edits").standardizedFileURL.path {
+                                    if let doc = library.current,
+                                       commentRoot.standardizedFileURL == doc.url.standardizedFileURL,
+                                       EditTimelineDraft.file(video: url, session: doc.url) != nil {
                                         // Give editing its own space below the review player: overlaying the
-                                        // timeline obscured the seek bar and review controls on short stages.
+                                        // timeline obscured the seek bar. Raw takes now have this editor too.
                                         VStack(spacing: 0) {
                                             ReviewPlayer(url: url, session: commentRoot).id(url)
                                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1544,7 +1544,7 @@ private struct ScreenPreviewFloating: View {
     @ObservedObject var feed: ScreenPreviewFeed
     let displayName: String
     let topInset: CGFloat
-    @AppStorage("screenPreviewVisible") private var visible = true
+    @AppStorage("screenPreviewVisible") private var visible = false
     @AppStorage("screenPreviewX") private var savedX = 1.0
     @AppStorage("screenPreviewY") private var savedY = 0.0
     @State private var cardSize = CGSize(width: 240, height: 170)
@@ -1749,8 +1749,9 @@ struct RecordPill: View {
     @ObservedObject var screen: ScreenRecorder
     @AppStorage("recordPillX") private var savedX = 0.5
     @AppStorage("recordPillY") private var savedY = 1.0
-    @AppStorage("screenPreviewVisible") private var screenPreviewVisible = true
+    @AppStorage("screenPreviewVisible") private var screenPreviewVisible = false
     @State private var devices = false
+    @State private var sourcePicker = false
     @State private var hover = false
     @State private var pillSize = CGSize(width: 420, height: 60)
     @State private var dragOrigin: CGPoint?
@@ -1766,7 +1767,7 @@ struct RecordPill: View {
     var body: some View {
         let _ = Perf.body("RecordPill")
         GeometryReader { stage in
-            let displayPicker = app.mode.recordsScreen && screen.displays.count > 1
+            let displayPicker = app.mode.recordsScreen
             let layout = RecordPillLayout.choose(stageWidth: stage.size.width, showsDisplayPicker: displayPicker,
                                                  textScale: TextSize.shared.factor)
             let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
@@ -1793,7 +1794,9 @@ struct RecordPill: View {
         .padding(.leading, 10).padding(.trailing, 10).padding(.vertical, 8)
         .frame(width: layout == .compact ? RecordPillLayout.compactWidth : nil)
         // Paper on the daylight stage; it follows the stage into the dark while you record.
-        .background(Capsule().fill(Theme.paper).shadow(color: Theme.shadow.opacity(1.8), radius: 18, y: 6))
+        .background(Capsule().fill(Theme.paper).shadow(color: Theme.shadow.opacity(1.8), radius: 18, y: 6)
+            // Blank capsule space is draggable, but buttons retain exclusive pointer events.
+            .gesture(pillDrag(stage: stage, minimumDistance: 4)))
         .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
         .foregroundStyle(Theme.ink)
         .animation(Theme.spring, value: recording)
@@ -1854,25 +1857,27 @@ struct RecordPill: View {
                       help: "Include or exclude the selected screen in recording") {
                     toggleScreen()
                 }
-                // With two displays, which one records shows here, not only in the device panel
-                // (Jeremy could not find it, 2026-10-06). Compact keeps that choice in Devices.
-                if app.mode.recordsScreen && screen.displays.count > 1 {
-                    let screen = screen
-                    CutmarkMenuButton(help: "Which display to record") {
+                // Choose a whole screen OR a specific app window, never an implicit crop.
+                // The one-shot preview is used only before Record to inspect this selection.
+                if app.mode.recordsScreen {
+                    Button {
+                        sourcePicker.toggle()
+                        if sourcePicker {
+                            Task { await screen.refreshCaptureSources(requestPermission: true) }
+                        }
+                    } label: {
                         HStack(spacing: 4) {
-                            Image(systemName: "display")
-                            Text(screen.displays.first { $0.id == screen.displayID }?.name ?? "Display")
+                            Image(systemName: "rectangle.dashed.on.rectangle")
+                            Text(screen.selectedSourceName)
                                 .lineLimit(1).frame(maxWidth: 110)
                         }
                         .font(Theme.sans(12, .medium))
                         .padding(.horizontal, 8).frame(height: 28)
                         .modifier(PillGhostLook())
-                    } content: {
-                        MenuLabel("Record")
-                        for d in screen.displays {
-                            MenuButton(d.name, icon: "display", checked: d.id == screen.displayID) { screen.displayID = d.id }
-                        }
                     }
+                    .buttonStyle(.plain)
+                    .cutmarkMenu(isPresented: $sourcePicker, width: 290) { sourceRows() }
+                    .help("Choose full screen or app window; preview one frame before recording")
                     .fixedSize()
                 }
                 deviceButton
@@ -1887,21 +1892,26 @@ struct RecordPill: View {
     }
 
     private var deviceButton: some View {
-        Button { devices.toggle() } label: {
+        Button {
+            devices.toggle()
+            if devices && app.mode.recordsScreen {
+                Task { await screen.refreshCaptureSources(requestPermission: true) }
+            }
+        } label: {
             Image(systemName: "slider.horizontal.3").font(.system(size: 12, weight: .medium))
                 .frame(width: 28, height: 28)
         }
         .buttonStyle(PillGhostStyle())
-        .help("Camera, microphone and screen")
-        .accessibilityLabel("Camera, microphone and screen")
+        .help("Choose camera, microphone, entire screen or app window")
+        .accessibilityLabel("Recording sources and screen window selection")
         .cutmarkMenu(isPresented: $devices, width: 270) { [app, camera, screen] in
             DevicePanel.rows(mode: app.mode, camera: camera, screen: screen,
                              previewVisible: screenPreviewVisible,
+                             selectCaptureSource: selectCaptureSource,
                              selectMode: { chosen in
                                 app.mode = chosen
-                                if chosen.recordsScreen {
-                                    screen.setPreviewing(screenPreviewVisible, requestPermission: screenPreviewVisible)
-                                } else {
+                                if !chosen.recordsScreen {
+                                    screenPreviewVisible = false
                                     screen.setPreviewing(false)
                                 }
                              }) {
@@ -1914,38 +1924,79 @@ struct RecordPill: View {
     private func toggleScreen() {
         let on = !app.mode.recordsScreen
         app.mode = on ? .cameraScreen : .camera
-        screen.setPreviewing(on, requestPermission: on)
+        if !on { screenPreviewVisible = false; screen.setPreviewing(false) }
+    }
+
+    @MainActor @MenuBuilder
+    private func sourceRows() -> [MenuItem] {
+        MenuLabel("Capture entire display")
+        for display in screen.displays {
+            MenuButton(display.name, icon: "display", checked: screen.selectedSource == .display(display.id)) {
+                selectCaptureSource(.display(display.id))
+            }
+        }
+        MenuDivider()
+        MenuLabel("Capture application window")
+        for window in screen.windows {
+            MenuButton(window.name, icon: "macwindow", checked: screen.selectedSource == window.source) {
+                selectCaptureSource(window.source)
+            }
+        }
+        if screen.windows.isEmpty {
+            MenuView("no-windows") {
+                Text("Select refresh to list available windows.")
+                    .font(Theme.sans(11)).foregroundStyle(Theme.muted).padding(.horizontal, 9)
+            }
+        }
+        MenuButton("Refresh windows", icon: "arrow.clockwise") {
+            Task { await screen.refreshCaptureSources(requestPermission: true) }
+        }
+        MenuDivider()
+        MenuButton("Preview selected source", icon: "eye", checked: screenPreviewVisible) {
+            screenPreviewVisible = true
+            screen.setPreviewing(true, requestPermission: true)
+        }
+    }
+
+    private func selectCaptureSource(_ source: ScreenRecorder.CaptureSource) {
+        screen.selectSource(source)
+        // DetailView's source/visibility observers request the one-shot image. Doing it here
+        // as well could issue two screenshots and bring the very preview lag we are removing.
+        screenPreviewVisible = true
     }
 
     private func dragHandle(stage: CGSize) -> some View {
         Image(systemName: "line.3.horizontal")
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(Theme.faint)
-            .frame(width: 22, height: 28)
+            .frame(width: 28, height: 42)
             .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 1)
-                    .onChanged { value in
-                        let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
-                        let base = dragOrigin ?? RecordPillPlacement.point(normalized: saved, stage: stage, control: pillSize)
-                        if dragOrigin == nil { dragOrigin = base }
-                        let proposed = CGPoint(x: base.x + value.translation.width, y: base.y + value.translation.height)
-                        dragPoint = RecordPillPlacement.clamped(point: proposed, stage: stage, control: pillSize)
-                    }
-                    .onEnded { value in
-                        let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
-                        let base = dragOrigin ?? RecordPillPlacement.point(normalized: saved, stage: stage, control: pillSize)
-                        let proposed = CGPoint(x: base.x + value.translation.width, y: base.y + value.translation.height)
-                        let final = RecordPillPlacement.clamped(point: proposed, stage: stage, control: pillSize)
-                        let normalized = RecordPillPlacement.normalized(point: final, stage: stage, control: pillSize)
-                        savedX = Double(normalized.x)
-                        savedY = Double(normalized.y)
-                        dragOrigin = nil
-                        dragPoint = nil
-                    }
-            )
-            .help("Drag to move recording controls")
+            .gesture(pillDrag(stage: stage, minimumDistance: 1))
+            .help("Drag this grip or the capsule background to move recording controls")
             .accessibilityLabel("Move recording controls")
+    }
+
+    private func pillDrag(stage: CGSize, minimumDistance: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: minimumDistance)
+            .onChanged { movePill($0.translation, stage: stage, ended: false) }
+            .onEnded { movePill($0.translation, stage: stage, ended: true) }
+    }
+
+    private func movePill(_ translation: CGSize, stage: CGSize, ended: Bool) {
+        let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
+        let base = dragOrigin ?? RecordPillPlacement.point(normalized: saved, stage: stage, control: pillSize)
+        if dragOrigin == nil { dragOrigin = base }
+        let proposed = CGPoint(x: base.x + translation.width, y: base.y + translation.height)
+        let final = RecordPillPlacement.clamped(point: proposed, stage: stage, control: pillSize)
+        if ended {
+            let normalized = RecordPillPlacement.normalized(point: final, stage: stage, control: pillSize)
+            savedX = Double(normalized.x)
+            savedY = Double(normalized.y)
+            dragOrigin = nil
+            dragPoint = nil
+        } else {
+            dragPoint = final
+        }
     }
 
     /// The time since you started; the mic level while you wait.
@@ -2038,7 +2089,9 @@ struct LivePill: View {
 enum DevicePanel {
     @MainActor @MenuBuilder
     static func rows(mode: Mode, camera: CameraRecorder, screen: ScreenRecorder,
-                     previewVisible: Bool, selectMode: @escaping (Mode) -> Void,
+                     previewVisible: Bool,
+                     selectCaptureSource: @escaping (ScreenRecorder.CaptureSource) -> Void,
+                     selectMode: @escaping (Mode) -> Void,
                      togglePreview: @escaping () -> Void) -> [MenuItem] {
         MenuLabel("Recording sources")
         for source in Mode.allCases {
@@ -2061,14 +2114,25 @@ enum DevicePanel {
                 .help("Microphone level")
         }
         if mode.recordsScreen {
-            MenuLabel("Screen")
+            MenuLabel("Entire display")
             for d in screen.displays {
-                MenuButton(d.name, icon: "display", checked: d.id == screen.displayID) { screen.displayID = d.id }
+                MenuButton(d.name, icon: "display", checked: screen.selectedSource == .display(d.id)) {
+                    selectCaptureSource(.display(d.id))
+                }
             }
-            MenuButton("Screen preview", icon: "eye", checked: previewVisible,
+            MenuLabel("Application window")
+            for window in screen.windows {
+                MenuButton(window.name, icon: "macwindow", checked: screen.selectedSource == window.source) {
+                    selectCaptureSource(window.source)
+                }
+            }
+            MenuButton("Refresh windows", icon: "arrow.clockwise") {
+                Task { await screen.refreshCaptureSources(requestPermission: true) }
+            }
+            MenuButton("Preview selected source", icon: "eye", checked: previewVisible,
                        keepsOpen: true, action: togglePreview)
             MenuView("screen-note") {
-                Text("Cutmark hides itself from the screen file.").font(Theme.sans(11)).foregroundStyle(Theme.faint)
+                Text("Preview shows one frame before recording.").font(Theme.sans(11)).foregroundStyle(Theme.faint)
                     .padding(.leading, 33).padding(.trailing, 8).padding(.bottom, 4)
             }
         }

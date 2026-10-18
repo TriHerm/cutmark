@@ -1,8 +1,8 @@
 import AVFoundation
 import SwiftUI
 
-/// The published video plays above. This strip edits a separate, recoverable *plan*, never a
-/// published recipe. The selected agent renders that plan as a new checked version on request.
+/// The player above shows the original take/published version. This strip edits a separate,
+/// recoverable plan: trimming/splitting never writes into the media or published recipe.
 struct EditTimelinePanel: View {
     @Environment(AppModel.self) private var app
     let video: URL
@@ -14,12 +14,14 @@ struct EditTimelinePanel: View {
     @State private var trimOut = ""
     @State private var splitAt = ""
     @State private var problem: String?
+    @State private var showPrecision = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 9) {
                 Image(systemName: "film.stack").foregroundStyle(Theme.accent)
-                Text("Timeline").font(Theme.sans(13, .semibold))
+                Text("Edit timeline").font(Theme.sans(13, .semibold))
+                    .help("Select a clip. Drag its ends to trim, split at the player position, or move clips with arrows.")
                 if let draft {
                     Text("\(draft.segments.count) clips · \(SessionDoc.clock(draft.duration))")
                         .font(Theme.mono(11)).foregroundStyle(Theme.muted)
@@ -40,30 +42,22 @@ struct EditTimelinePanel: View {
                     ScrollView(.horizontal) {
                         HStack(spacing: 4) {
                             ForEach(Array(draft.segments.enumerated()), id: \.offset) { i, seg in
-                                Button { choose(i) } label: {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text("\(seg.kind == "screen" ? "Screen" : "Camera") · Take \(seg.take)")
-                                            .lineLimit(1)
-                                        Text("At \(SessionDoc.clock(startTime(i))) · \(String(format: "%.1f", seg.duration))s")
-                                            .font(Theme.mono(10))
-                                    }
-                                    .font(Theme.sans(11, .medium))
-                                    .padding(.horizontal, 9)
-                                    .frame(width: min(300, max(110, seg.duration * 36)), height: 48,
-                                           alignment: .leading)
-                                    .background(i == selected ? Theme.accentSoft : Theme.canvas,
-                                                in: RoundedRectangle(cornerRadius: 6))
-                                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(
-                                        i == selected ? Theme.accent : Theme.border, lineWidth: 1))
-                                }
-                                .buttonStyle(.plain)
-                                .help("Select segment \(i + 1) at output \(SessionDoc.clock(startTime(i)))")
-                                .accessibilityLabel("Select timeline segment \(i + 1)")
+                                TimelineSegmentView(index: i, segment: seg, start: startTime(i),
+                                                    selected: i == selected,
+                                                    select: { choose(i) },
+                                                    trim: { edge, delta in
+                                    guard let proposal = self.draft?.trimProposal(index: i, edge: edge, dragSeconds: delta)
+                                    else { return }
+                                    apply(proposal)
+                                    choose(i)
+                                })
                             }
                         }
                     }
                     ScrollView(.horizontal) {
                         HStack(spacing: 9) {
+                            Button("Split at playhead") { splitAtPlayhead() }
+                                .buttonStyle(AccentButtonStyle(kind: .quiet))
                             timelineButton("arrow.left", "Move earlier", selected > 0) {
                                 apply(.init(op: "move", index: selected, to: selected - 1)); choose(selected - 1)
                             }
@@ -79,42 +73,46 @@ struct EditTimelinePanel: View {
                             timelineButton("arrow.uturn.backward", "Undo last change", !draft.actions.isEmpty) {
                                 undo()
                             }
-                            Button("Split at playhead") { splitAtPlayhead() }
+                            Button(showPrecision ? "Hide precise times" : "Precise trim") { showPrecision.toggle() }
                                 .buttonStyle(AccentButtonStyle(kind: .quiet))
-                            if draft.segments.contains(where: { $0.kind == "screen" }) {
-                                Button("Review auto-zoom") { reviewZooms() }
+                            if !draft.isRawTake, draft.segments.contains(where: { $0.kind == "screen" }) {
+                                Button("Suggest zoom") { reviewZooms() }
                                     .buttonStyle(AccentButtonStyle(kind: .quiet))
-                                    .help("Suggest screen zooms without changing or publishing the edit")
                             }
-                            Text("Source seconds").font(Theme.sans(10)).foregroundStyle(Theme.faint)
-                            timeField("In", $trimIn)
-                            timeField("Out", $trimOut)
-                            Button("Trim") { trimSelected() }
-                                .buttonStyle(AccentButtonStyle(kind: .quiet))
-                            timeField("Split", $splitAt)
-                            Button("Split") { splitSelected() }
-                                .buttonStyle(AccentButtonStyle(kind: .quiet))
                         }
                     }
                     .lineLimit(1)
+                    if showPrecision {
+                        HStack(spacing: 8) {
+                            Text("Clip \(selected + 1) · source seconds")
+                                .font(Theme.sans(11)).foregroundStyle(Theme.muted)
+                            timeField("In", $trimIn)
+                            timeField("Out", $trimOut)
+                            Button("Apply trim") { trimSelected() }
+                                .buttonStyle(AccentButtonStyle(kind: .quiet))
+                            timeField("Split", $splitAt)
+                            Button("Split at time") { splitSelected() }
+                                .buttonStyle(AccentButtonStyle(kind: .quiet))
+                        }
+                    }
                     HStack(spacing: 10) {
                         if let problem {
                             Text(problem).font(Theme.sans(11)).foregroundStyle(Theme.danger).lineLimit(1)
                         } else {
-                            Text(draft.actions.isEmpty ? "Edit non-destructively; sources stay unchanged."
-                                 : "Preview plays the original; render your draft to see the reordered edit.")
+                            Text(draft.actions.isEmpty ? "Source stays unchanged; make a cut to start."
+                                 : "Player shows the original until the draft is rendered. No media is overwritten.")
                                 .font(Theme.sans(11)).foregroundStyle(Theme.faint)
                         }
                         Spacer(minLength: 8)
                         Button("Reset draft") { reset() }
                             .buttonStyle(AccentButtonStyle(kind: .quiet))
                             .disabled(draft.actions.isEmpty)
-                        Button("Render draft") { render() }
+                        Button(draft.isRawTake ? "Render new edit" : "Render draft") { render() }
                             .buttonStyle(AccentButtonStyle(kind: .solid))
-                            .disabled(draft.actions.isEmpty)
+                            .disabled(draft.actions.isEmpty && !draft.isRawTake)
                     }
                 } else {
-                    Text("This video has no editable recipe. Create an edit with render_edit first.")
+                    Text("The source is unavailable for editing. Open a recorded take or an edit with its recipe.")
                         .font(Theme.sans(12)).foregroundStyle(Theme.muted)
                 }
             }
@@ -124,7 +122,20 @@ struct EditTimelinePanel: View {
         .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(Theme.border))
         .shadow(color: Theme.shadow, radius: 12, y: 5)
         .task(id: video) {
-            draft = EditTimelineDraft.restore(video: video, session: doc.url)
+            // Recorded takes are editable immediately, without first creating an edit via chat.
+            // Prefer measured video duration; session metadata may be missing after recovery.
+            let measured = try? await AVURLAsset(url: video).load(.duration)
+            guard !Task.isCancelled else { return }
+            let take = video.deletingLastPathComponent().standardizedFileURL
+                    == doc.url.standardizedFileURL
+                ? doc.meta.takes.first { $0.file == video.lastPathComponent } : nil
+            let raw = take.flatMap { t -> EditTimelineDraft? in
+                let length = (measured?.seconds).flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+                    ?? t.duration ?? 0
+                let fps = t.kind == .screen ? Double(ScreenMovieWriter.frameRate) : 30
+                return EditTimelineDraft.fromTake(t, duration: length, fps: fps)
+            }
+            draft = EditTimelineDraft.restore(video: video, session: doc.url, original: raw)
             choose(0)
         }
     }
@@ -197,7 +208,11 @@ struct EditTimelinePanel: View {
 
     private func reset() {
         EditTimelineDraft.clear(video: video, session: doc.url)
-        draft = EditTimelineDraft.read(video: video)
+        if let raw = draft, raw.isRawTake {
+            draft = EditTimelineDraft(base: raw.base, fps: raw.fps, source: raw.source, segments: raw.source)
+        } else {
+            draft = EditTimelineDraft.read(video: video)
+        }
         choose(0)
         problem = nil
     }
@@ -215,7 +230,20 @@ struct EditTimelinePanel: View {
     }
 
     private func render() {
-        guard let draft, !draft.actions.isEmpty,
+        guard let draft else { return }
+        if draft.isRawTake {
+            guard let recipe = draft.initialRecipe(),
+                  let bytes = try? JSONSerialization.data(withJSONObject: recipe, options: [.sortedKeys]),
+                  let json = String(data: bytes, encoding: .utf8) else { return }
+            app.chats.chat(doc.url).send(
+                "Create a new non-destructive edit from this raw recorded take. Call render_edit "
+                + "with this exact recipe: \(json). Inspect the render and checks. "
+                + "Do not publish_edit until I review the new result. Never modify the take files.",
+                title: doc.meta.title, onStage: video, shown: "Render this timeline as a new edit")
+            app.chats.open = true
+            return
+        }
+        guard !draft.actions.isEmpty,
               let bytes = try? JSONEncoder().encode(draft.actions),
               let actions = String(data: bytes, encoding: .utf8) else { return }
         let request = "For the published edit \(draft.base) in this session, call plan_timeline_edit with "
@@ -256,5 +284,59 @@ struct EditTimelinePanel: View {
         }
         .buttonStyle(.plain).disabled(!enabled)
         .help(label).accessibilityLabel(label)
+    }
+}
+
+/// Compact modern clip strip: visible before any edit exists; its drag handles are source-space
+/// trims. All gesture math uses this clip's displayed width, so compact stages work too.
+private struct TimelineSegmentView: View {
+    let index: Int
+    let segment: EditTimelineDraft.Segment
+    let start: Double
+    let selected: Bool
+    let select: () -> Void
+    let trim: (EditTimelineDraft.TrimEdge, Double) -> Void
+
+    private var clipWidth: CGFloat { min(310, max(116, segment.duration * 34)) }
+
+    var body: some View {
+        Button(action: select) {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 5) {
+                    Image(systemName: segment.kind == "screen" ? "display" : "video")
+                    Text("Clip \(index + 1) · Take \(segment.take)").lineLimit(1)
+                }
+                Text("\(SessionDoc.clock(start))  ·  \(String(format: "%.1f", segment.duration)) s")
+                    .font(Theme.mono(10)).foregroundStyle(Theme.muted)
+            }
+            .font(Theme.sans(11, .medium))
+            .padding(.horizontal, 22)
+            .frame(width: clipWidth, height: 58, alignment: .leading)
+            .background(selected ? Theme.accentSoft : Theme.canvas,
+                        in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(
+                selected ? Theme.accent : Theme.border, lineWidth: selected ? 1.5 : 1))
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .leading) { grip(.start) }
+        .overlay(alignment: .trailing) { grip(.end) }
+        .help("Select clip \(index + 1); drag its left or right edge inward to trim")
+        .accessibilityLabel("Select timeline clip \(index + 1), take \(segment.take), \(String(format: "%.1f", segment.duration)) seconds")
+    }
+
+    private func grip(_ edge: EditTimelineDraft.TrimEdge) -> some View {
+        RoundedRectangle(cornerRadius: 2)
+            .fill(Theme.accent.opacity(selected ? 0.85 : 0.4))
+            .frame(width: 6, height: 36)
+            .frame(width: 19, height: 58)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 5)
+                .onEnded { value in
+                    // Minimum-width bars remain usable; convert pixels to this occurrence's
+                    // source seconds, never an estimated fixed 30-pixels-per-second clock.
+                    trim(edge, Double(value.translation.width / clipWidth) * segment.duration)
+                })
+            .help(edge == .start ? "Drag right to trim the beginning" : "Drag left to trim the end")
+            .accessibilityLabel(edge == .start ? "Trim start of clip \(index + 1)" : "Trim end of clip \(index + 1)")
     }
 }

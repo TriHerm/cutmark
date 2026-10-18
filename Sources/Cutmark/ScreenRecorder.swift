@@ -20,10 +20,44 @@ final class ScreenPreviewFeed: ObservableObject {
     @Published fileprivate(set) var message = "Starting screen preview…"
 }
 
-/// One display into its own .mov (HEVC, 60fps, cursor on, mic included for waveform sync).
-/// The Cutmark window itself is excluded, so the script never shows up in the screen file.
+/// One selected display or app window into its own .mov (HEVC, 60fps, cursor on, mic included for waveform sync).
+/// Display capture excludes Cutmark itself, so the script never shows up in the screen file.
 final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStreamOutput {
     struct Display: Identifiable, Hashable { let id: CGDirectDisplayID; let name: String }
+    struct WindowIdentity: Hashable, Sendable {
+        let id: CGWindowID
+        let bundleIdentifier: String
+        let processID: pid_t
+        let title: String
+
+        /// Titles change when a browser navigates or a document is renamed. The stable window
+        /// identity is its system ID plus owner; retaining the title is useful for the picker,
+        /// but comparing it would reject an otherwise valid capture after any title update.
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.id == rhs.id && lhs.processID == rhs.processID
+                && lhs.bundleIdentifier == rhs.bundleIdentifier
+        }
+
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(id)
+            hasher.combine(processID)
+            hasher.combine(bundleIdentifier)
+        }
+    }
+    enum CaptureSource: Hashable, Sendable {
+        case display(CGDirectDisplayID)
+        case window(WindowIdentity)
+    }
+    struct Window: Identifiable, Hashable {
+        let identity: WindowIdentity
+        let applicationName: String
+        let displayID: CGDirectDisplayID
+
+        var id: WindowIdentity { identity }
+        var source: CaptureSource { .window(identity) }
+        var title: String { identity.title }
+        var name: String { title.isEmpty ? applicationName : "\(applicationName) — \(title)" }
+    }
     struct Start: Sendable {
         let date: Date
         /// First accepted screen-frame PTS on ScreenCaptureKit's host clock.
@@ -32,8 +66,26 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
     }
 
     @Published var displays: [Display] = []
+    @Published private(set) var windows: [Window] = []
+    @Published private(set) var selectedSource: CaptureSource?
+    var selectedSourceName: String {
+        switch selectedSource {
+        case .display(let id):
+            return displays.first(where: { $0.id == id })?.name ?? "Display"
+        case .window(let identity):
+            return windows.first(where: { $0.identity == identity })?.name
+                ?? (identity.title.isEmpty ? "Window" : identity.title)
+        case nil:
+            return displays.first(where: { $0.id == displayID })?.name ?? "Display"
+        }
+    }
     @Published var displayID: CGDirectDisplayID? {
-        didSet { UserDefaults.standard.set(displayID.map { Int($0) }, forKey: "display") }
+        didSet {
+            UserDefaults.standard.set(displayID.map { Int($0) }, forKey: "display")
+            guard !syncingSource else { return }
+            selectedSource = displayID.map(CaptureSource.display)
+            persistSelectedSource()
+        }
     }
     let preview = ScreenPreviewFeed()
 
@@ -50,13 +102,45 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
     private var visualStateSink: (@Sendable (Bool, Double) -> Void)?
     private var pendingVisualStates: [(Bool, Double)] = []
     private var previewTask: Task<Void, Never>?
-    private var previewDisplayID: CGDirectDisplayID?
+    private var previewSource: CaptureSource?
     private var previewGeneration = UUID()
+    private var syncingSource = false
+
+    private static let sourceKindKey = "screenCaptureSourceKind"
+    private static let sourceIDKey = "screenCaptureSourceID"
+    private static let sourceBundleKey = "screenCaptureSourceBundle"
+    private static let sourceProcessKey = "screenCaptureSourceProcess"
+    private static let sourceTitleKey = "screenCaptureSourceTitle"
+
+    /// A window ID and PID can both be reused after app/OS restart. Window intent survives,
+    /// but never a cross-launch grant to capture that numerical ID without reselection.
+    static let unconfirmedWindow = WindowIdentity(id: 0, bundleIdentifier: "", processID: 0,
+                                                 title: "Choose a window")
+
+    /// Pointer sidecars use display-global coordinates today; these must never be treated as
+    /// window-local auto-zoom coordinates until the dedicated geometry mapping exists.
+    static func supportsPointerEventMapping(source: CaptureSource?) -> Bool {
+        if case .window? = source { return false }
+        return true
+    }
 
     override init() {
+        let defaults = UserDefaults.standard
+        let savedDisplay = defaults.integer(forKey: "display")
+        let legacyDisplay = savedDisplay == 0 ? nil : CGDirectDisplayID(savedDisplay)
+        displayID = legacyDisplay
+        switch defaults.string(forKey: Self.sourceKindKey) {
+        case "display":
+            let raw = defaults.integer(forKey: Self.sourceIDKey)
+            selectedSource = raw == 0 ? legacyDisplay.map(CaptureSource.display) : .display(CGDirectDisplayID(raw))
+        case "window":
+            // Never restore a capture-capable window ID across launches; make the prior intent
+            // explicit instead of falling back to a whole-display recording.
+            selectedSource = .window(Self.unconfirmedWindow)
+        default:
+            selectedSource = legacyDisplay.map(CaptureSource.display)
+        }
         super.init()
-        let saved = UserDefaults.standard.integer(forKey: "display")
-        displayID = saved == 0 ? nil : CGDirectDisplayID(saved)
     }
 
     /// Ask for Screen Recording permission before the camera wakes up or the countdown begins.
@@ -69,6 +153,68 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
     }
 
     @MainActor
+    func selectSource(_ source: CaptureSource) {
+        selectedSource = source
+        syncingSource = true
+        switch source {
+        case .display(let id):
+            displayID = id
+        case .window(let identity):
+            displayID = windows.first(where: { $0.identity == identity })?.displayID
+        }
+        syncingSource = false
+        persistSelectedSource()
+    }
+
+    @MainActor
+    func refreshCaptureSources(requestPermission: Bool = false) async {
+        refreshDisplays()
+        let allowed = CGPreflightScreenCaptureAccess() || (requestPermission && CGRequestScreenCaptureAccess())
+        guard allowed else {
+            windows = []
+            return
+        }
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            windows = Self.captureWindows(from: content)
+            if case .window(let identity) = selectedSource,
+               let window = windows.first(where: { $0.identity == identity }) {
+                syncingSource = true
+                displayID = window.displayID
+                syncingSource = false
+            }
+        } catch {
+            windows = []
+        }
+    }
+
+    private func persistSelectedSource() {
+        let defaults = UserDefaults.standard
+        switch selectedSource {
+        case .display(let id):
+            defaults.set("display", forKey: Self.sourceKindKey)
+            defaults.set(Int(id), forKey: Self.sourceIDKey)
+            defaults.removeObject(forKey: Self.sourceBundleKey)
+            defaults.removeObject(forKey: Self.sourceProcessKey)
+            defaults.removeObject(forKey: Self.sourceTitleKey)
+        case .window:
+            defaults.set("window", forKey: Self.sourceKindKey)
+            // A window selection is valid only for this process lifetime. Persist type, never
+            // its reusable numeric identity; the picker will ask for a new window next launch.
+            defaults.removeObject(forKey: Self.sourceIDKey)
+            defaults.removeObject(forKey: Self.sourceBundleKey)
+            defaults.removeObject(forKey: Self.sourceProcessKey)
+            defaults.removeObject(forKey: Self.sourceTitleKey)
+        case nil:
+            defaults.removeObject(forKey: Self.sourceKindKey)
+            defaults.removeObject(forKey: Self.sourceIDKey)
+            defaults.removeObject(forKey: Self.sourceBundleKey)
+            defaults.removeObject(forKey: Self.sourceProcessKey)
+            defaults.removeObject(forKey: Self.sourceTitleKey)
+        }
+    }
+
+    @MainActor
     func refreshDisplays() {
         let found = NSScreen.screens.compactMap { s -> Display? in
             guard let n = s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
@@ -78,18 +224,20 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         if found != displays { displays = found }
         // A disconnected selected display is not permission to record a different one.
         // Only choose the first display if the user has never selected one.
-        if displayID == nil { displayID = displays.first?.id }
+        if selectedSource == nil, displayID == nil, let first = displays.first {
+            selectSource(.display(first.id))
+        }
     }
 
-    /// A small, low-rate viewfinder while Record is idle. It uses the same application exclusion as
-    /// the real recording, so the Cutmark window never appears in its own preview. Record turns this
-    /// off before capture starts; there is never a second live stream competing with the take.
+    /// A one-shot viewfinder while Record is idle. It uses the same source/filter as the real
+    /// recording, then releases capture resources. Record also cancels an in-flight preview before
+    /// capture starts, so a screenshot request never competes with the take.
     @MainActor
     func setPreviewing(_ on: Bool, requestPermission: Bool = false) {
         guard on else {
             previewTask?.cancel()
             previewTask = nil
-            previewDisplayID = nil
+            previewSource = nil
             previewGeneration = UUID()
             preview.image = nil
             preview.message = "Starting screen preview…"
@@ -100,24 +248,24 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         guard allowed else {
             previewTask?.cancel()
             previewTask = nil
-            previewDisplayID = nil
+            previewSource = nil
             previewGeneration = UUID()
             preview.image = nil
             preview.message = "Allow Screen Recording to see the preview."
             return
         }
 
-        // A normal view update can ask again for the same display. Keep the existing capture loop.
-        if previewTask != nil, previewDisplayID == displayID { return }
+        let wantedSource = selectedSource ?? displayID.map(CaptureSource.display)
+        // A normal view update can ask again while the one-shot preview is still being captured.
+        if previewTask != nil, previewSource == wantedSource { return }
         previewTask?.cancel()
         previewGeneration = UUID()
         let generation = previewGeneration
-        previewDisplayID = displayID
+        previewSource = wantedSource
         preview.image = nil
         preview.message = "Starting screen preview…"
-        let wantedDisplay = displayID
         previewTask = Task { @MainActor [weak self] in
-            await self?.runPreview(displayID: wantedDisplay, generation: generation)
+            await self?.runPreview(source: wantedSource, generation: generation)
         }
     }
 
@@ -129,53 +277,134 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         return (max(1, Int(width.rounded())), max(1, Int((pixelHeight * ratio).rounded())))
     }
 
-    /// A selected external display can disappear between refresh and capture. Never substitute
-    /// another screen for an explicit choice; an unset choice may use the primary available one.
+    /// An explicit source can disappear between refresh and capture. Never substitute another
+    /// display/window for that choice; an unset source may use the primary available display.
     static func captureDisplayID(selected: CGDirectDisplayID?, available: [CGDirectDisplayID]) -> CGDirectDisplayID? {
         guard let selected else { return available.first }
         return available.contains(selected) ? selected : nil
     }
 
+    static func captureSource(selected: CaptureSource?, availableDisplays: [CGDirectDisplayID],
+                              availableWindows: [WindowIdentity]) -> CaptureSource? {
+        guard let selected else { return availableDisplays.first.map(CaptureSource.display) }
+        switch selected {
+        case .display(let id):
+            return availableDisplays.contains(id) ? selected : nil
+        case .window(let identity):
+            return availableWindows.contains(identity) ? selected : nil
+        }
+    }
+
+    static func hostDisplayID(windowFrame: CGRect,
+                              displayFrames: [(CGDirectDisplayID, CGRect)]) -> CGDirectDisplayID? {
+        var best: (id: CGDirectDisplayID, area: CGFloat)?
+        for (id, frame) in displayFrames {
+            let overlap = windowFrame.intersection(frame)
+            guard !overlap.isNull, !overlap.isEmpty else { continue }
+            let area = overlap.width * overlap.height
+            if best == nil || area > best!.area { best = (id, area) }
+        }
+        return best?.id
+    }
+
+    private struct ResolvedCapture {
+        let filter: SCContentFilter
+        let displayID: CGDirectDisplayID
+    }
+
+    private static func windowIdentity(_ window: SCWindow) -> WindowIdentity? {
+        guard let app = window.owningApplication else { return nil }
+        return WindowIdentity(id: window.windowID,
+                              bundleIdentifier: app.bundleIdentifier,
+                              processID: app.processID,
+                              title: window.title ?? "")
+    }
+
+    private static func captureWindows(from content: SCShareableContent) -> [Window] {
+        let ownProcess = pid_t(ProcessInfo.processInfo.processIdentifier)
+        // SCWindow.frame and SCDisplay.frame share ScreenCaptureKit's global coordinate space.
+        // CGDisplayBounds uses a different origin for some rotated/stacked displays.
+        let displayFrames = content.displays.map { ($0.displayID, $0.frame) }
+        return content.windows.compactMap { window -> Window? in
+            guard window.windowLayer == 0, window.frame.width > 1, window.frame.height > 1,
+                  let app = window.owningApplication, app.processID != ownProcess,
+                  let identity = windowIdentity(window),
+                  let displayID = hostDisplayID(windowFrame: window.frame, displayFrames: displayFrames)
+            else { return nil }
+            return Window(identity: identity, applicationName: app.applicationName, displayID: displayID)
+        }.sorted {
+            if $0.applicationName != $1.applicationName { return $0.applicationName.localizedCaseInsensitiveCompare($1.applicationName) == .orderedAscending }
+            if $0.title != $1.title { return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+            return $0.identity.id < $1.identity.id
+        }
+    }
+
+    private static func resolveCapture(source: CaptureSource?, content: SCShareableContent) throws -> ResolvedCapture {
+        let listedWindows = captureWindows(from: content)
+        let selected = captureSource(selected: source,
+                                     availableDisplays: content.displays.map(\.displayID),
+                                     availableWindows: listedWindows.map(\.identity))
+        guard let selected else {
+            switch source {
+            case .display:
+                throw RecorderError("Selected display is unavailable. Choose another screen.")
+            case .window:
+                throw RecorderError("Selected window is unavailable. Choose it again.")
+            case nil:
+                throw RecorderError("No display found.")
+            }
+        }
+
+        switch selected {
+        case .display(let id):
+            guard let display = content.displays.first(where: { $0.displayID == id }) else {
+                throw RecorderError("Selected display is unavailable. Choose another screen.")
+            }
+            let ownProcess = pid_t(ProcessInfo.processInfo.processIdentifier)
+            let me = content.applications.filter { $0.processID == ownProcess }
+            return ResolvedCapture(filter: SCContentFilter(display: display, excludingApplications: me, exceptingWindows: []),
+                                   displayID: id)
+        case .window(let identity):
+            guard let window = content.windows.first(where: { windowIdentity($0) == identity }),
+                  let listed = listedWindows.first(where: { $0.identity == identity }) else {
+                throw RecorderError("Selected window is unavailable. Choose it again.")
+            }
+            return ResolvedCapture(filter: SCContentFilter(desktopIndependentWindow: window),
+                                   displayID: listed.displayID)
+        }
+    }
+
     @MainActor
-    private func runPreview(displayID: CGDirectDisplayID?, generation: UUID) async {
+    private func runPreview(source: CaptureSource?, generation: UUID) async {
         defer {
             // An older cancelled request must not clear its replacement's task.
             if previewGeneration == generation {
                 previewTask = nil
-                previewDisplayID = nil
+                previewSource = nil
             }
         }
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             guard !Task.isCancelled else { return }
-            guard let id = Self.captureDisplayID(selected: displayID, available: content.displays.map(\.displayID)),
-                  let display = content.displays.first(where: { $0.displayID == id }) else {
-                preview.message = displayID == nil ? "No display found." : "Selected display is unavailable."
-                return
-            }
-            let me = content.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
-            let filter = SCContentFilter(display: display, excludingApplications: me, exceptingWindows: [])
+            windows = Self.captureWindows(from: content)
+            let resolved = try Self.resolveCapture(source: source, content: content)
+            let filter = resolved.filter
             let size = Self.previewSize(contentRect: filter.contentRect, scale: CGFloat(filter.pointPixelScale))
             let config = SCStreamConfiguration()
             config.width = size.width
             config.height = size.height
             config.showsCursor = true
             config.pixelFormat = kCVPixelFormatType_32BGRA
-
-            while !Task.isCancelled {
-                let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
-                guard !Task.isCancelled else { return }
-                preview.image = image
-                preview.message = ""
-                // Enough motion to confirm the selected display without spending recording-level CPU.
-                try await Task.sleep(for: .milliseconds(350))
-            }
+            let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            guard !Task.isCancelled else { return }
+            preview.image = image
+            preview.message = ""
         } catch is CancellationError {
             return
         } catch {
             guard !Task.isCancelled else { return }
             preview.image = nil
-            preview.message = "Screen preview unavailable."
+            preview.message = (error as? LocalizedError)?.errorDescription ?? "Screen preview unavailable."
         }
     }
 
@@ -184,18 +413,15 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         // AppModel normally stops the viewfinder when phase leaves idle. Also stop it here so a
         // delayed SwiftUI update can never leave a screenshot request overlapping the real stream.
         await MainActor.run { self.setPreviewing(false) }
-        let selectedDisplay = displayID
+        let source = selectedSource ?? displayID.map(CaptureSource.display)
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        guard let id = Self.captureDisplayID(selected: selectedDisplay, available: content.displays.map(\.displayID)),
-              let display = content.displays.first(where: { $0.displayID == id })
-        else { throw RecorderError(selectedDisplay == nil ? "No display found." : "Selected display is unavailable. Choose another screen.") }
-        let me = content.applications.filter { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
-        let filter = SCContentFilter(display: display, excludingApplications: me, exceptingWindows: [])
+        let resolved = try Self.resolveCapture(source: source, content: content)
+        let filter = resolved.filter
 
         let config = SCStreamConfiguration()
         let scale = CGFloat(filter.pointPixelScale)
-        config.width = Int(filter.contentRect.width * scale)
-        config.height = Int(filter.contentRect.height * scale)
+        config.width = max(2, Int((filter.contentRect.width * scale).rounded()))
+        config.height = max(2, Int((filter.contentRect.height * scale).rounded()))
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         config.showsCursor = true
         config.queueDepth = 6
@@ -212,7 +438,7 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamDelegate, SCStre
         if micID != nil { try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: captureQueue) }
         self.movie = movie
         self.stream = stream
-        recordingDisplayID = display.displayID
+        recordingDisplayID = resolved.displayID
         visualOriginHost = nil
         lastVisualActive = nil
         pendingVisualStates.removeAll(keepingCapacity: true)

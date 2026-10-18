@@ -735,7 +735,8 @@ final class AppModel {
                 do {
                     let events = try await CaptureEventRecorder.prepare(session: doc.url, take: n,
                                                                         screenOriginHost: screenStart.hostTime,
-                                                                        displayID: screenStart.displayID)
+                                                                        displayID: screenStart.displayID,
+                                                                        pointerEventsEnabled: ScreenRecorder.supportsPointerEventMapping(source: screen.selectedSource))
                     events.start()
                     screen.setVisualStateSink { [weak events] active, pts in
                         events?.recordVisualState(active: active, screenPTS: pts)

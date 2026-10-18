@@ -247,6 +247,9 @@ final class CaptureEventRecorder: @unchecked Sendable {
     private let writer: CaptureEventLog.Writer
     private let originHost: Double
     private let displayBounds: CGRect
+    /// Window-only captures use window-local media coordinates. Until input points can be
+    /// mapped to that space, keep markers and visual activity but disable mouse signals.
+    private let pointerEventsEnabled: Bool
     private let queue = DispatchQueue(label: "cutmark.capture.events", qos: .utility)
     private var timer: DispatchSourceTimer?
     private var monitor: Any?
@@ -255,11 +258,13 @@ final class CaptureEventRecorder: @unchecked Sendable {
     private var lastPoint: CGPoint?
     private var markerCount = 0
 
-    init(session: URL, take: Int, screenOriginHost: Double, displayID: CGDirectDisplayID) throws {
+    init(session: URL, take: Int, screenOriginHost: Double, displayID: CGDirectDisplayID,
+         pointerEventsEnabled: Bool = true) throws {
         let bounds = CGDisplayBounds(displayID)
         guard bounds.width > 0, bounds.height > 0 else { throw RecorderError("The recorded display is unavailable.") }
         originHost = screenOriginHost
         displayBounds = bounds
+        self.pointerEventsEnabled = pointerEventsEnabled
         let display = CaptureEventLog.DisplayHeader(id: displayID, x: bounds.minX, y: bounds.minY,
                                                     width: bounds.width, height: bounds.height)
         writer = try CaptureEventLog.Writer(url: CaptureEventLog.url(in: session, take: take),
@@ -267,9 +272,11 @@ final class CaptureEventRecorder: @unchecked Sendable {
     }
 
     static func prepare(session: URL, take: Int, screenOriginHost: Double,
-                        displayID: CGDirectDisplayID) async throws -> CaptureEventRecorder {
+                        displayID: CGDirectDisplayID,
+                        pointerEventsEnabled: Bool = true) async throws -> CaptureEventRecorder {
         try await Task.detached(priority: .utility) {
-            try CaptureEventRecorder(session: session, take: take, screenOriginHost: screenOriginHost, displayID: displayID)
+            try CaptureEventRecorder(session: session, take: take, screenOriginHost: screenOriginHost,
+                                     displayID: displayID, pointerEventsEnabled: pointerEventsEnabled)
         }.value
     }
 
@@ -280,6 +287,10 @@ final class CaptureEventRecorder: @unchecked Sendable {
             running = true
             _ = writer.append(.init(t: 0, type: .recordingStarted), durable: true)
         }
+
+        // A window movie cannot safely use display-global pointer coordinates. Keep the
+        // writer running for markers and SCStream visual active/idle events in either mode.
+        guard pointerEventsEnabled else { return }
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: .milliseconds(33), leeway: .milliseconds(6))

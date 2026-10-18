@@ -75,6 +75,19 @@ private final class CaptureFirstMouseHostingView<Content: View>: NSHostingView<C
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
+/// A native draggable region for the recording strip while another app has keyboard focus.
+/// The hosting view consumes pointer events over SwiftUI controls, so the panel's
+/// isMovableByWindowBackground alone does not give the user a reliable drag target.
+private struct CapturePanelDragRegion: NSViewRepresentable {
+    private final class DragView: NSView {
+        override var mouseDownCanMoveWindow: Bool { true }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    }
+
+    func makeNSView(context: Context) -> NSView { DragView() }
+    func updateNSView(_ view: NSView, context: Context) {}
+}
+
 /// Cutmark-native screen recording strip. Device changes remain disabled while recording because
 /// swapping capture inputs mid-file would make the camera/screen timeline ambiguous. The strip only
 /// exposes controls that are safe for the current recording architecture.
@@ -84,11 +97,21 @@ private struct CaptureControlBar: View {
     @ObservedObject var screen: ScreenRecorder
 
     private var displayName: String {
-        screen.displays.first { $0.id == screen.displayID }?.name ?? "Display"
+        screen.selectedSourceName
     }
 
     var body: some View {
         HStack(spacing: 12) {
+            ZStack {
+                CapturePanelDragRegion()
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.muted)
+                    .allowsHitTesting(false)
+            }
+            .frame(width: 23, height: 34)
+            .help("Drag to move recording controls anywhere on this display")
+            .accessibilityLabel("Move recording controls")
             HStack(spacing: 7) {
                 Circle().fill(isFinishing ? Theme.muted : Theme.danger).frame(width: 8, height: 8)
                 clock

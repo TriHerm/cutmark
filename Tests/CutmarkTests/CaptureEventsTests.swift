@@ -120,6 +120,30 @@ struct CaptureEventsTests {
         #expect(events.map(\.t) == [0, 1.25, 4.5])
     }
 
+    @Test @MainActor func windowCaptureWithoutPointerMonitorStillKeepsMarkersAndVisualActivity() async throws {
+        let display = CGMainDisplayID()
+        // CI runners may be headless. This integration check only needs display geometry;
+        // do not request screen recording, camera or microphone permissions.
+        guard CGDisplayBounds(display).width > 0, CGDisplayBounds(display).height > 0 else { return }
+        let s = try session()
+        defer { try? FileManager.default.removeItem(at: s) }
+        let recorder = try CaptureEventRecorder(session: s, take: 8, screenOriginHost: 0,
+                                                displayID: display, pointerEventsEnabled: false)
+        recorder.start()
+        let marker = await recorder.addMarker("Keep chapter")
+        #expect(marker?.number == 1)
+        recorder.recordVisualState(active: true, screenPTS: 1)
+        recorder.recordVisualState(active: false, screenPTS: 2)
+        await recorder.stop()
+        let kinds = CaptureEventLog.read(CaptureEventLog.url(in: s, take: 8)).map(\.type)
+        #expect(kinds.contains(.recordingStarted))
+        #expect(kinds.contains(.marker))
+        #expect(kinds.contains(.visualActive))
+        #expect(kinds.contains(.visualIdle))
+        #expect(kinds.contains(.recordingStopped))
+        #expect(!kinds.contains(.move) && !kinds.contains(.down) && !kinds.contains(.scroll))
+    }
+
     @Test func displayCoordinatesAreNormalizedAndOtherDisplaysAreDropped() throws {
         let bounds = CGRect(x: 100, y: -200, width: 1000, height: 500)
         let p = try #require(CaptureEventRecorder.normalized(CGPoint(x: 600, y: 50), in: bounds))

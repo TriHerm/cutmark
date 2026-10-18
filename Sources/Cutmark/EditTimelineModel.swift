@@ -27,6 +27,47 @@ struct EditTimelineDraft: Codable {
     var actions: [Action] = []
 
     var duration: Double { segments.reduce(0) { $0 + $1.duration } }
+    /// A raw take has no published recipe. It can still be edited without first asking an
+    /// agent to create an edit; rendering it later starts a *new* named recipe.
+    var isRawTake: Bool { base.hasPrefix("takes/") }
+
+    static func fromTake(_ take: Take, duration: Double, fps: Double = 30) -> Self? {
+        guard duration.isFinite, fps.isFinite, fps > 0, duration >= 2 / fps,
+              !take.file.contains("/"), !take.file.contains("..") else { return nil }
+        let segment = Segment(take: take.number, kind: take.kind.rawValue, start: 0, end: duration)
+        return Self(base: "takes/" + take.file, fps: fps, source: [segment], segments: [segment])
+    }
+
+    enum TrimEdge { case start, end }
+
+    /// One drag endpoint maps to source seconds; snap to full output frames and keep two frames.
+    /// The gesture does not mutate until release, so undo is one atomic timeline action.
+    func trimProposal(index: Int, edge: TrimEdge, dragSeconds: Double) -> Action? {
+        guard segments.indices.contains(index), dragSeconds.isFinite, fps.isFinite, fps > 0 else { return nil }
+        let s = segments[index]
+        let frame = 1 / fps
+        switch edge {
+        case .start:
+            let value = min(s.end - 2 * frame, max(s.start, ((s.start + dragSeconds) * fps).rounded() / fps))
+            return value > s.start ? Action(op: "trim", index: index, in: value, out: s.end) : nil
+        case .end:
+            let value = max(s.start + 2 * frame, min(s.end, ((s.end + dragSeconds) * fps).rounded() / fps))
+            return value < s.end ? Action(op: "trim", index: index, in: s.start, out: value) : nil
+        }
+    }
+
+    /// The first raw-take render must use the canonical recipe shape; subsequent renders use
+    /// base + plan_timeline_edit, preserving unrelated overlays/music from published versions.
+    func initialRecipe() -> [String: Any]? {
+        guard isRawTake, !segments.isEmpty else { return nil }
+        let name = base.dropFirst("takes/".count).replacingOccurrences(of: ".mov", with: "")
+        return ["name": "clip-" + name,
+                "cut": segments.map { ["take": $0.take, "kind": $0.kind,
+                                       "in": $0.start, "out": $0.end] as [String: Any] },
+                // The encoder picks the native source rate; the timeline frame grid is only
+                // an editing aid and must not force a 30 fps export from a 60 fps screen take.
+                "frame": ["shape": "source"]]
+    }
 
     /// The lead is the optional cover duration; cut ranges remain on each original source clock.
     func outputStart(of index: Int, lead: Double = 0) -> Double? {
@@ -141,18 +182,21 @@ struct EditTimelineDraft: Codable {
 
     /// Drafts are private working files, never inside edits/ where published versions live.
     static func file(video: URL, session: URL) -> URL? {
-        guard video.deletingLastPathComponent().standardizedFileURL.path
-                == session.appending(path: "edits").standardizedFileURL.path,
+        let folder = video.deletingLastPathComponent().standardizedFileURL.path
+        let sessionRoot = session.standardizedFileURL.path
+        guard (folder == sessionRoot && video.pathExtension.lowercased() == "mov")
+              || folder == session.appending(path: "edits").standardizedFileURL.path,
               !video.lastPathComponent.contains("/") else { return nil }
         return session.appending(path: "_edit/.timeline-drafts/" + video.lastPathComponent + ".json")
     }
 
-    static func restore(video: URL, session: URL) -> EditTimelineDraft? {
-        guard let fresh = read(video: video), let file = file(video: video, session: session),
+    static func restore(video: URL, session: URL, original: EditTimelineDraft? = nil) -> EditTimelineDraft? {
+        let fresh = original ?? read(video: video)
+        guard let fresh, let file = file(video: video, session: session),
               let data = try? Data(contentsOf: file),
               let old = try? JSONDecoder().decode(Self.self, from: data),
               old.base == fresh.base, old.fps == fresh.fps, old.source == fresh.source
-        else { return read(video: video) }
+        else { return fresh }
         var replay = fresh
         for action in old.actions {
             if !replay.apply(action) { return fresh }
