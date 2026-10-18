@@ -33,6 +33,54 @@ class TimelineEditing(unittest.TestCase):
                          [(2, 4, 7), (1, 1, 2)])
         self.assertEqual(t.edit_time_map(result)["duration"], 4.0)
 
+    def test_extend_restores_a_prior_trim_without_leaking_private_bounds(self):
+        original = [{"take": 3, "in": 0.5, "out": 3.5, "label": "keep me"}]
+        actions = [{"op": "trim", "index": 0, "in": 1.0, "out": 2.0},
+                   {"op": "extend", "index": 0, "in": 0.5, "out": 3.5}]
+        self.assertEqual(t.edit_timeline_cut(original, actions, fps=30), original)
+        with self.assertRaises(ValueError):
+            t.edit_timeline_cut(original, [
+                {"op": "trim", "index": 0, "in": 1.0, "out": 2.0},
+                {"op": "trim", "index": 0, "in": 0.5, "out": 3.5},
+            ], fps=30)
+
+    def test_extend_bounds_survive_split_duplicate_and_reorder(self):
+        result = t.edit_timeline_cut(self.cut, [
+            {"op": "trim", "index": 0, "in": 1.0, "out": 3.0},
+            {"op": "split", "index": 0, "at": 2.0},
+            {"op": "duplicate", "index": 1},
+            {"op": "move", "index": 2, "to": 0},
+            {"op": "extend", "index": 0, "out": 3.5},
+            {"op": "extend", "index": 1, "in": 0.5},
+        ], fps=30)
+        self.assertEqual([(x["take"], x["in"], x["out"]) for x in result],
+                         [(1, 2, 3.5), (1, 0.5, 2), (1, 2, 3), (2, 4, 7)])
+        self.assertTrue(all(not any(k.startswith("_timeline_") for k in x) for x in result))
+        with self.assertRaises(ValueError):
+            t.edit_timeline_cut(self.cut, [
+                {"op": "split", "index": 0, "at": 2.0},
+                {"op": "trim", "index": 0, "out": 1.5},
+                {"op": "extend", "index": 0, "out": 2.1},
+            ], fps=30)
+
+    def test_extend_rejects_original_overflow_nonfinite_and_short_segments(self):
+        bad = ([{"op": "trim", "index": 0, "in": 1.0},
+                {"op": "extend", "index": 0, "in": 0.49}],
+               [{"op": "trim", "index": 0, "in": 1.0},
+                {"op": "extend", "index": 0, "in": 0.5 - 1e-10}],
+               [{"op": "trim", "index": 0, "out": 3.0},
+                {"op": "extend", "index": 0, "out": 3.51}],
+               [{"op": "trim", "index": 0, "in": 1.0, "out": 3.0},
+                {"op": "extend", "index": 0, "in": 1.0, "out": 3.0}],
+               [{"op": "extend", "index": 0, "in": float("nan")}],
+               [{"op": "extend", "index": 0, "out": float("inf")}])
+        for actions in bad:
+            with self.subTest(actions=actions), self.assertRaises(ValueError):
+                t.edit_timeline_cut(self.cut, actions, fps=30)
+        with self.assertRaises(ValueError):
+            t.edit_timeline_cut([{"take": 1, "in": 0.0, "out": 0.05}],
+                                [{"op": "extend", "index": 0}], fps=30)
+
     def test_refuses_unsafe_actions(self):
         bad = ([{"op": "split", "index": 0, "at": 0.51}],
                [{"op": "trim", "index": 0, "in": -1}],
@@ -63,6 +111,23 @@ class TimelineEditing(unittest.TestCase):
         self.assertEqual(out["timeline"]["duration"], 6.0)
         self.assertTrue(any(n == "plan_timeline_edit" for n, *_ in t.TOOLS))
         self.assertIn("plan_timeline_edit", t.READ_ONLY)
+
+    def test_public_plan_accepts_extend_and_returns_only_canonical_cut_fields(self):
+        base = {"edit": "edits/cut-v1.mp4", "name": "cut", "cut": self.cut,
+                "frame": {"shape": "source", "fps": 30}}
+        with patch.object(t, "resolve_session", return_value="/scratch/session"), \
+                patch.object(t, "pick_base", return_value=(base, [])), \
+                patch.object(t, "norm_recipe", side_effect=lambda s, r: r), \
+                patch.object(t, "check_recipe"):
+            out = t.t_plan_timeline_edit({"session": "scratch", "actions": [
+                {"op": "trim", "index": 0, "in": 1.0, "out": 2.0},
+                {"op": "extend", "index": 0, "in": 0.5, "out": 3.5}]})
+        self.assertEqual(out["changes"]["cut"], self.cut)
+        self.assertTrue(all(not any(k.startswith("_timeline_") for k in x)
+                            for x in out["changes"]["cut"]))
+        tool = next(x for x in t.TOOLS if x[0] == "plan_timeline_edit")
+        op_schema = tool[2]["actions"]["items"]["properties"]["op"]
+        self.assertIn("extend", op_schema["enum"])
 
 
 class TimelineRenderIntegration(Base):

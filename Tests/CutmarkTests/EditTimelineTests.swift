@@ -123,4 +123,82 @@ struct EditTimelineTests {
         #expect(restored)
         #expect(edited.segments[0].end == 10)
     }
+
+    @Test func reextendTrimWithoutUndoAndReturnToStartWithNoAction() throws {
+        let take = Take(number: 3, kind: .screen, file: "take-03-screen.mov",
+                        startedAt: .distantPast, duration: 10)
+        let raw = try #require(EditTimelineDraft.fromTake(take, duration: 10, fps: 30))
+        var draft = raw
+        // A drag that moves inward then returns to its original position should do nothing.
+        #expect(raw.trimProposal(index: 0, edge: .start, dragSeconds: 0) == nil)
+        let shorter = try #require(draft.trimProposal(index: 0, edge: .start, dragSeconds: 3))
+        #expect(shorter.op == "trim")
+        #expect(draft.apply(shorter))
+        #expect(draft.segments[0].start == 3)
+        // Subsequent outward drag recovers hidden frames, without an Undo command.
+        let extended = try #require(draft.trimProposal(index: 0, edge: .start, dragSeconds: -2))
+        #expect(extended.op == "extend")
+        #expect(draft.apply(extended))
+        #expect(draft.segments[0].start == 1)
+        let restore = try #require(draft.trimProposal(index: 0, edge: .start, dragSeconds: -99))
+        #expect(restore.in == 0)
+        #expect(draft.apply(restore))
+        #expect(draft.segments == raw.segments)
+        #expect(draft.actions.map(\.op) == ["trim", "extend", "extend"])
+        #expect(draft.undoLast() && draft.segments[0].start == 1)
+        #expect(draft.undoLast() && draft.segments[0].start == 3)
+    }
+
+    @Test func trimGesturePreviewIsReversibleInOneDragWithoutWritingHistory() throws {
+        let segment = EditTimelineDraft.Segment(take: 1, kind: "screen", start: 2, end: 7)
+        let original = EditTimelineDraft.Segment(take: 1, kind: "screen", start: 0, end: 10)
+        let pps = 50.0
+        let shrink = EditTimelineDraft.trimPreviewOffset(edge: .start, proposedPixels: 100,
+            segment: segment, bounds: original, pixelsPerSecond: pps, fps: 30)
+        let returned = EditTimelineDraft.trimPreviewOffset(edge: .start, proposedPixels: 0,
+            segment: segment, bounds: original, pixelsPerSecond: pps, fps: 30)
+        let extend = EditTimelineDraft.trimPreviewOffset(edge: .start, proposedPixels: -999,
+            segment: segment, bounds: original, pixelsPerSecond: pps, fps: 30)
+        #expect(shrink == 100)
+        #expect(returned == 0)
+        #expect(extend == -100)
+        #expect(EditTimelineDraft.trimPreviewOffset(edge: .end, proposedPixels: 999,
+            segment: segment, bounds: original, pixelsPerSecond: pps, fps: 30) == 150)
+        #expect(EditTimelineDraft.trimPreviewOffset(edge: .end, proposedPixels: 0,
+            segment: segment, bounds: original, pixelsPerSecond: pps, fps: 30) == 0)
+    }
+
+    @Test func splitAndDuplicateNeverExtendAcrossTheirSourceEnvelopes() throws {
+        let take = Take(number: 2, kind: .camera, file: "take-02-camera.mov",
+                        startedAt: .distantPast, duration: 10)
+        var draft = try #require(EditTimelineDraft.fromTake(take, duration: 10))
+        #expect(draft.apply(.init(op: "split", index: 0, at: 4)))
+        #expect(draft.trimBounds(index: 0)?.end == 4)
+        #expect(draft.trimBounds(index: 1)?.start == 4)
+        #expect(draft.apply(.init(op: "trim", index: 1, in: 5, out: 8)))
+        #expect(draft.apply(.init(op: "duplicate", index: 1)))
+        #expect(draft.apply(.init(op: "move", index: 2, to: 0)))
+        let outward = try #require(draft.trimProposal(index: 0, edge: .start, dragSeconds: -99))
+        #expect(outward.in == 4)
+        #expect(draft.apply(outward))
+        #expect(draft.segments[0].start == 4)
+        #expect(!draft.apply(.init(op: "extend", index: 0, in: 3, out: 8)))
+        #expect(!draft.apply(.init(op: "extend", index: 0, in: 4, out: 11)))
+    }
+
+    @Test func outwardTrimSavesAndRestoresExactActionHistory() throws {
+        let take = Take(number: 5, kind: .screen, file: "take-05-screen.mov",
+                        startedAt: .distantPast, duration: 9)
+        let raw = try #require(EditTimelineDraft.fromTake(take, duration: 9))
+        var draft = raw
+        #expect(draft.apply(.init(op: "trim", index: 0, in: 2, out: 8)))
+        #expect(draft.apply(.init(op: "extend", index: 0, in: 0, out: 9)))
+        let root = FileManager.default.temporaryDirectory.appending(path: "cutmark-extend-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let video = root.appending(path: take.file)
+        try draft.save(video: video, session: root)
+        let loaded = try #require(EditTimelineDraft.restore(video: video, session: root, original: raw))
+        #expect(loaded.segments == raw.segments)
+        #expect(loaded.actions == draft.actions)
+    }
 }

@@ -40,19 +40,68 @@ struct EditTimelineDraft: Codable {
 
     enum TrimEdge { case start, end }
 
+    /// Pure preview geometry: clamp a mouse drag to this occurrence's recoverable media range.
+    /// Pixels may be positive or negative for either handle; the controller never modifies the
+    /// movie/recipe during the drag. The same frame limits are enforced again on commit.
+    static func trimPreviewOffset(edge: TrimEdge, proposedPixels: Double, segment: Segment,
+                                  bounds: Segment, pixelsPerSecond: Double, fps: Double) -> Double {
+        guard proposedPixels.isFinite, pixelsPerSecond.isFinite, pixelsPerSecond > 0,
+              fps.isFinite, fps > 0 else { return 0 }
+        let shrink = max(0, (segment.duration - 2 / fps) * pixelsPerSecond)
+        switch edge {
+        case .start:
+            return min(shrink, max((bounds.start - segment.start) * pixelsPerSecond, proposedPixels))
+        case .end:
+            return max(-shrink, min((bounds.end - segment.end) * pixelsPerSecond, proposedPixels))
+        }
+    }
+
+    /// Each occurrence retains its own recoverable source envelope. Split divides that envelope;
+    /// duplicate copies it; move/remove carry it; trim/extend never destroy it. Reconstruct
+    /// from source+actions so saved drafts and undo remain backwards compatible.
+    func trimBounds(index: Int) -> Segment? {
+        guard segments.indices.contains(index) else { return nil }
+        var bounds = source
+        for a in actions {
+            guard bounds.indices.contains(a.index) else { return nil }
+            switch a.op {
+            case "split":
+                guard let at = a.at, at.isFinite else { return nil }
+                let span = bounds[a.index]
+                guard at >= span.start, at <= span.end else { return nil }
+                bounds[a.index].end = at
+                bounds.insert(.init(take: span.take, kind: span.kind, start: at, end: span.end), at: a.index + 1)
+            case "duplicate": bounds.insert(bounds[a.index], at: a.index + 1)
+            case "move":
+                guard let to = a.to, bounds.indices.contains(to) else { return nil }
+                bounds.insert(bounds.remove(at: a.index), at: to)
+            case "remove": bounds.remove(at: a.index)
+            case "trim", "extend": break
+            default: return nil
+            }
+        }
+        guard bounds.count == segments.count else { return nil }
+        return bounds[index]
+    }
+
     /// One drag endpoint maps to source seconds; snap to full output frames and keep two frames.
     /// The gesture does not mutate until release, so undo is one atomic timeline action.
     func trimProposal(index: Int, edge: TrimEdge, dragSeconds: Double) -> Action? {
-        guard segments.indices.contains(index), dragSeconds.isFinite, fps.isFinite, fps > 0 else { return nil }
+        guard segments.indices.contains(index), dragSeconds.isFinite, fps.isFinite, fps > 0,
+              let bounds = trimBounds(index: index) else { return nil }
         let s = segments[index]
         let frame = 1 / fps
+        // Moving away and back to the initial edge within one gesture makes no history entry.
+        guard abs(dragSeconds) >= frame / 2 else { return nil }
         switch edge {
         case .start:
-            let value = min(s.end - 2 * frame, max(s.start, ((s.start + dragSeconds) * fps).rounded() / fps))
-            return value > s.start ? Action(op: "trim", index: index, in: value, out: s.end) : nil
+            let value = min(s.end - 2 * frame, max(bounds.start, ((s.start + dragSeconds) * fps).rounded() / fps))
+            guard abs(value - s.start) >= frame / 2 else { return nil }
+            return Action(op: value < s.start ? "extend" : "trim", index: index, in: value, out: s.end)
         case .end:
-            let value = max(s.start + 2 * frame, min(s.end, ((s.end + dragSeconds) * fps).rounded() / fps))
-            return value < s.end ? Action(op: "trim", index: index, in: s.start, out: value) : nil
+            let value = max(s.start + 2 * frame, min(bounds.end, ((s.end + dragSeconds) * fps).rounded() / fps))
+            guard abs(value - s.end) >= frame / 2 else { return nil }
+            return Action(op: value > s.end ? "extend" : "trim", index: index, in: s.start, out: value)
         }
     }
 
@@ -155,10 +204,16 @@ struct EditTimelineDraft: Codable {
                   at - item.start >= minDuration, item.end - at >= minDuration else { return false }
             segments[index].end = at
             segments.insert(Segment(take: item.take, kind: item.kind, start: at, end: item.end), at: index + 1)
-        case "trim":
+        case "trim", "extend":
             let start = action.in ?? item.start, end = action.out ?? item.end
-            guard start.isFinite, end.isFinite, start >= item.start, end <= item.end,
-                  end - start >= minDuration else { return false }
+            guard start.isFinite, end.isFinite, end - start >= minDuration else { return false }
+            if action.op == "trim" {
+                guard start >= item.start, end <= item.end else { return false }
+            } else {
+                guard let bounds = trimBounds(index: index), start >= bounds.start,
+                      end <= bounds.end, start <= item.start, end >= item.end,
+                      start < item.start || end > item.end else { return false }
+            }
             segments[index].start = start
             segments[index].end = end
         default:

@@ -1707,6 +1707,15 @@ private struct ScreenPreviewCard: View {
 /// Record controls remember a normalized centre so resizing keeps them in the same part of the
 /// stage. The clamp uses the measured control size, so the capsule cannot be dragged off-screen.
 struct RecordPillPlacement {
+    /// Preparation never uses last recording's free-drag position. While recording only, the
+    /// on-stage controls follow a clamped live position (for camera-only as well as paired).
+    static func stagePosition(recording: Bool, livePosition: CGPoint?, stage: CGSize,
+                              control: CGSize) -> CGPoint {
+        let fixed = point(normalized: CGPoint(x: 0.5, y: 1), stage: stage, control: control)
+        guard recording, let livePosition else { return fixed }
+        return clamped(point: livePosition, stage: stage, control: control)
+    }
+
     private static func limits(total: CGFloat, control: CGFloat, margin: CGFloat) -> (CGFloat, CGFloat) {
         let low = control / 2 + margin
         let high = total - control / 2 - margin
@@ -1756,20 +1765,20 @@ enum RecordPillLayout: Equatable {
     static let compactWidth: CGFloat = 292
 }
 
-/// Floats on the stage: the time, the record button, the shape, the screen and the devices.
+/// Preparation controls stay in one predictable place. Only the separate non-activating
+/// CaptureControlPanel is movable once recording has started.
 struct RecordPill: View {
     @Environment(AppModel.self) var app
     @ObservedObject var camera: CameraRecorder
     @ObservedObject var screen: ScreenRecorder
-    @AppStorage("recordPillX") private var savedX = 0.5
-    @AppStorage("recordPillY") private var savedY = 1.0
     @AppStorage("screenPreviewVisible") private var screenPreviewVisible = false
     @State private var devices = false
     @State private var sourcePicker = false
     @State private var hover = false
     @State private var pillSize = CGSize(width: 420, height: 60)
-    @State private var dragOrigin: CGPoint?
-    @State private var dragPoint: CGPoint?
+    @State private var activeDragOrigin: CGPoint?
+    @State private var activeDragPoint: CGPoint?
+    @State private var activeRestingPoint: CGPoint?
 
     private var recording: Bool { if case .recording = app.phase { return true }; return false }
     private var stoppable: Bool {
@@ -1784,22 +1793,33 @@ struct RecordPill: View {
             let displayPicker = app.mode.recordsScreen
             let layout = RecordPillLayout.choose(stageWidth: stage.size.width, showsDisplayPicker: displayPicker,
                                                  textScale: TextSize.shared.factor)
-            let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
-            let resting = RecordPillPlacement.point(normalized: saved, stage: stage.size, control: pillSize)
+            let position = RecordPillPlacement.stagePosition(recording: recording,
+                livePosition: activeDragPoint ?? activeRestingPoint,
+                stage: stage.size, control: pillSize)
             controls(stage: stage.size, layout: layout)
                 .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
                     if size.width > 0, size.height > 0, size != pillSize { pillSize = size }
                 }
-                // Drag updates must be pixel-aligned and non-animated. A spring combined with
-                // the blurred floating shadow made the entire pill look smeared while moving.
-                .position(pixelAligned(dragPoint ?? resting))
-                .transaction { if dragPoint != nil { $0.animation = nil } }
+                .position(position)
+                .transaction { if activeDragPoint != nil { $0.animation = nil } }
+        }
+        .onChange(of: recording) { _, active in
+            // Preparation always returns to its fixed location; live movement is per take.
+            if !active { activeDragOrigin = nil; activeDragPoint = nil; activeRestingPoint = nil }
         }
     }
 
     @ViewBuilder private func controls(stage: CGSize, layout: RecordPillLayout) -> some View {
         HStack(spacing: layout == .compact ? 8 : 12) {
-            dragHandle(stage: stage)
+            if recording {
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.muted)
+                    .frame(width: 23, height: 34)
+                    .contentShape(Rectangle())
+                    .gesture(activeDrag(stage: stage, distance: 2))
+                    .help("Drag to move live recording controls")
+            }
             clock
             recordButton
             if layout == .compact {
@@ -1812,15 +1832,37 @@ struct RecordPill: View {
         .frame(width: layout == .compact ? RecordPillLayout.compactWidth : nil)
         // Paper on the daylight stage; it follows the stage into the dark while you record.
         .background(Capsule().fill(Theme.paper)
-            .shadow(color: Theme.shadow.opacity(dragPoint == nil ? 1.8 : 0),
-                    radius: dragPoint == nil ? 18 : 0, y: dragPoint == nil ? 6 : 0)
-            // Blank capsule space is draggable, but buttons retain exclusive pointer events.
-            .gesture(pillDrag(stage: stage, minimumDistance: 4)))
+            .shadow(color: Theme.shadow.opacity(activeDragPoint == nil ? 1.8 : 0),
+                    radius: activeDragPoint == nil ? 18 : 0, y: activeDragPoint == nil ? 6 : 0)
+            .gesture(activeDrag(stage: stage, distance: 5)))
         .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
         .foregroundStyle(Theme.ink)
         .animation(Theme.spring, value: recording)
-        // Hover animation is limited to the record button; moving the whole capsule should
-        // never inherit an implicit hover spring that trails behind the pointer.
+    }
+
+    private func activeDrag(stage: CGSize, distance: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: distance)
+            .onChanged { value in
+                guard recording else { return }
+                let fallback = RecordPillPlacement.point(normalized: CGPoint(x: 0.5, y: 1),
+                                                         stage: stage, control: pillSize)
+                let origin = activeDragOrigin ?? activeRestingPoint ?? fallback
+                if activeDragOrigin == nil { activeDragOrigin = origin }
+                activeDragPoint = RecordPillPlacement.clamped(
+                    point: CGPoint(x: origin.x + value.translation.width,
+                                   y: origin.y + value.translation.height), stage: stage, control: pillSize)
+            }
+            .onEnded { value in
+                guard recording else { return }
+                let fallback = RecordPillPlacement.point(normalized: CGPoint(x: 0.5, y: 1),
+                                                         stage: stage, control: pillSize)
+                let origin = activeDragOrigin ?? activeRestingPoint ?? fallback
+                activeRestingPoint = RecordPillPlacement.clamped(
+                    point: CGPoint(x: origin.x + value.translation.width,
+                                   y: origin.y + value.translation.height), stage: stage, control: pillSize)
+                activeDragPoint = nil
+                activeDragOrigin = nil
+            }
     }
 
     private var recordButton: some View {
@@ -1983,46 +2025,6 @@ struct RecordPill: View {
         // DetailView's source/visibility observers request the one-shot image. Doing it here
         // as well could issue two screenshots and bring the very preview lag we are removing.
         screenPreviewVisible = true
-    }
-
-    private func dragHandle(stage: CGSize) -> some View {
-        Image(systemName: "line.3.horizontal")
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(Theme.faint)
-            .frame(width: 28, height: 42)
-            .contentShape(Rectangle())
-            .gesture(pillDrag(stage: stage, minimumDistance: 1))
-            .help("Drag this grip or the capsule background to move recording controls")
-            .accessibilityLabel("Move recording controls")
-    }
-
-    private func pillDrag(stage: CGSize, minimumDistance: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: minimumDistance)
-            .onChanged { movePill($0.translation, stage: stage, ended: false) }
-            .onEnded { movePill($0.translation, stage: stage, ended: true) }
-    }
-
-    private func pixelAligned(_ position: CGPoint) -> CGPoint {
-        let scale = max(1, NSScreen.main?.backingScaleFactor ?? 2)
-        return CGPoint(x: (position.x * scale).rounded() / scale,
-                       y: (position.y * scale).rounded() / scale)
-    }
-
-    private func movePill(_ translation: CGSize, stage: CGSize, ended: Bool) {
-        let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
-        let base = dragOrigin ?? RecordPillPlacement.point(normalized: saved, stage: stage, control: pillSize)
-        if dragOrigin == nil { dragOrigin = base }
-        let proposed = CGPoint(x: base.x + translation.width, y: base.y + translation.height)
-        let final = RecordPillPlacement.clamped(point: proposed, stage: stage, control: pillSize)
-        if ended {
-            let normalized = RecordPillPlacement.normalized(point: final, stage: stage, control: pillSize)
-            savedX = Double(normalized.x)
-            savedY = Double(normalized.y)
-            dragOrigin = nil
-            dragPoint = nil
-        } else {
-            dragPoint = final
-        }
     }
 
     /// The time since you started; the mic level while you wait.

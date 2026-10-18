@@ -349,9 +349,11 @@ private struct TimelineEditorWorkspace: View {
     }
 
     private func clipView(_ segment: EditTimelineDraft.Segment, index: Int) -> some View {
+        let envelope = draft?.trimBounds(index: index) ?? segment
         TimelineFilmstripBar(segment: segment, number: index + 1,
                              width: width(for: segment), thumbs: media.thumbnails[index] ?? [],
-                             selected: selected == index,
+                             selected: selected == index, envelope: envelope,
+                             pixelsPerSecond: pixelsPerSecond, fps: draft?.fps ?? 30,
                              seek: { fraction in
                                 guard let draft, let start = draft.outputStart(of: index) else { return }
                                 selected = index
@@ -501,6 +503,9 @@ private struct TimelineFilmstripBar: View {
     let width: CGFloat
     let thumbs: [TimelineThumbnail]
     let selected: Bool
+    let envelope: EditTimelineDraft.Segment
+    let pixelsPerSecond: Double
+    let fps: Double
     let seek: (Double) -> Void
     let trim: (EditTimelineDraft.TrimEdge, CGFloat) -> Void
     let reorder: (Int) -> Void
@@ -539,6 +544,30 @@ private struct TimelineFilmstripBar: View {
         .overlay(alignment: .trailing) {
             Rectangle().fill(.black.opacity(0.58)).frame(width: -trailingDrag).allowsHitTesting(false)
         }
+        // Removed frames are always recoverable. Ghost previews show the region being added
+        // before mouse-up, while the live player stays on the last committed composition.
+        .overlay(alignment: .leading) {
+            if leadingDrag < 0 {
+                Rectangle().fill(Theme.accent.opacity(0.25))
+                    .frame(width: -leadingDrag, height: 74).offset(x: leadingDrag)
+                    .allowsHitTesting(false)
+            }
+        }
+        .overlay(alignment: .trailing) {
+            if trailingDrag > 0 {
+                Rectangle().fill(Theme.accent.opacity(0.25))
+                    .frame(width: trailingDrag, height: 74).offset(x: trailingDrag)
+                    .allowsHitTesting(false)
+            }
+        }
+        .overlay(alignment: .bottomLeading) {
+            if leadingDrag != 0 || trailingDrag != 0 {
+                Text(previewTimeLabel)
+                    .font(Theme.mono(10, .semibold)).foregroundStyle(.white)
+                    .padding(4).background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 3))
+                    .padding(3).allowsHitTesting(false)
+            }
+        }
         .overlay(Rectangle().strokeBorder(selected ? Theme.accent : Theme.border,
                                         lineWidth: selected ? 2.5 : 1))
         .contentShape(Rectangle())
@@ -569,16 +598,27 @@ private struct TimelineFilmstripBar: View {
                 .onChanged { event in
                     // Live in/out feedback, without decoding video during the drag. The model
                     // snaps on release and the composition then refreshes exactly once.
-                    let limit = max(0, width - 8)
-                    if edge == .start { leadingDrag = min(limit, max(0, event.translation.width)) }
-                    else { trailingDrag = max(-limit, min(0, event.translation.width)) }
+                    // Reversible in either direction. A drag out and back to zero commits
+                    // nothing. Later drags can re-extend up to this occurrence's source bounds.
+                    let offset = EditTimelineDraft.trimPreviewOffset(edge: edge,
+                        proposedPixels: Double(event.translation.width), segment: segment,
+                        bounds: envelope, pixelsPerSecond: pixelsPerSecond, fps: fps)
+                    if edge == .start { leadingDrag = CGFloat(offset) }
+                    else { trailingDrag = CGFloat(offset) }
                 }
-                .onEnded { event in
-                    trim(edge, event.translation.width)
+                .onEnded { _ in
+                    trim(edge, edge == .start ? leadingDrag : trailingDrag)
                     leadingDrag = 0
                     trailingDrag = 0
                 })
-            .help(edge == .start ? "Drag right to trim clip start" : "Drag left to trim clip end")
+            .help(edge == .start ? "Drag right to trim or left to recover clip start"
+                                   : "Drag left to trim or right to recover clip end")
+    }
+
+    private var previewTimeLabel: String {
+        let newStart = segment.start + Double(leadingDrag) / pixelsPerSecond
+        let newEnd = segment.end + Double(trailingDrag) / pixelsPerSecond
+        return String(format: "%.2f – %.2f s", newStart, newEnd)
     }
 }
 

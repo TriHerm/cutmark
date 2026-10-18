@@ -1,4 +1,6 @@
+import AppKit
 import CoreGraphics
+import SwiftUI
 import Testing
 @testable import Cutmark
 
@@ -85,5 +87,44 @@ struct RecordControlsTests {
         #expect(portraitWidth < 180)
         #expect(portraitWidth / (9.0 / 16.0) + 28 + 36 <= compact.height)
         #expect(ScreenPreviewPlacement.width(stage: stage, aspect: 16.0 / 9.0) == 260)
+    }
+
+    @Test func recordingPanelNativeDragTracksPointerAndCanReverseWithoutDrift() {
+        let start = CGPoint(x: 400, y: 80)
+        let down = CGPoint(x: 200, y: 250)
+        let moved = CapturePanelDragGeometry.origin(from: start, mouseDown: down,
+                                                     mouseNow: CGPoint(x: 660, y: 430))
+        #expect(moved == CGPoint(x: 860, y: 260))
+        #expect(CapturePanelDragGeometry.origin(from: start, mouseDown: down,
+                                                 mouseNow: down) == start)
+    }
+
+    @Test func preparationRecordPillIsFixedButRecordingControlsCanMove() {
+        let stage = CGSize(width: 900, height: 600)
+        let pill = CGSize(width: 420, height: 60)
+        let moved = CGPoint(x: 320, y: 205)
+        let idle = RecordPillPlacement.stagePosition(recording: false, livePosition: moved,
+                                                     stage: stage, control: pill)
+        let recording = RecordPillPlacement.stagePosition(recording: true, livePosition: moved,
+                                                          stage: stage, control: pill)
+        #expect(idle == CGPoint(x: 450, y: 552))
+        #expect(recording == moved)
+        #expect(RecordPillPlacement.stagePosition(recording: false, livePosition: nil,
+            stage: stage, control: pill) == idle)
+    }
+
+    @MainActor
+    @Test func recordingStatusDragSurfaceWinsHitTestingWithoutStealingStopButton() {
+        let host = NSHostingView(rootView: HStack(spacing: 0) {
+            Text("Timer").frame(width: 100, height: 44).overlay(CapturePanelDragRegion())
+            Button("Stop") {}.frame(width: 80, height: 44)
+        }.frame(width: 180, height: 44))
+        let panel = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 180, height: 44),
+                             styleMask: [.borderless], backing: .buffered, defer: false)
+        panel.contentView = host
+        host.frame = NSRect(x: 0, y: 0, width: 180, height: 44)
+        host.layoutSubtreeIfNeeded()
+        #expect(host.hitTest(NSPoint(x: 50, y: 22)) is CapturePanelDragRegion.DragView)
+        #expect(!(host.hitTest(NSPoint(x: 150, y: 22)) is CapturePanelDragRegion.DragView))
     }
 }

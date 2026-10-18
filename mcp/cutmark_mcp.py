@@ -11928,18 +11928,22 @@ def edit_timeline_cut(cut, actions, fps=30):
     if not isinstance(fps, (int, float)) or isinstance(fps, bool) or not math.isfinite(fps) or fps <= 0:
         raise ValueError("The edit must have a positive frame rate.")
     minimum = 2.0 / float(fps)
-    parts = [dict(g) for g in cut]
+    # Keep extension provenance outside the public segment dict. A recipe may carry optional segment
+    # metadata, so private planner keys must never overwrite or leak into the proposed canonical cut.
+    parts = [{"_segment": dict(g), "_timeline_bound_in": float(g["in"]),
+              "_timeline_bound_out": float(g["out"])} for g in cut]
     for step, action in enumerate(actions):
         if not isinstance(action, dict):
             raise ValueError("Timeline action %d must be an object." % (step + 1))
         op = action.get("op")
-        if op not in ("split", "trim", "move", "remove", "duplicate"):
-            raise ValueError("Timeline action %d: use split, trim, move, remove or duplicate." % (step + 1))
+        if op not in ("split", "trim", "extend", "move", "remove", "duplicate"):
+            raise ValueError("Timeline action %d: use split, trim, extend, move, remove or duplicate." % (step + 1))
         i = action.get("index")
         if isinstance(i, bool) or not isinstance(i, int) or not (0 <= i < len(parts)):
             raise ValueError("Timeline action %d: index is outside the current segments." % (step + 1))
         item = parts[i]
-        a, b = float(item["in"]), float(item["out"])
+        segment = item["_segment"]
+        a, b = float(segment["in"]), float(segment["out"])
         if op == "remove":
             if len(parts) == 1:
                 raise ValueError("An edit needs at least one segment. Trim it instead.")
@@ -11950,7 +11954,9 @@ def edit_timeline_cut(cut, actions, fps=30):
                 raise ValueError("Timeline action %d: to is outside the current segments." % (step + 1))
             parts.insert(to, parts.pop(i))
         elif op == "duplicate":
-            parts.insert(i + 1, dict(item))
+            duplicate = dict(item)
+            duplicate["_segment"] = dict(segment)
+            parts.insert(i + 1, duplicate)
         else:
             def second(key, default=None):
                 raw = action.get(key, default)
@@ -11961,14 +11967,29 @@ def edit_timeline_cut(cut, actions, fps=30):
                 at = second("at")
                 if at - a < minimum - 1e-8 or b - at < minimum - 1e-8:
                     raise ValueError("Split must leave at least two frames on both sides.")
-                left, right = dict(item, **{"out": at}), dict(item, **{"in": at})
+                left, right = dict(item), dict(item)
+                left["_segment"] = dict(segment, **{"out": at})
+                right["_segment"] = dict(segment, **{"in": at})
+                # A later extend may restore a trim that happened before this split, but it cannot
+                # grow either child across the deliberate split boundary.
+                left["_timeline_bound_out"] = at
+                right["_timeline_bound_in"] = at
                 parts[i:i + 1] = [left, right]
             elif op == "trim":
                 start, end = second("in", a), second("out", b)
                 if start < a - 1e-8 or end > b + 1e-8 or end - start < minimum - 1e-8:
                     raise ValueError("Trim must stay inside the segment and keep at least two frames.")
-                parts[i] = dict(item, **{"in": start, "out": end})
-    return parts
+                item["_segment"] = dict(segment, **{"in": start, "out": end})
+                parts[i] = item
+            elif op == "extend":
+                start, end = second("in", a), second("out", b)
+                bound_a, bound_b = item["_timeline_bound_in"], item["_timeline_bound_out"]
+                if (start < bound_a or end > bound_b or start > a or end < b or
+                        end - start < minimum - 1e-8 or not (start < a or end > b)):
+                    raise ValueError("Extend must grow the segment within its original bounds and keep at least two frames.")
+                item["_segment"] = dict(segment, **{"in": start, "out": end})
+                parts[i] = item
+    return [item["_segment"] for item in parts]
 
 
 def rounded_cut_for_render(cut, clocks):
@@ -14726,22 +14747,22 @@ TOOLS = [
                "the newest edit."}},
      ["session"], t_get_edit_recipe),
     ("plan_timeline_edit", "Inspect a published edit's ordered cut timeline or propose non-destructive segment operations. "
-     "actions=[{op:'split',index:0,at:4.2},{op:'trim',index:1,in:4.2,out:7.0},{op:'move',index:1,to:0},"
+     "actions=[{op:'split',index:0,at:4.2},{op:'trim',index:1,in:4.5,out:6.5},{op:'extend',index:1,in:4.2,out:7.0},{op:'move',index:1,to:0},"
      "{op:'duplicate',index:0},{op:'remove',index:2}] uses zero-based CURRENT segment indices, in source seconds. "
-     "Split/trim keep at least two output frames; trim cannot extend source beyond the original segment. "
+     "Split/trim/extend keep at least two output frames. Trim only moves edges inward; extend only grows them back within that occurrence's original source bounds. A split makes its point the inherited extension boundary for both children. "
      "Returns exact source/output spans and render_edit arguments for review, without writing files. "
      "Then call render_edit with those arguments, inspect checks, and publish_edit only when accepted.",
      {"session": SESSION,
       "base": {"type": "string", "description": "Published edit name or version, as in render_edit base."},
       "actions": {"type": "array", "description": "Ordered operations applied to the current cut list; omit for read-only timeline.",
                   "items": {"type": "object", "properties": {
-                      "op": {"type": "string", "description": "split, trim, move, remove or duplicate this segment occurrence.",
-                             "enum": ["split", "trim", "move", "remove", "duplicate"]},
+                      "op": {"type": "string", "description": "split, trim, extend, move, remove or duplicate this segment occurrence.",
+                             "enum": ["split", "trim", "extend", "move", "remove", "duplicate"]},
                       "index": {"type": "integer", "description": "Zero-based index in the current timeline, after previous actions."},
                       "to": {"type": "integer", "description": "For move: target zero-based index in the current timeline."},
                       "at": {"type": "number", "description": "For split: split position in the original source clip's seconds."},
-                      "in": {"type": "number", "description": "For trim: new inclusive start within the current source clip, seconds."},
-                      "out": {"type": "number", "description": "For trim: new exclusive end within the current source clip, seconds."}},
+                      "in": {"type": "number", "description": "For trim/extend: new inclusive start in source seconds; trim moves inward, extend may only move outward to the occurrence bound."},
+                      "out": {"type": "number", "description": "For trim/extend: new exclusive end in source seconds; trim moves inward, extend may only move outward to the occurrence bound."}},
                       "required": ["op", "index"]}},
       "go_back": {"type": "boolean", "description": "Explicitly allow planning from an older version."}},
      ["session"], t_plan_timeline_edit),
