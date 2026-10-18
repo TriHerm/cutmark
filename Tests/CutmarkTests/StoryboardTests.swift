@@ -11,6 +11,16 @@ import Testing
         #expect(!Storyboard.request.contains("Claude Code"))
     }
 
+    @Test func screenOnlyAndPairedRecordingsAppearOncePerStoryboardShot() throws {
+        let data = #"[{"number":1,"kind":"screen","file":"s1.mov","startedAt":0,"shot":"screen-shot"},{"number":2,"kind":"screen","file":"s2.mov","startedAt":1,"shot":"paired"},{"number":2,"kind":"camera","file":"c2.mov","startedAt":1,"shot":"paired"}]"#
+        let takes = try JSONDecoder().decode([Take].self, from: Data(data.utf8))
+        let grouped = Storyboard.shotTakes(takes)
+        #expect(grouped["screen-shot"]?.count == 1)
+        #expect(grouped["screen-shot"]?.first?.kind == .screen)
+        #expect(grouped["paired"]?.count == 1)
+        #expect(grouped["paired"]?.first?.kind == .camera)
+    }
+
     @Test func readsTheMCPFormatAndTimesEachShot() throws {
         let json = """
         {"shots": [{"kind": "DESK", "say": "one two three four five six seven eight nine ten eleven twelve thirteen",

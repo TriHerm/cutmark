@@ -108,6 +108,16 @@ struct Storyboard: Decodable, Equatable {
     /// The MCP found no image key (Gemini, OpenAI or Replicate) and drew nothing (2026-10-09).
     var nokey: Bool?
 
+    /// One visible take tile per recording, including screen-only, with paired camera preferred.
+    nonisolated static func shotTakes(_ all: [Take]) -> [String: [Take]] {
+        Dictionary(grouping: all.filter { $0.shot != nil }, by: { $0.shot! })
+            .mapValues { shots in
+                Dictionary(grouping: shots, by: \.number).values
+                    .compactMap { pair in pair.first(where: { $0.kind == .camera }) ?? pair.first }
+                    .sorted { $0.number < $1.number }
+            }
+    }
+
     /// Not every supported chat provider exposes installed skills the same way. Give all of them
     /// the concrete MCP workflow, so storyboard generation never depends on Claude's Skill tool.
     nonisolated static let request = "Storyboard this video using the cutmark MCP. Read get_session first; "
@@ -353,8 +363,7 @@ struct StoryboardPane: View {
 
     /// The camera takes filed under each shot, oldest first.
     private var takes: [String: [Take]] {
-        Dictionary(grouping: doc.meta.takes.filter { $0.kind == .camera && $0.shot != nil }, by: { $0.shot! })
-            .mapValues { $0.sorted { $0.number < $1.number } }
+        Storyboard.shotTakes(doc.meta.takes)
     }
 
     /// The shot the user picked, else the first one with no take yet: where he left off.
