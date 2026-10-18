@@ -43,11 +43,14 @@ struct TimelineEditorPlaybackTests {
         let scrubbed = try #require(await playback.commandTime(duration: 2, pause: true))
         #expect(abs(scrubbed - 0.90) < 0.001)
 
-        // When this asset does not advertise reverse playback, J takes Cutmark's safe one-second
-        // fallback path. It must also base that move on the settled AVPlayer clock.
-        if playback.player.currentItem?.canPlayReverse == false {
-            playback.seek(1.5, duration: 2)
-            await playback.shuttleBackward(duration: 2, fps: 4)
+        // AVPlayerItem.canPlayReverse can change asynchronously from false to true while
+        // the exact seek settles. Check what J actually selected, not capability sampled
+        // *before* an awaited seek: either a real reverse shuttle or the one-second fallback.
+        playback.seek(1.5, duration: 2)
+        await playback.shuttleBackward(duration: 2, fps: 4)
+        if playback.player.rate < 0 {
+            #expect(playback.playing)
+        } else {
             let shuttled = try #require(await playback.commandTime(duration: 2, pause: true))
             #expect(abs(shuttled - 0.5) < 0.001)
         }
