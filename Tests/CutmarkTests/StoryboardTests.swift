@@ -3,6 +3,14 @@ import Testing
 @testable import Cutmark
 
 @Suite struct StoryboardTests {
+    @Test func storyboardRequestWorksWithoutProviderSpecificSkillSupportOrImageKey() {
+        #expect(Storyboard.request.contains("get_session"))
+        #expect(Storyboard.request.contains("set_storyboard"))
+        #expect(Storyboard.request.contains("Skill tool"))
+        #expect(Storyboard.request.contains("image generation API key is optional"))
+        #expect(!Storyboard.request.contains("Claude Code"))
+    }
+
     @Test func readsTheMCPFormatAndTimesEachShot() throws {
         let json = """
         {"shots": [{"kind": "DESK", "say": "one two three four five six seven eight nine ten eleven twelve thirteen",
