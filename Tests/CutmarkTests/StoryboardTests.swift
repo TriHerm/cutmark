@@ -12,7 +12,7 @@ import Testing
     }
 
     @Test func screenOnlyAndPairedRecordingsAppearOncePerStoryboardShot() throws {
-        let data = #"[{"number":1,"kind":"screen","file":"s1.mov","startedAt":0,"shot":"screen-shot"},{"number":2,"kind":"screen","file":"s2.mov","startedAt":1,"shot":"paired"},{"number":2,"kind":"camera","file":"c2.mov","startedAt":1,"shot":"paired"}]"#
+        let data = #"[{"number":1,"kind":"screen","file":"s1.mov","startedAt":0,"keeper":false,"shot":"screen-shot"},{"number":2,"kind":"screen","file":"s2.mov","startedAt":1,"keeper":false,"shot":"paired"},{"number":2,"kind":"camera","file":"c2.mov","startedAt":1,"keeper":false,"shot":"paired"}]"#
         let takes = try JSONDecoder().decode([Take].self, from: Data(data.utf8))
         let grouped = Storyboard.shotTakes(takes)
         #expect(grouped["screen-shot"]?.count == 1)
