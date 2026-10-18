@@ -169,6 +169,9 @@ final class AppModel {
     var stillsSaved = 0
     /// Short message over the video ("Saved stills/…"). Clears itself.
     var toast: String?
+    /// The most recent take that Stop successfully persisted, for the lower-left review card.
+    /// It is transient UI state only; session.json and the movie files remain the source of truth.
+    var postRecordingPreview: PostRecordingPreview?
     /// Thumbnails Cutmark is putting on a video as its cover now (Cover.swift).
     var coverWork: Set<URL> = []
     /// What Claude asked to show while the user looked at something else (open_in_app from a chat
@@ -186,6 +189,9 @@ final class AppModel {
     var commentMode = false
     /// The review player in the post preview, so C, Space and ←/→ reach it there too.
     @ObservationIgnored weak var postReview: PostReview?
+    /// Lazily allocated only after a successful durable take. This is separate from the live
+    /// capture strip and is never present during recording.
+    @ObservationIgnored private var postRecordingPanel: PostRecordingPreviewPanel?
     /// While Camera + Screen records, a non-activating strip stays reachable even when another app
     /// is frontmost. Lazily created so tests and camera-only sessions never make an extra window.
     @ObservationIgnored private var captureControls: CaptureControlPanel?
@@ -212,6 +218,7 @@ final class AppModel {
         let camStart: Date?
         let screen: URL?
         let screenStart: Date?
+        let screenDisplayID: CGDirectDisplayID?
         let script: String?
         let hook: String?
         let shot: String?
@@ -654,6 +661,7 @@ final class AppModel {
 
     private func start() async {
         error = nil
+        dismissPostRecordingPreview()
         let captureMode = mode.captureMode(cameraPaused: camera.paused)
         if captureMode.recordsScreen, !ScreenRecorder.ensureCapturePermission() {
             error = "Allow Cutmark in System Settings → Privacy & Security → Screen & System Audio Recording, then try again."
@@ -728,6 +736,7 @@ final class AppModel {
             }
             pending = Pending(doc: doc, number: n, cam: camURL, camStart: cameraStart?.date,
                               screen: screenURL, screenStart: screenStart?.date,
+                              screenDisplayID: screenStart?.displayID,
                               script: script, hook: hook, shot: shotID)
             recordingMarkerCount = 0
             captureEvents = nil
@@ -819,9 +828,23 @@ final class AppModel {
         library.isRecording = false
         phase = .idle
         library.loadSessions()
+        if recorded {
+            postRecordingPreview = PostRecordingPreview.make(sessionID: p.doc.meta.id, session: p.doc.url,
+                                                             number: p.number, takes: p.doc.meta.takes)
+            if let postRecordingPreview {
+                if postRecordingPanel == nil { postRecordingPanel = PostRecordingPreviewPanel() }
+                postRecordingPanel?.present(postRecordingPreview, doc: p.doc, app: self,
+                                            displayID: p.screenDisplayID)
+            }
+        }
         if recorded { autoName(p.doc) }
         endShot()
         if recorded { FirstTake.shared.afterTake(p.doc, number: p.number, library: library) }
+    }
+
+    func dismissPostRecordingPreview() {
+        postRecordingPreview = nil
+        postRecordingPanel?.dismiss()
     }
 
     /// A crash can happen after AVFoundation finalized a movie but before session.json got the take.
