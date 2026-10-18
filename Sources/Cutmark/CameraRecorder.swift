@@ -23,9 +23,67 @@ enum Orientation: String, CaseIterable, Identifiable {
 /// that each edit then lost again (2026-10-01).
 final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate {
     struct Start: Sendable {
+        enum Timing: Sendable { case videoFrame, callback }
         let date: Date
-        /// PTS of the first buffer the movie output wrote, mapped onto the host clock.
+        /// Host-clock time established according to `timing`.
         let hostTime: Double
+        let timing: Timing
+    }
+
+    /// Pairs the movie's first-written-buffer PTS with the first camera video sample at or after it.
+    /// VideoDataOutput and MovieFileOutput timestamps share AVCaptureSession.synchronizationClock.
+    struct VideoStartGate {
+        private(set) var activationPTS: CMTime?
+        private(set) var movieStartPTS: CMTime?
+        private var videoPTS: [CMTime] = []
+
+        var isArmed: Bool { activationPTS != nil }
+
+        mutating func arm(at activationPTS: CMTime) {
+            reset()
+            guard activationPTS.isNumeric else { return }
+            self.activationPTS = activationPTS
+        }
+
+        mutating func noteVideo(_ pts: CMTime) -> CMTime? {
+            guard let activationPTS, pts.isNumeric,
+                  CMTimeCompare(pts, activationPTS) >= 0 else { return nil }
+            videoPTS.append(pts)
+            return resolve()
+        }
+
+        mutating func noteMovieStart(_ pts: CMTime) -> CMTime? {
+            guard isArmed, pts.isNumeric else { return nil }
+            movieStartPTS = pts
+            return resolve()
+        }
+
+        mutating func reset() {
+            activationPTS = nil
+            movieStartPTS = nil
+            videoPTS.removeAll(keepingCapacity: true)
+        }
+
+        private mutating func resolve() -> CMTime? {
+            guard let activationPTS, let movieStartPTS else { return nil }
+            let threshold = CMTimeCompare(activationPTS, movieStartPTS) >= 0 ? activationPTS : movieStartPTS
+            guard let first = videoPTS.filter({ CMTimeCompare($0, threshold) >= 0 })
+                .min(by: { CMTimeCompare($0, $1) < 0 }) else { return nil }
+            reset()
+            return first
+        }
+    }
+
+    /// Keeps VideoDataOutput's callback off the camera/session queue. It copies only the timestamp;
+    /// no pixel buffer survives the callback, so observing start timing cannot build a frame backlog.
+    private final class VideoPTSProbe: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+        let receive: (CMTime) -> Void
+        init(receive: @escaping (CMTime) -> Void) { self.receive = receive }
+        func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
+                           from connection: AVCaptureConnection) {
+            let pts = sampleBuffer.presentationTimeStamp
+            if pts.isNumeric { receive(pts) }
+        }
     }
     let session = AVCaptureSession()
     @Published var videoDevices: [AVCaptureDevice] = []
@@ -59,11 +117,17 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     /// Every session call runs here. A preview layer also lets go of the session here (see PreviewView).
     static let queue = DispatchQueue(label: "cutmark.camera")
     private var queue: DispatchQueue { Self.queue }
+    private let timingQueue = DispatchQueue(label: "cutmark.camera.video-timing", qos: .userInitiated)
     private let output = AVCaptureMovieFileOutput()
+    /// Timestamp-only tap. It never writes another file and drops late frames rather than buffering.
+    private let timingOutput = AVCaptureVideoDataOutput()
     private var videoInput: AVCaptureDeviceInput?
     private var audioInput: AVCaptureDeviceInput?
     private var startCont: CheckedContinuation<Start, Error>?
     private var stopCont: CheckedContinuation<Void, Never>?
+    private var videoStartGate = VideoStartGate()
+    private var videoTimingGeneration = 0
+    private var videoTimingProbe: VideoPTSProbe?
     private var levelTimer: Timer?
     private var observers: [NSObjectProtocol] = []
     private var ready = false
@@ -81,6 +145,7 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     override init() {
         super.init()
         output.movieFragmentInterval = CMTime(seconds: Self.fragmentSeconds, preferredTimescale: 600)
+        timingOutput.alwaysDiscardsLateVideoFrames = true
         let d = UserDefaults.standard
         orientation = Orientation(rawValue: d.string(forKey: "orientation") ?? "") ?? .horizontal
         for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
@@ -210,6 +275,10 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
                 session.addInput(input); audioInput = input
             }
             if !session.outputs.contains(output), session.canAddOutput(output) { session.addOutput(output) }
+            if #available(macOS 15.2, *),
+               !session.outputs.contains(where: { $0 === timingOutput }), session.canAddOutput(timingOutput) {
+                session.addOutput(timingOutput)
+            }
             if let conn = output.connection(with: .video) {
                 var settings: [String: Any] = [AVVideoCodecKey: AVVideoCodecType.hevc]
                 if let size = plan?.size {
@@ -323,7 +392,8 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     /// dropping) never sends it, and without a limit the app would wait forever.
     static let startLimit: TimeInterval = 8
 
-    /// Starts writing; returns with the first buffer timestamp reported by AVCaptureMovieFileOutput.
+    /// Starts writing. On macOS 15.2+ a supported timing tap returns the first actual camera video
+    /// sample at or after the movie begins. Otherwise the result explicitly uses callback timing.
     func startRecording(to url: URL) async throws -> Start {
         try Task.checkCancellation()
         return try await withTaskCancellationHandler(operation: {
@@ -333,6 +403,7 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
                         cont.resume(throwing: RecorderError("No camera selected.")); return
                     }
                     startCont = cont
+                    armVideoStartTiming()
                     output.startRecording(to: url, recordingDelegate: self)
                     queue.asyncAfter(deadline: .now() + Self.startLimit) { [self] in
                         failStart(RecorderError("The camera or mic sent nothing, so the take did not start. "
@@ -354,6 +425,7 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     private func failStart(_ error: Error) {
         guard let c = startCont else { return }
         startCont = nil
+        clearVideoStartTiming()
         if output.isRecording { output.stopRecording() }
         c.resume(throwing: error)
     }
@@ -361,6 +433,7 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     func stopRecording() async {
         await withCheckedContinuation { cont in
             queue.async { [self] in
+                clearVideoStartTiming()
                 guard output.isRecording else { cont.resume(); return }
                 stopCont = cont
                 output.stopRecording()
@@ -368,15 +441,63 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
         }
     }
 
+    /// Arms the video sample tap only when MovieFileOutput can also tell us its session-clock start.
+    /// A frame delivered late from before Record was pressed is rejected by the activation threshold.
+    private func armVideoStartTiming() {
+        clearVideoStartTiming()
+        guard #available(macOS 15.2, *), timingOutput.connection(with: .video) != nil,
+              let syncClock = session.synchronizationClock else { return }
+        let generation = videoTimingGeneration
+        let probe = VideoPTSProbe { [weak self] pts in
+            self?.queue.async { [weak self] in
+                guard let self, self.videoTimingGeneration == generation, self.startCont != nil else { return }
+                if let first = self.videoStartGate.noteVideo(pts) { self.completeVideoStart(first) }
+            }
+        }
+        videoTimingProbe = probe
+        timingOutput.setSampleBufferDelegate(probe, queue: timingQueue)
+        let hostClock = CMClockGetHostTimeClock()
+        let activation = CMSyncConvertTime(CMClockGetTime(hostClock), from: hostClock, to: syncClock)
+        guard activation.isNumeric else { clearVideoStartTiming(); return }
+        videoStartGate.arm(at: activation)
+    }
+
+    private func clearVideoStartTiming() {
+        videoTimingGeneration &+= 1
+        videoStartGate.reset()
+        timingOutput.setSampleBufferDelegate(nil, queue: nil)
+        videoTimingProbe = nil
+    }
+
+    private func completeApproximateStart() {
+        guard let c = startCont else { clearVideoStartTiming(); return }
+        let host = CMClockGetTime(CMClockGetHostTimeClock()).seconds
+        startCont = nil
+        clearVideoStartTiming()
+        c.resume(returning: Start(date: CaptureClock.date(hostTime: host) ?? Date(), hostTime: host, timing: .callback))
+    }
+
+    private func completeVideoStart(_ sessionPTS: CMTime) {
+        guard let c = startCont, let syncClock = session.synchronizationClock else {
+            completeApproximateStart(); return
+        }
+        let hostClock = CMClockGetHostTimeClock()
+        let hostPTS = CMSyncConvertTime(sessionPTS, from: syncClock, to: hostClock)
+        guard hostPTS.isNumeric, let date = CaptureClock.date(hostTime: hostPTS.seconds) else {
+            completeApproximateStart(); return
+        }
+        startCont = nil
+        clearVideoStartTiming()
+        c.resume(returning: Start(date: date, hostTime: hostPTS.seconds, timing: .videoFrame))
+    }
+
     func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL,
                     from connections: [AVCaptureConnection]) {
         queue.async { [self] in
-            guard let c = startCont else { return }
-            // macOS 15.0/15.1 do not provide startPTS. Keep recording there with callback timing;
-            // 15.2+ calls the precise overload below instead of this one.
-            let host = CMClockGetTime(CMClockGetHostTimeClock()).seconds
-            startCont = nil
-            c.resume(returning: Start(date: CaptureClock.date(hostTime: host) ?? Date(), hostTime: host))
+            guard startCont != nil else { return }
+            // macOS 15.0/15.1 cannot correlate the movie with a session-clock start PTS.
+            // Keep recording there, but explicitly retain callback-time (not exact-frame) semantics.
+            completeApproximateStart()
         }
     }
 
@@ -384,19 +505,19 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL, startPTS: CMTime,
                     from connections: [AVCaptureConnection]) {
         queue.async { [self] in
-            guard let c = startCont, startPTS.isNumeric else { return }
-            let hostClock = CMClockGetHostTimeClock()
-            let converted = session.synchronizationClock.map { CMSyncConvertTime(startPTS, from: $0, to: hostClock) }
-            let hostTime = converted.flatMap { $0.isNumeric ? $0.seconds : nil } ?? CMClockGetTime(hostClock).seconds
-            let date = CaptureClock.date(hostTime: hostTime) ?? Date()
-            startCont = nil
-            c.resume(returning: Start(date: date, hostTime: hostTime))
+            guard startCont != nil else { return }
+            guard videoStartGate.isArmed, startPTS.isNumeric else {
+                completeApproximateStart(); return
+            }
+            // startPTS may be audio. It is only a lower bound for the first camera video frame.
+            if let first = videoStartGate.noteMovieStart(startPTS) { completeVideoStart(first) }
         }
     }
 
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL,
                     from connections: [AVCaptureConnection], error: Error?) {
         queue.async { [self] in
+            clearVideoStartTiming()
             if let c = startCont { c.resume(throwing: error ?? RecorderError("Camera failed to start.")); startCont = nil }
             stopCont?.resume(); stopCont = nil
         }

@@ -27,4 +27,45 @@ struct CameraBitrateTests {
         #expect(AppModel.holdsCamera(idle: false, preview: false, seen: true, recordsCamera: false))
         #expect(AppModel.holdsCamera(idle: true, preview: false, seen: true, recordsCamera: false))
     }
+
+    @Test func audioFirstMovieStartWaitsForTheFirstEligibleVideoFrame() throws {
+        var gate = CameraRecorder.VideoStartGate()
+        gate.arm(at: CMTime(seconds: 10, preferredTimescale: 600))
+        #expect(gate.noteVideo(CMTime(seconds: 9.9, preferredTimescale: 600)) == nil)
+        #expect(gate.noteMovieStart(CMTime(seconds: 10.01, preferredTimescale: 600)) == nil)
+        let expected = CMTime(value: 6020, timescale: 600)
+        let first = try #require(gate.noteVideo(expected))
+        #expect(CMTimeCompare(first, expected) == 0)
+        #expect(!gate.isArmed)
+    }
+
+    @Test func delayedMovieCallbackRejectsVideoFramesBeforeItsStartPTS() throws {
+        var gate = CameraRecorder.VideoStartGate()
+        gate.arm(at: CMTime(seconds: 20, preferredTimescale: 600))
+        #expect(gate.noteVideo(CMTime(seconds: 20.01, preferredTimescale: 600)) == nil)
+        #expect(gate.noteVideo(CMTime(seconds: 20.05, preferredTimescale: 600)) == nil)
+        let first = try #require(gate.noteMovieStart(CMTime(seconds: 20.03, preferredTimescale: 600)))
+        #expect(CMTimeCompare(first, CMTime(seconds: 20.05, preferredTimescale: 600)) == 0)
+    }
+
+    @Test func recordingActivationRejectsBufferedVideoEvenWhenAudioMoviePTSIsEarlier() throws {
+        var gate = CameraRecorder.VideoStartGate()
+        let activation = CMTime(seconds: 40, preferredTimescale: 600)
+        gate.arm(at: activation)
+        #expect(gate.noteMovieStart(CMTime(seconds: 39.9, preferredTimescale: 600)) == nil)
+        #expect(gate.noteVideo(CMTime(seconds: 39.99, preferredTimescale: 600)) == nil)
+        let expected = CMTime(seconds: 40.02, preferredTimescale: 600)
+        let first = try #require(gate.noteVideo(expected))
+        #expect(CMTimeCompare(first, expected) == 0)
+    }
+
+    @Test func clearingVideoStartGateCannotLeakAnOldTakeIntoTheNextStart() {
+        var gate = CameraRecorder.VideoStartGate()
+        gate.arm(at: CMTime(seconds: 30, preferredTimescale: 600))
+        _ = gate.noteVideo(CMTime(seconds: 30.1, preferredTimescale: 600))
+        gate.reset()
+        #expect(!gate.isArmed)
+        #expect(gate.noteMovieStart(CMTime(seconds: 30.05, preferredTimescale: 600)) == nil)
+        #expect(gate.noteVideo(CMTime(seconds: 30.2, preferredTimescale: 600)) == nil)
+    }
 }
