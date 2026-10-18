@@ -1221,12 +1221,26 @@ struct DetailView: View {
                                        commentRoot.standardizedFileURL == doc.url.standardizedFileURL,
                                        EditTimelineDraft.file(video: url, session: doc.url) != nil {
                                         // Give editing its own space below the review player: overlaying the
-                                        // timeline obscured the seek bar. Raw takes now have this editor too.
+                                        // seek bar was an error: a modern editable filmstrip needs full width.
                                         VStack(spacing: 0) {
                                             ReviewPlayer(url: url, session: commentRoot).id(url)
                                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                            EditTimelinePanel(video: url, doc: doc)
-                                                .padding(.horizontal, 12).padding(.bottom, 10)
+                                            HStack(spacing: 12) {
+                                                Image(systemName: "film.stack")
+                                                    .foregroundStyle(Theme.accent)
+                                                Text("Edit with the visual timeline")
+                                                    .font(Theme.sans(12, .medium))
+                                                Spacer(minLength: 6)
+                                                Button {
+                                                    TimelineEditorWindow.shared.open(video: url, doc: doc, app: app)
+                                                } label: {
+                                                    Label("Open editor", systemImage: "arrow.up.left.and.arrow.down.right")
+                                                }
+                                                .buttonStyle(AccentButtonStyle(kind: .solid))
+                                                .help("Open the full-width filmstrip, waveform, playhead and cut preview")
+                                            }
+                                            .padding(.horizontal, 16).frame(height: 55)
+                                            .background(Theme.paper)
                                         }
                                     } else {
                                         ReviewPlayer(url: url, session: commentRoot).id(url)
@@ -1776,7 +1790,10 @@ struct RecordPill: View {
                 .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
                     if size.width > 0, size.height > 0, size != pillSize { pillSize = size }
                 }
-                .position(dragPoint ?? resting)
+                // Drag updates must be pixel-aligned and non-animated. A spring combined with
+                // the blurred floating shadow made the entire pill look smeared while moving.
+                .position(pixelAligned(dragPoint ?? resting))
+                .transaction { if dragPoint != nil { $0.animation = nil } }
         }
     }
 
@@ -1794,13 +1811,16 @@ struct RecordPill: View {
         .padding(.leading, 10).padding(.trailing, 10).padding(.vertical, 8)
         .frame(width: layout == .compact ? RecordPillLayout.compactWidth : nil)
         // Paper on the daylight stage; it follows the stage into the dark while you record.
-        .background(Capsule().fill(Theme.paper).shadow(color: Theme.shadow.opacity(1.8), radius: 18, y: 6)
+        .background(Capsule().fill(Theme.paper)
+            .shadow(color: Theme.shadow.opacity(dragPoint == nil ? 1.8 : 0),
+                    radius: dragPoint == nil ? 18 : 0, y: dragPoint == nil ? 6 : 0)
             // Blank capsule space is draggable, but buttons retain exclusive pointer events.
             .gesture(pillDrag(stage: stage, minimumDistance: 4)))
         .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
         .foregroundStyle(Theme.ink)
         .animation(Theme.spring, value: recording)
-        .animation(Theme.spring, value: hover)
+        // Hover animation is limited to the record button; moving the whole capsule should
+        // never inherit an implicit hover spring that trails behind the pointer.
     }
 
     private var recordButton: some View {
@@ -1980,6 +2000,12 @@ struct RecordPill: View {
         DragGesture(minimumDistance: minimumDistance)
             .onChanged { movePill($0.translation, stage: stage, ended: false) }
             .onEnded { movePill($0.translation, stage: stage, ended: true) }
+    }
+
+    private func pixelAligned(_ position: CGPoint) -> CGPoint {
+        let scale = max(1, NSScreen.main?.backingScaleFactor ?? 2)
+        return CGPoint(x: (position.x * scale).rounded() / scale,
+                       y: (position.y * scale).rounded() / scale)
     }
 
     private func movePill(_ translation: CGSize, stage: CGSize, ended: Bool) {
