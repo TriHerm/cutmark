@@ -59,8 +59,10 @@ private final class CapturePanelWindow: NSPanel {
         isOpaque = false
         backgroundColor = .clear
         hasShadow = false
-        isMovableByWindowBackground = true
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        // Native mouse tracking below owns drag motion. Relying on this flag alone did not
+        // move the NSHostingView-backed strip (SwiftUI intercepts the mouse down).
+        isMovableByWindowBackground = false
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         isReleasedWhenClosed = false
         animationBehavior = .utilityWindow
         sharingType = .none
@@ -75,6 +77,45 @@ private final class CaptureFirstMouseHostingView<Content: View>: NSHostingView<C
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
+/// A native draggable region for the recording strip while another app has keyboard focus.
+/// The hosting view consumes pointer events over SwiftUI controls, so the panel's
+/// isMovableByWindowBackground alone does not give the user a reliable drag target.
+struct CapturePanelDragRegion: NSViewRepresentable {
+    final class DragView: NSView {
+        private var origin: NSPoint?
+        private var cursor: NSPoint?
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override var mouseDownCanMoveWindow: Bool { false }
+        override func mouseDown(with event: NSEvent) {
+            guard let window else { return }
+            origin = window.frame.origin
+            cursor = NSEvent.mouseLocation
+        }
+        override func mouseDragged(with event: NSEvent) {
+            guard let window, let origin, let cursor else { return }
+            let now = NSEvent.mouseLocation
+            let proposed = CapturePanelDragGeometry.origin(from: origin, mouseDown: cursor, mouseNow: now)
+            // A direct window transform, with no SwiftUI animation or retained bitmap snapshot.
+            // The user can move the strip between displays while recording another application.
+            window.setFrameOrigin(proposed)
+        }
+        override func mouseUp(with event: NSEvent) { origin = nil; cursor = nil }
+    }
+
+    func makeNSView(context: Context) -> NSView { DragView() }
+    func updateNSView(_ view: NSView, context: Context) {}
+}
+
+/// Native panel movement follows absolute screen coordinates, not a repeatedly re-layouted
+/// SwiftUI offset. Frame origin changes are exact and reversible when the cursor moves back.
+enum CapturePanelDragGeometry {
+    static func origin(from start: NSPoint, mouseDown: NSPoint, mouseNow: NSPoint) -> NSPoint {
+        NSPoint(x: start.x + mouseNow.x - mouseDown.x,
+                y: start.y + mouseNow.y - mouseDown.y)
+    }
+}
+
 /// Cutmark-native screen recording strip. Device changes remain disabled while recording because
 /// swapping capture inputs mid-file would make the camera/screen timeline ambiguous. The strip only
 /// exposes controls that are safe for the current recording architecture.
@@ -84,15 +125,27 @@ private struct CaptureControlBar: View {
     @ObservedObject var screen: ScreenRecorder
 
     private var displayName: String {
-        screen.displays.first { $0.id == screen.displayID }?.name ?? "Display"
+        screen.selectedSourceName
     }
 
     var body: some View {
         HStack(spacing: 12) {
+            ZStack {
+                CapturePanelDragRegion()
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.muted)
+                    .allowsHitTesting(false)
+            }
+            .frame(width: 23, height: 34)
+            .help("Drag the recording panel freely, including between displays")
+            .accessibilityLabel("Move recording controls")
             HStack(spacing: 7) {
                 Circle().fill(isFinishing ? Theme.muted : Theme.danger).frame(width: 8, height: 8)
                 clock
             }
+            .overlay(CapturePanelDragRegion())
+            .help("Drag timer to move the recording panel")
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Screen recording in progress")
 
@@ -102,21 +155,32 @@ private struct CaptureControlBar: View {
                 Image(systemName: "mic.fill")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Theme.muted)
-                LevelMeter(meter: camera.meter, track: Theme.border, fill: Theme.live)
-                    .frame(width: 58, height: 4)
-                    .clipShape(Capsule())
-                    .help("Microphone level")
+                if app.mode.captureMode(cameraPaused: camera.paused).recordsCamera {
+                    LevelMeter(meter: camera.meter, track: Theme.border, fill: Theme.live)
+                        .frame(width: 58, height: 4)
+                        .clipShape(Capsule())
+                        .help("Microphone level")
+                } else {
+                    // ScreenCaptureKit owns the microphone in screen-only mode. The camera meter
+                    // is stopped, so showing it at zero would falsely imply silent audio.
+                    Text(camera.audioID == nil ? "Mic off" : "Mic selected")
+                        .font(Theme.sans(10.5, .medium)).foregroundStyle(Theme.muted)
+                        .help("Screen recording handles the microphone. Live level is unavailable.")
+                }
             }
+            .overlay(CapturePanelDragRegion())
+            .help("Drag microphone status to move the recording panel")
 
             HStack(spacing: 6) {
                 Image(systemName: "display")
                     .font(.system(size: 11, weight: .medium))
                 Text(displayName).lineLimit(1)
             }
+            .overlay(CapturePanelDragRegion())
             .font(Theme.sans(12, .medium))
             .foregroundStyle(Theme.muted)
             .frame(maxWidth: 130)
-            .help("Screen being recorded")
+            .help("Drag recording source label to move the panel")
 
             Button { app.addRecordingMarker() } label: {
                 HStack(spacing: 5) {
@@ -163,6 +227,9 @@ private struct CaptureControlBar: View {
                 .fill(Theme.paper)
                 .shadow(color: .black.opacity(0.22), radius: 18, y: 6)
         )
+        // Native drag surfaces are *above* the static status groups. A background NSView
+        // underneath NSHostingView never receives mouseDown and is not a working drag target.
+        // Do not overlay the marker or Stop button: they must keep first-click semantics.
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.border))
         .foregroundStyle(Theme.ink)
         .fixedSize()

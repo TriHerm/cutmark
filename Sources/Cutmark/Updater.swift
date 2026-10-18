@@ -69,19 +69,37 @@ final class Updater {
             return out
         }
     }
+    enum CheckResult: Equatable, Sendable {
+        case current(String)
+        case ready(String)
+        case unavailable
+        case verificationFailed(String)
+
+        nonisolated var message: String {
+            func version(_ tag: String) -> String { tag.hasPrefix("v") ? String(tag.dropFirst()) : tag }
+            switch self {
+            case .current(let tag): return "Cutmark \(version(tag)) is up to date."
+            case .ready(let tag): return "Cutmark \(version(tag)) is ready to update."
+            case .unavailable: return "Couldn’t check for updates. Check your connection and try again."
+            case .verificationFailed(let tag): return "Cutmark \(version(tag)) is available, but its download could not be verified."
+            }
+        }
+    }
+    enum ReleaseDisposition: Equatable, Sendable { case current, staged, download }
+
     private(set) var staged: Staged?
     /// Clicked: waits for the recording or the work to end, then restarts.
     private(set) var applying = false
     private(set) var waitingFor: String?
+    private(set) var checkingRelease = false
 
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var lastRead: Date?
     @ObservationIgnored private var releaseTimer: Timer?
-    @ObservationIgnored private var fetching = false
 
     static let releaseRepo = Product.repository
     /// This build's release tag; nil for a build from source, which never updates itself.
-    private var ownRelease: String? { Bundle.main.infoDictionary?["ReleaseTag"] as? String }
+    private var ownRelease: String? { Self.normalizedReleaseTag(Bundle.main.infoDictionary?["ReleaseTag"] as? String) }
     /// Production builds carry the Apple Developer Team ID in their signed Info.plist. Older
     /// ad-hoc releases have no value and keep the legacy compatibility path.
     private var ownSigningTeamID: String? { Bundle.main.infoDictionary?["CutmarkSigningTeamIdentifier"] as? String }
@@ -93,6 +111,11 @@ final class Updater {
     }
 
     private init() {}
+
+    nonisolated static func normalizedReleaseTag(_ raw: String?) -> String? {
+        guard let tag = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !tag.isEmpty else { return nil }
+        return tag
+    }
 
     func start() {
         guard timer == nil, running.pathExtension == "app" else { return }
@@ -124,6 +147,11 @@ final class Updater {
         return false
     }
 
+    nonisolated static func releaseDisposition(latest: String, own: String, staged: String?) -> ReleaseDisposition {
+        guard isNewer(latest, than: own) else { return .current }
+        return latest == staged ? .staged : .download
+    }
+
     private struct Release: Decodable {
         struct Asset: Decodable { var name: String; var browser_download_url: URL; var digest: String? }
         var tag_name: String
@@ -153,19 +181,40 @@ final class Updater {
         return actual == expected
     }
 
-    /// Asks for the newest release; a newer one is downloaded and staged. Quiet when offline or
-    /// when GitHub says no: it tries again in six hours.
+    /// Asks for the newest release; a newer one is downloaded and staged. Automatic checks stay
+    /// quiet. A manual check uses `checkForUpdates` below for visible status.
     func checkRelease() {
-        guard let own = ownRelease, !fetching, !applying else { return }
-        fetching = true
+        guard let own = ownRelease, !checkingRelease, !applying else { return }
+        runReleaseCheck(own: own)
+    }
+
+    /// The app-menu command. Source/debug builds have no release identity, so they report that and
+    /// never download or stage a public build. A check may stage a verified update, but applying it
+    /// still requires the user's separate Update click.
+    func checkForUpdates(feedback: @escaping (String) -> Void) {
+        guard let own = ownRelease else {
+            feedback("This Cutmark build was made from source. Release updates are available in release builds.")
+            return
+        }
+        guard !applying else { feedback("Cutmark is already updating."); return }
+        guard !checkingRelease else { feedback("Cutmark is already checking for updates."); return }
+        feedback("Checking for updates…")
+        runReleaseCheck(own: own, feedback: feedback)
+    }
+
+    private func runReleaseCheck(own: String, feedback: ((String) -> Void)? = nil) {
+        guard !checkingRelease, !applying else { return }
+        checkingRelease = true
         let api = URL(string: "https://api.github.com/repos/\(Self.releaseRepo)/releases/latest")!
         let stage = waiting.deletingLastPathComponent(), skip = staged?.release
         Task { @MainActor in
-            defer { fetching = false }
-            if await Self.fetchRelease(api: api, own: own, skip: skip, into: stage,
-                                       expectedTeamID: ownSigningTeamID) != nil {
+            defer { checkingRelease = false }
+            let result = await Self.fetchReleaseResult(api: api, own: own, skip: skip, into: stage,
+                                                       expectedTeamID: ownSigningTeamID)
+            if case .ready = result {
                 lastRead = nil; check()
             }
+            feedback?(result.message)
         }
     }
 
@@ -173,6 +222,18 @@ final class Updater {
     /// staged), downloads its Cutmark.dmg and stages it. Returns the staged tag.
     nonisolated static func fetchRelease(api: URL, own: String, skip: String?, into stage: URL,
                                          expectedTeamID: String? = nil) async -> String? {
+        let result = await fetchReleaseResult(api: api, own: own, skip: skip, into: stage,
+                                              expectedTeamID: expectedTeamID)
+        return newlyStagedRelease(result, skip: skip)
+    }
+
+    nonisolated static func newlyStagedRelease(_ result: CheckResult, skip: String?) -> String? {
+        guard case .ready(let tag) = result, tag != skip else { return nil }
+        return tag
+    }
+
+    nonisolated static func fetchReleaseResult(api: URL, own: String, skip: String?, into stage: URL,
+                                               expectedTeamID: String? = nil) async -> CheckResult {
         func latest(_ url: URL) async -> Data? {
             var req = URLRequest(url: url)
             req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -181,13 +242,21 @@ final class Updater {
             return data
         }
         guard let data = await latest(api),
-              let r = try? JSONDecoder().decode(Release.self, from: data),
-              isNewer(r.tag_name, than: own), skip != r.tag_name,
-              let dmg = r.assets.first(where: { $0.name == "Cutmark.dmg" }),
-              let (file, dresp) = try? await URLSession.shared.download(from: dmg.browser_download_url) else { return nil }
+              let r = try? JSONDecoder().decode(Release.self, from: data) else { return .unavailable }
+        switch releaseDisposition(latest: r.tag_name, own: own, staged: skip) {
+        case .current: return .current(r.tag_name)
+        case .staged: return .ready(r.tag_name)
+        case .download: break
+        }
+        guard let dmg = r.assets.first(where: { $0.name == "Cutmark.dmg" }) else {
+            return .verificationFailed(r.tag_name)
+        }
+        guard let (file, dresp) = try? await URLSession.shared.download(from: dmg.browser_download_url) else {
+            return .unavailable
+        }
         defer { try? FileManager.default.removeItem(at: file) }
         guard (dresp as? HTTPURLResponse)?.statusCode == 200,
-              matchesReleaseDigest(file, digest: dmg.digest) else { return nil }
+              matchesReleaseDigest(file, digest: dmg.digest) else { return .verificationFailed(r.tag_name) }
         // One update jumps to the newest release, so What's new lists every release since `own`
         // (2026-10-08), not only the newest. Without the list, the newest release's notes.
         var bodies = [r.body ?? ""]
@@ -201,7 +270,7 @@ final class Updater {
         }
         let notes = (try? JSONEncoder().encode(["tag": r.tag_name, "body": mergeNotes(bodies)])) ?? Data()
         return Self.stage(dmg: file, tag: r.tag_name, notes: notes, into: stage,
-                          expectedTeamID: expectedTeamID) ? r.tag_name : nil
+                          expectedTeamID: expectedTeamID) ? .ready(r.tag_name) : .verificationFailed(r.tag_name)
     }
 
     /// Several releases' notes as one: each "### Area" once, in the order it first shows, with

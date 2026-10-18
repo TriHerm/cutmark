@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 // The Storyboard tab (2026-10-03): the video idea as a row of sketches on a timeline, each with the
-// script lines it covers. Claude writes storyboard/storyboard.json with the takes MCP
+// script lines it covers. The selected chat agent writes storyboard/storyboard.json with the Cutmark MCP
 // (set_storyboard, the storyboard skill) and draws the sketches in the background, so the tab
 // fills in while the user watches.
 
@@ -108,6 +108,38 @@ struct Storyboard: Decodable, Equatable {
     /// The MCP found no image key (Gemini, OpenAI or Replicate) and drew nothing (2026-10-09).
     var nokey: Bool?
 
+    /// One visible take tile per recording, including screen-only, with paired camera preferred.
+    nonisolated static func shotTakes(_ all: [Take]) -> [String: [Take]] {
+        var grouped: [String: [Int: Take]] = [:]
+        for take in all {
+            guard let shot = take.shot else { continue }
+            var numbers = grouped[shot] ?? [:]
+            if let previous = numbers[take.number] {
+                if previous.kind != .camera && take.kind == .camera { numbers[take.number] = take }
+            } else {
+                numbers[take.number] = take
+            }
+            grouped[shot] = numbers
+        }
+        var result: [String: [Take]] = [:]
+        for (shot, numbers) in grouped {
+            result[shot] = numbers.values.sorted { $0.number < $1.number }
+        }
+        return result
+    }
+
+    /// Not every supported chat provider exposes installed skills the same way. Give all of them
+    /// the concrete MCP workflow, so storyboard generation never depends on Claude's Skill tool.
+    nonisolated static let request = "Storyboard this video using the cutmark MCP. Read get_session first; "
+        + "preserve the existing script.md and any existing shots unless changes are actually needed "
+        + "for this request. Use update_session only if the script needs to be written or revised, "
+        + "never create a duplicate session. "
+        + "then call set_storyboard with "
+        + "the full ordered shots (hook, main, end), each with say, do, sketch and stable ids. "
+        + "Use cutmark-storyboard skill instructions if available, but do not require a Skill tool. "
+        + "An image generation API key is optional: always save the text storyboard even when sketches "
+        + "cannot be drawn. Report shot count and invite me to review the Storyboard tab."
+
     /// Width over height.
     var ratio: CGFloat { Self.ratio(format) }
 
@@ -202,8 +234,8 @@ struct Storyboard: Decodable, Equatable {
     }
 }
 
-/// Shown over the strip when the MCP had no image key (2026-10-09: not every user has a Gemini key).
-/// It links to Settings › Gemini and draws the sketches once a key is there.
+/// A text storyboard remains usable without an image provider key, independently of which agent
+/// (Claude Code, Codex, pi or opencode) the user chose for chat.
 struct NoSketchKeyCard: View {
     var session: URL
     @Environment(\.openSettings) private var openSettings
@@ -214,7 +246,7 @@ struct NoSketchKeyCard: View {
             Image(systemName: "key").font(.system(size: 14)).foregroundStyle(Theme.warn).padding(.top, 2)
             VStack(alignment: .leading, spacing: 4) {
                 Text("No sketches yet").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
-                Text("Cutmark needs an image key to draw them: Gemini, OpenAI or Replicate. Add a key, then click Draw. Or ask the chat to draw them itself.")
+                Text("Your shots and script are saved. To draw optional sketches, add a Gemini, OpenAI or Replicate image key, then click Draw.")
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 12)
@@ -341,8 +373,7 @@ struct StoryboardPane: View {
 
     /// The camera takes filed under each shot, oldest first.
     private var takes: [String: [Take]] {
-        Dictionary(grouping: doc.meta.takes.filter { $0.kind == .camera && $0.shot != nil }, by: { $0.shot! })
-            .mapValues { $0.sorted { $0.number < $1.number } }
+        Storyboard.shotTakes(doc.meta.takes)
     }
 
     /// The shot the user picked, else the first one with no take yet: where he left off.
@@ -454,7 +485,7 @@ struct StoryboardPane: View {
             Text("Cutmark writes the script and sketches each shot,\nso you see how to film it before you start.")
                 .font(Theme.sans(12.5)).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
             Button("Storyboard this video") {
-                app.chats.chat(doc.url).send("Storyboard this video. Use the storyboard skill.",
+                app.chats.chat(doc.url).send(Storyboard.request,
                                              title: doc.meta.title, onStage: nil)
                 app.chats.open = true
             }
@@ -1103,7 +1134,7 @@ private struct ShotDetail: View {
                 .help(c.open ? "Resolve" : "Open again")
             }
             ForEach(Array((c.replies ?? []).enumerated()), id: \.offset) { _, r in
-                Text((r.by == "claude" ? "Cutmark: " : "You: ") + r.text)
+                Text((r.by == "user" ? "You: " : "Cutmark: ") + r.text)
                     .font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }

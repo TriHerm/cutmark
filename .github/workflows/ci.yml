@@ -20,6 +20,10 @@ jobs:
       - uses: actions/checkout@v7
       - name: Select Xcode 26.3
         run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+      # Fail fast on Swift/UI and Swift Testing macro compilation errors before the slower MCP suite.
+      # ./test.sh reuses SwiftPM's build products for the full test run below.
+      - name: Preflight Swift test compilation
+        run: swift build --build-tests --jobs 4
       - name: Ensure ffmpeg
         run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
       - name: Restore MCP test timings
@@ -51,3 +55,42 @@ jobs:
           CUTMARK_VERIFY_NATIVE_SET: '1'
           SKIP_TESTS: '1'
         run: ./build.sh
+      # PR #15 needs a testable app without installing it or publishing a release.
+      # A ZIP preserves app permissions/signatures across GitHub artifact download.
+      - name: Package PR #15 smoke candidate
+        if: github.event_name == 'pull_request' && github.event.pull_request.number == 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="build.noindex/Cutmark.app"
+          out="$RUNNER_TEMP/cutmark-smoke-candidate"
+          mkdir -p "$out"
+          codesign --verify --deep --strict "$app"
+          codesign --display --verbose=4 "$app" 2>&1 | grep -q 'Signature=adhoc'
+          stamp="$(/usr/libexec/PlistBuddy -c 'Print :BuildStamp' "$app/Contents/Info.plist")"
+          [[ "$stamp" == "$(git rev-parse --short HEAD) "* ]] || {
+            echo "::error::Candidate BuildStamp does not match checkout HEAD"
+            exit 1
+          }
+          zip="$out/Cutmark-${GITHUB_SHA:0:12}-adhoc.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$zip"
+          verify="$RUNNER_TEMP/cutmark-smoke-verify"
+          mkdir -p "$verify"
+          ditto -x -k "$zip" "$verify"
+          codesign --verify --deep --strict "$verify/Cutmark.app"
+          (
+            cd "$out"
+            shasum -a 256 "$(basename "$zip")" > SHA256SUMS
+          )
+          printf 'PR: 15\nPR head: %s\nCheckout (PR merge): %s\nBase: %s\nBuildStamp: %s\nSigning: ad-hoc (not notarized)\nPurpose: isolated smoke testing only; not a release\n' \
+            '${{ github.event.pull_request.head.sha }}' "$GITHUB_SHA" \
+            '${{ github.event.pull_request.base.sha }}' "$stamp" > "$out/PROVENANCE.txt"
+          echo "Built PR smoke candidate for $GITHUB_SHA ($stamp)"
+      - name: Upload PR #15 smoke candidate
+        if: github.event_name == 'pull_request' && github.event.pull_request.number == 15
+        uses: actions/upload-artifact@v4
+        with:
+          name: cutmark-pr15-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/cutmark-smoke-candidate/
+          if-no-files-found: error
+          retention-days: 3

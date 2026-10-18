@@ -72,6 +72,34 @@ struct RecordingRecoveryTests {
         #expect(takes.count == 1 && takes[0].kind == .screen && takes[0].number == 6)
     }
 
+    @Test func screenOnlyClaimNeverRequiresOrRecoversACamera() async throws {
+        let s = try session()
+        defer { try? FileManager.default.removeItem(at: s.deletingLastPathComponent().deletingLastPathComponent()) }
+        let screen = s.appending(path: "take-07-screen.mov")
+        #expect(RecordingRecovery.begin(in: s, number: 7, camera: nil, screen: screen,
+                                        script: "screen-demo", hook: nil, shot: nil))
+        let screenStart = Date(timeIntervalSince1970: 1_700_000_200)
+        #expect(RecordingRecovery.started(in: s, number: 7, camera: nil, screen: screenStart))
+        let journal = try #require(RecordingRecovery.read(s, number: 7))
+        #expect(journal.camera == nil && journal.screen == screen.lastPathComponent)
+        #expect(journal.cameraStartedAt == nil)
+
+        let takes = await RecordingRecovery.recoverableTakes(
+            in: s, journal: journal, meta: SessionMeta(title: "x", createdAt: Date())
+        ) { u in u.lastPathComponent == screen.lastPathComponent ? 12.0 : nil }
+        #expect(takes.count == 1)
+        #expect(takes[0].kind == .screen && takes[0].file == screen.lastPathComponent)
+        #expect(abs(takes[0].startedAt.timeIntervalSince(screenStart)) < 0.001)
+    }
+
+    @Test func recoveryClaimRequiresAtLeastOneCaptureSource() throws {
+        let s = try session()
+        defer { try? FileManager.default.removeItem(at: s.deletingLastPathComponent().deletingLastPathComponent()) }
+        #expect(!RecordingRecovery.begin(in: s, number: 8, camera: nil, screen: nil,
+                                         script: nil, hook: nil, shot: nil))
+        #expect(RecordingRecovery.read(s, number: 8) == nil)
+    }
+
     @Test func unrecoveredClaimReservesItsTakeNumber() throws {
         let s = try session()
         defer { try? FileManager.default.removeItem(at: s.deletingLastPathComponent().deletingLastPathComponent()) }

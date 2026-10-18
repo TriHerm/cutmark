@@ -22,10 +22,12 @@ final class FirstTake {
         let session: URL
         let title: String
         let number: Int
-        let camera: URL
+        let camera: URL?
         let screen: URL?
+        let primary: URL
         let duration: Double
         let words: Int
+        var files: [URL] { [camera, screen].compactMap { $0 } }
     }
 
     var shown = false
@@ -59,13 +61,16 @@ final class FirstTake {
     func show(_ doc: SessionDoc, number: Int? = nil) {
         let takes = doc.meta.takes
         guard let n = number ?? takes.map(\.number).max(),
-              let cam = takes.first(where: { $0.number == n && $0.kind == .camera }) else { return }
+              let first = takes.first(where: { $0.number == n && ($0.kind == .camera || $0.kind == .screen) })
+        else { return }
+        let cam = takes.first(where: { $0.number == n && $0.kind == .camera })
         let screen = takes.first { $0.number == n && $0.kind == .screen }
-        let script = cam.script.flatMap { s in doc.variants.first { $0.slug == s }?.text } ?? doc.script
+        let script = first.script.flatMap { s in doc.variants.first { $0.slug == s }?.text } ?? doc.script
         moment = Moment(session: doc.url, title: doc.meta.title, number: n,
-                        camera: doc.url.appending(path: cam.file),
+                        camera: cam.map { doc.url.appending(path: $0.file) },
                         screen: screen.map { doc.url.appending(path: $0.file) },
-                        duration: cam.duration ?? 0,
+                        primary: doc.url.appending(path: (screen ?? cam ?? first).file),
+                        duration: first.duration ?? 0,
                         words: script.split { $0.isWhitespace }.count)
         scene = 0; forward = true; confetti = true
         withAnimation(Theme.spring) { shown = true }
@@ -86,7 +91,7 @@ final class FirstTake {
 
     func close() { withAnimation(Theme.motion) { shown = false } }
 
-    /// The chat edits only when Claude Code is in, signed in, and ffmpeg and Python are there (Setup).
+    /// The editing provider must be ready and local ffmpeg/Python tools available.
     var canEdit: Bool {
         let s = Setup.shared
         return s.agent == .ok && s.signedIn == .ok && s.ffmpeg == .ok && s.devTools == .ok
@@ -97,8 +102,7 @@ final class FirstTake {
     func askForEdit(app: AppModel) {
         guard let m = moment else { return }
         Self.open(m.session, .assets, chat: true, app: app)
-        let files = [m.camera] + (m.screen.map { [$0] } ?? [])
-        app.chats.chat(m.session).send(ChatAttach.message(Self.ask, files: files), title: m.title, onStage: nil)
+        app.chats.chat(m.session).send(ChatAttach.message(Self.ask, files: m.files), title: m.title, onStage: nil)
         guide = m.session
         close()
     }
@@ -244,7 +248,8 @@ private struct CelebrateScene: View {
         }
         .overlay(alignment: .bottom) {
             HStack(spacing: 8) {
-                Chip(icon: "video.fill", count: moment.duration, format: Self.time, text: "on camera")
+                Chip(icon: moment.camera == nil ? "display" : "video.fill", count: moment.duration,
+                     format: Self.time, text: moment.camera == nil ? "on screen" : "on camera")
                 if moment.words > 0 {
                     Chip(icon: "text.alignleft", count: Double(moment.words), format: { "\(Int($0))" }, text: "words read")
                 }
@@ -287,13 +292,13 @@ private struct TakeTile: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             Theme.stage
-            if let still = stills[moment.screen ?? moment.camera] {
+            if let still = stills[moment.primary] {
                 Image(nsImage: still).resizable().scaledToFill().frame(width: size.width, height: size.height).clipped()
             }
             if let main { PostPlayerLayer(player: main) }
-            if !small, moment.screen != nil {
+            if !small, moment.screen != nil, let camera = moment.camera {
                 ZStack {
-                    if let still = stills[moment.camera] { Image(nsImage: still).resizable().scaledToFill() }
+                    if let still = stills[camera] { Image(nsImage: still).resizable().scaledToFill() }
                     if let bubble { PostPlayerLayer(player: bubble) }
                 }
                     .frame(width: 58, height: 58).clipShape(Circle())
@@ -337,11 +342,12 @@ private struct TakeTile: View {
     }
 
     private func load() async {
-        let video = moment.screen ?? moment.camera
-        if let s = await Self.shape(of: video) { shape = s }
-        for u in [video, moment.camera] where stills[u] == nil { stills[u] = await Self.still(u) }
-        main = player(video)
-        if moment.screen != nil, !small { bubble = player(moment.camera) }
+        if let s = await Self.shape(of: moment.primary) { shape = s }
+        for u in [moment.primary, moment.camera].compactMap({ $0 }) where stills[u] == nil {
+            stills[u] = await Self.still(u)
+        }
+        main = player(moment.primary)
+        if moment.screen != nil, !small, let camera = moment.camera { bubble = player(camera) }
     }
 
     /// Muted, and round again at the end: the looper must live as long as the player.

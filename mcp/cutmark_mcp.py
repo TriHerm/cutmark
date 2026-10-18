@@ -11915,6 +11915,83 @@ def edit_time_map(cut, lead=0.0):
     return {"lead": float(lead), "spans": spans, "duration": at}
 
 
+def edit_timeline_cut(cut, actions, fps=30):
+    """Non-destructive cut-list decisions. Seconds are on each original source clock.
+
+    An action edits one occurrence, never every reuse of that take. Render_edit still validates
+    media/provenance and creates an unpublished render; no source or published recipe is changed.
+    """
+    if not isinstance(cut, list) or not cut:
+        raise ValueError("The edit has no segments to change.")
+    if not isinstance(actions, list) or len(actions) > 100:
+        raise ValueError("actions must be a list of up to 100 timeline operations.")
+    if not isinstance(fps, (int, float)) or isinstance(fps, bool) or not math.isfinite(fps) or fps <= 0:
+        raise ValueError("The edit must have a positive frame rate.")
+    minimum = 2.0 / float(fps)
+    # Keep extension provenance outside the public segment dict. A recipe may carry optional segment
+    # metadata, so private planner keys must never overwrite or leak into the proposed canonical cut.
+    parts = [{"_segment": dict(g), "_timeline_bound_in": float(g["in"]),
+              "_timeline_bound_out": float(g["out"])} for g in cut]
+    for step, action in enumerate(actions):
+        if not isinstance(action, dict):
+            raise ValueError("Timeline action %d must be an object." % (step + 1))
+        op = action.get("op")
+        if op not in ("split", "trim", "extend", "move", "remove", "duplicate"):
+            raise ValueError("Timeline action %d: use split, trim, extend, move, remove or duplicate." % (step + 1))
+        i = action.get("index")
+        if isinstance(i, bool) or not isinstance(i, int) or not (0 <= i < len(parts)):
+            raise ValueError("Timeline action %d: index is outside the current segments." % (step + 1))
+        item = parts[i]
+        segment = item["_segment"]
+        a, b = float(segment["in"]), float(segment["out"])
+        if op == "remove":
+            if len(parts) == 1:
+                raise ValueError("An edit needs at least one segment. Trim it instead.")
+            parts.pop(i)
+        elif op == "move":
+            to = action.get("to")
+            if isinstance(to, bool) or not isinstance(to, int) or not (0 <= to < len(parts)):
+                raise ValueError("Timeline action %d: to is outside the current segments." % (step + 1))
+            parts.insert(to, parts.pop(i))
+        elif op == "duplicate":
+            duplicate = dict(item)
+            duplicate["_segment"] = dict(segment)
+            parts.insert(i + 1, duplicate)
+        else:
+            def second(key, default=None):
+                raw = action.get(key, default)
+                if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
+                    raise ValueError("Timeline action %d: %s must be finite seconds." % (step + 1, key))
+                return float(raw)
+            if op == "split":
+                at = second("at")
+                if at - a < minimum - 1e-8 or b - at < minimum - 1e-8:
+                    raise ValueError("Split must leave at least two frames on both sides.")
+                left, right = dict(item), dict(item)
+                left["_segment"] = dict(segment, **{"out": at})
+                right["_segment"] = dict(segment, **{"in": at})
+                # A later extend may restore a trim that happened before this split, but it cannot
+                # grow either child across the deliberate split boundary.
+                left["_timeline_bound_out"] = at
+                right["_timeline_bound_in"] = at
+                parts[i:i + 1] = [left, right]
+            elif op == "trim":
+                start, end = second("in", a), second("out", b)
+                if start < a - 1e-8 or end > b + 1e-8 or end - start < minimum - 1e-8:
+                    raise ValueError("Trim must stay inside the segment and keep at least two frames.")
+                item["_segment"] = dict(segment, **{"in": start, "out": end})
+                parts[i] = item
+            elif op == "extend":
+                start, end = second("in", a), second("out", b)
+                bound_a, bound_b = item["_timeline_bound_in"], item["_timeline_bound_out"]
+                if (start < bound_a or end > bound_b or start > a or end < b or
+                        end - start < minimum - 1e-8 or not (start < a or end > b)):
+                    raise ValueError("Extend must grow the segment within its original bounds and keep at least two frames.")
+                item["_segment"] = dict(segment, **{"in": start, "out": end})
+                parts[i] = item
+    return [item["_segment"] for item in parts]
+
+
 def rounded_cut_for_render(cut, clocks):
     """The exact source spans render_run/render_cut concatenate, from already-probed source clocks.
 
@@ -13398,6 +13475,26 @@ def t_get_edit_recipe(a):
     return {"recipe": r, "lineage": lineage, "missing": missing, "newer": newer}
 
 
+def t_plan_timeline_edit(a):
+    """Inspect or change occurrences on a published edit's cut timeline, without writes."""
+    s = resolve_session(a["session"])
+    base, warnings = pick_base(s, a)
+    actions = a.get("actions", [])
+    if not isinstance(actions, list):
+        raise ValueError("actions must be a list of timeline operations.")
+    cut = edit_timeline_cut(base["cut"], actions, fps=base["frame"]["fps"])
+    # Same validation as render_edit, before the agent can turn this proposal into a render.
+    recipe = norm_recipe(s, merge_patch(agent_part(base), {"cut": cut}))
+    check_recipe(s, recipe)
+    changes = {"cut": recipe["cut"]}
+    timeline = edit_time_map(recipe["cut"], lead=(recipe.get("cover") or {}).get("seconds", 0))
+    return {"base": base["edit"], "segments": len(cut), "timeline": timeline,
+            "changes": changes, "warnings": warnings,
+            "render_edit": {"session": s, "base": base["edit"], "changes": changes,
+                            **({"go_back": True} if a.get("go_back") else {})},
+            "next": "Review this timeline first. Then call render_edit with render_edit arguments; check its output before publish_edit. No files were changed."}
+
+
 def recipe_short(r):
     """get_session's form: only the fields the agent sets, the cut as a count."""
     out = {k: r.get(k) for k in ("name", "edit", "note", "frame", "over", "music", "sfx", "steps", "cover", "loudness")}
@@ -14649,6 +14746,26 @@ TOOLS = [
       "edit": {"type": "string", "description": "'hook-v4', 'edits/hook-v4.mp4' or 'hook' for its newest. Default: "
                "the newest edit."}},
      ["session"], t_get_edit_recipe),
+    ("plan_timeline_edit", "Inspect a published edit's ordered cut timeline or propose non-destructive segment operations. "
+     "actions=[{op:'split',index:0,at:4.2},{op:'trim',index:1,in:4.5,out:6.5},{op:'extend',index:1,in:4.2,out:7.0},{op:'move',index:1,to:0},"
+     "{op:'duplicate',index:0},{op:'remove',index:2}] uses zero-based CURRENT segment indices, in source seconds. "
+     "Split/trim/extend keep at least two output frames. Trim only moves edges inward; extend only grows them back within that occurrence's original source bounds. A split makes its point the inherited extension boundary for both children. "
+     "Returns exact source/output spans and render_edit arguments for review, without writing files. "
+     "Then call render_edit with those arguments, inspect checks, and publish_edit only when accepted.",
+     {"session": SESSION,
+      "base": {"type": "string", "description": "Published edit name or version, as in render_edit base."},
+      "actions": {"type": "array", "description": "Ordered operations applied to the current cut list; omit for read-only timeline.",
+                  "items": {"type": "object", "properties": {
+                      "op": {"type": "string", "description": "split, trim, extend, move, remove or duplicate this segment occurrence.",
+                             "enum": ["split", "trim", "extend", "move", "remove", "duplicate"]},
+                      "index": {"type": "integer", "description": "Zero-based index in the current timeline, after previous actions."},
+                      "to": {"type": "integer", "description": "For move: target zero-based index in the current timeline."},
+                      "at": {"type": "number", "description": "For split: split position in the original source clip's seconds."},
+                      "in": {"type": "number", "description": "For trim/extend: new inclusive start in source seconds; trim moves inward, extend may only move outward to the occurrence bound."},
+                      "out": {"type": "number", "description": "For trim/extend: new exclusive end in source seconds; trim moves inward, extend may only move outward to the occurrence bound."}},
+                      "required": ["op", "index"]}},
+      "go_back": {"type": "boolean", "description": "Explicitly allow planning from an older version."}},
+     ["session"], t_plan_timeline_edit),
     ("suggest_auto_zooms", "Plan conservative screen-recording zooms from Cutmark's captured primary clicks. "
      "This is read-only. With edit it returns an exact published base, a plan fingerprint, applicable stable ids, "
      "normalized source-clock focus intervals and their mapped preview. It never changes recipe/media. Pointer "
@@ -14820,7 +14937,7 @@ READ_ONLY = {"get_comment_context", "list_comment_suggestions", "list_projects",
              "post_history", "get_post_queue", "get_plan", "get_comments", "get_rules", "script_history",
              "get_script_version", "get_performance", "list_broll", "search_media", "list_music", "get_library",
              "phone_videos", "higgsfield_status", "replicate_status", "replicate_model",
-             "list_ideas", "get_idea", "get_job", "get_edit_recipe", "suggest_auto_zooms", "suggest_smart_speed"}
+             "list_ideas", "get_idea", "get_job", "get_edit_recipe", "plan_timeline_edit", "suggest_auto_zooms", "suggest_smart_speed"}
 DESTRUCTIVE = {"trash_takes", "trash_sessions", "delete_variants", "delete_post_variants", "copy_library",
                "set_rule", "set_hooks", "set_post_hooks", "set_storyboard",
                # run_job runs any shell command: clients that gate on destructiveHint must ask first.
@@ -14875,7 +14992,7 @@ def listed(name, desc, props, req):
 # Which tool for which step, at the end of the instructions: an agent finds the tool without a search.
 TOOL_INDEX = ("Tools by step. Start: get_session (takes, script, open comments, rules), list_sessions. Plan: "
               "update_session (script), create_variants, set_hooks, set_storyboard. Make: next_path, clean_voice, "
-              "rough_cut, cut_take, render_edit, publish_edit, get_edit_recipe, list_broll, add_broll, run_job, get_job, "
+              "rough_cut, cut_take, render_edit, publish_edit, get_edit_recipe, plan_timeline_edit, list_broll, add_broll, run_job, get_job, "
               "check_edit, open_in_app. Package: next_path kind=thumbnail, make_image. "
               "Publish: set_post, set_post_hooks, create_post_variants, get_post_queue. Review: get_comments, "
               "reply_comment. Rules: get_rules, set_rule.")

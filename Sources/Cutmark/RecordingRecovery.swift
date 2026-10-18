@@ -21,7 +21,7 @@ enum RecordingRecovery {
 
     struct Journal: Codable, Equatable {
         var number: Int
-        var camera: String
+        var camera: String?
         var screen: String?
         var requestedAt: Date
         var cameraStartedAt: Date?
@@ -64,14 +64,15 @@ enum RecordingRecovery {
     }
 
     @discardableResult
-    static func begin(in session: URL, number: Int, camera: URL, screen: URL?,
+    static func begin(in session: URL, number: Int, camera: URL?, screen: URL?,
                       script: String?, hook: String?, shot: String?) -> Bool {
-        write(Journal(number: number, camera: camera.lastPathComponent, screen: screen?.lastPathComponent,
-                      requestedAt: Date(), script: script, hook: hook, shot: shot), in: session)
+        guard camera != nil || screen != nil else { return false }
+        return write(Journal(number: number, camera: camera?.lastPathComponent, screen: screen?.lastPathComponent,
+                             requestedAt: Date(), script: script, hook: hook, shot: shot), in: session)
     }
 
     @discardableResult
-    static func started(in session: URL, number: Int, camera: Date, screen: Date?) -> Bool {
+    static func started(in session: URL, number: Int, camera: Date?, screen: Date?) -> Bool {
         guard var journal = read(session, number: number) else { return false }
         journal.cameraStartedAt = camera
         journal.screenStartedAt = screen
@@ -136,11 +137,13 @@ enum RecordingRecovery {
                                  duration: (URL) async -> Double?) async -> [Take] {
         guard !meta.takes.contains(where: { $0.number == journal.number }) else { return [] }
         var takes: [Take] = []
-        let camera = session.appending(path: journal.camera)
-        let cameraStart = journal.cameraStartedAt ?? created(camera) ?? journal.requestedAt
-        if let cameraDuration = await duration(camera), cameraDuration > 0 {
-            takes.append(Take(number: journal.number, kind: .camera, file: journal.camera, startedAt: cameraStart,
-                              duration: cameraDuration, script: journal.script, hook: journal.hook, shot: journal.shot))
+        if let cameraName = journal.camera {
+            let camera = session.appending(path: cameraName)
+            let cameraStart = journal.cameraStartedAt ?? created(camera) ?? journal.requestedAt
+            if let cameraDuration = await duration(camera), cameraDuration > 0 {
+                takes.append(Take(number: journal.number, kind: .camera, file: cameraName, startedAt: cameraStart,
+                                  duration: cameraDuration, script: journal.script, hook: journal.hook, shot: journal.shot))
+            }
         }
         if let screenName = journal.screen {
             let screen = session.appending(path: screenName)

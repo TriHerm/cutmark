@@ -45,7 +45,13 @@ struct CutmarkApp: App {
         .commands {
             CommandGroup(replacing: .appInfo) {
                 AboutButton()
+            }
+            // Keep this in its own application-menu section. Extra items inside .appInfo
+            // were not discoverable on the hardware build even though About was.
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { checkForCutmarkUpdates(app: app) }
                 if Releaser.available {
+                    Divider()
                     Button(Releaser.shared.menuTitle) { Releaser.shared.confirmAndRun { app.show(toast: $0) } }
                         .disabled(Releaser.shared.running)
                 }
@@ -135,6 +141,89 @@ struct CutmarkApp: App {
                 .tint(Theme.accent)
                 .font(Theme.body)
         }
+    }
+}
+
+/// One manual update action for both the native app menu and Cutmark's own brand menu.
+/// The normal stage toast remains useful in the main window, while this floating status stays
+/// visible when the timeline editor or another Cutmark window is in front.
+@MainActor
+func checkForCutmarkUpdates(app: AppModel) {
+    Updater.shared.checkForUpdates { message in
+        app.show(toast: message)
+        UpdateCheckFeedback.shared.show(message)
+    }
+}
+
+@MainActor
+private final class UpdateCheckFeedback {
+    static let shared = UpdateCheckFeedback()
+    private var panel: NSPanel?
+    private var dismiss: DispatchWorkItem?
+
+    private init() {}
+
+    func show(_ message: String) {
+        dismiss?.cancel()
+
+        let view = NSHostingView(rootView: UpdateCheckFeedbackBubble(message: message))
+        view.layoutSubtreeIfNeeded()
+        let fit = view.fittingSize
+        let size = CGSize(width: min(max(fit.width, 240), 520),
+                          height: min(max(fit.height, 44), 120))
+
+        let panel: NSPanel
+        if let current = self.panel {
+            panel = current
+        } else {
+            panel = NSPanel(contentRect: CGRect(origin: .zero, size: size),
+                            styleMask: [.borderless, .nonactivatingPanel],
+                            backing: .buffered, defer: false)
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.hasShadow = true
+            panel.level = .floating
+            panel.hidesOnDeactivate = false
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            self.panel = panel
+        }
+        panel.contentView = view
+        panel.setContentSize(size)
+
+        let host = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible })
+        if let host {
+            panel.setFrameOrigin(NSPoint(x: host.frame.midX - size.width / 2,
+                                         y: host.frame.maxY - size.height - 52))
+        } else if let screen = NSScreen.main {
+            panel.setFrameOrigin(NSPoint(x: screen.visibleFrame.midX - size.width / 2,
+                                         y: screen.visibleFrame.maxY - size.height - 36))
+        }
+        panel.orderFrontRegardless()
+
+        let work = DispatchWorkItem { [weak self] in self?.panel?.orderOut(nil) }
+        dismiss = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: work)
+    }
+}
+
+private struct UpdateCheckFeedbackBubble: View {
+    let message: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: message == "Checking for updates…" ? "arrow.triangle.2.circlepath" : "info.circle")
+            Text(message)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(Theme.sans(12, .medium))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: 500, alignment: .leading)
+        .background(Color(nsColor: Theme.stageNS).opacity(0.92), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+        .environment(\.colorScheme, .dark)
+        .padding(8)
     }
 }
 
@@ -985,6 +1074,7 @@ struct DetailView: View {
     @ObservedObject var camera: CameraRecorder
     @ObservedObject var screen: ScreenRecorder
     @AppStorage("rightTab") private var rightTab = "script"
+    @AppStorage("screenPreviewVisible") private var screenPreviewVisible = false
     @Environment(\.colorScheme) private var scheme
     /// The full-window tabs opened in this session so far. They stay mounted.
     @State private var opened = KeptTabs()
@@ -1027,11 +1117,11 @@ struct DetailView: View {
     /// on the Script tab instead.
     private var recordOnly: Bool { rightTab == "script" }
 
-    /// The screen viewfinder is useful only while preparing a camera + screen take. It stops before
-    /// warming/countdown so the real recording owns ScreenCaptureKit by itself.
+    /// The screen preview is explicitly requested while choosing a source, not a continuous
+    /// viewfinder. ScreenCaptureKit is released after its one-shot thumbnail and before Record.
     private var screenPreviewWanted: Bool {
-        recordOnly && cover == nil && app.mode == .cameraScreen && !app.isRecording
-            && library.selectedSessions.count <= 1
+        recordOnly && cover == nil && app.mode.recordsScreen && !app.isRecording
+            && library.selectedSessions.count <= 1 && screenPreviewVisible
     }
 
     /// Record with one session open, a script in it, and no welcome card over it: the notch opens
@@ -1058,7 +1148,14 @@ struct DetailView: View {
         .onChange(of: rightTab) { _, tab in if tab != "script" && !app.isRecording { app.shot = nil } }
         .onChange(of: notchRecord, initial: true) { _, on in NotchPanel.shared.follow(record: on, app) }
         .onChange(of: screenPreviewWanted, initial: true) { _, on in screen.setPreviewing(on) }
-        .onChange(of: screen.displayID) { _, _ in if screenPreviewWanted { screen.setPreviewing(true) } }
+        .onChange(of: screen.selectedSource) { _, _ in if screenPreviewWanted { screen.setPreviewing(true) } }
+        .onChange(of: screen.displays) { _, _ in
+            if screenPreviewWanted {
+                // A detached display may reconnect without changing its saved selection.
+                screen.setPreviewing(false)
+                screen.setPreviewing(true)
+            }
+        }
         // A take that ran on while you left Record: the notch goes once it ends.
         .onChange(of: app.isRecording) { _, _ in NotchPanel.shared.follow(record: notchRecord, app) }
         // Another board (Plugins, Performance…) replaces this view: the notch goes too.
@@ -1188,20 +1285,11 @@ struct DetailView: View {
                         // Removing its layer while the session stops or starts deadlocks AVFoundation.
                         CameraCard(camera: camera, doc: library.current, corner: plugged?.camera, accessory: stageButtons)
                         if screenPreviewWanted {
-                            VStack {
-                                HStack {
-                                    Spacer()
-                                    ScreenPreviewCard(
-                                        feed: screen.preview,
-                                        displayName: screen.displays.first { $0.id == screen.displayID }?.name ?? "Display"
-                                    )
-                                    .frame(width: min(260, max(180, stageSize.width * 0.34)))
-                                }
-                                Spacer()
-                            }
-                            .padding(.top, max(60, notchReach + 12))
-                            .padding(.trailing, 18)
-                            .allowsHitTesting(false)
+                            ScreenPreviewFloating(
+                                feed: screen.preview,
+                                displayName: screen.selectedSourceName,
+                                topInset: max(60, notchReach + 12)
+                            )
                             .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
                         }
                         if app.preview != nil {
@@ -1218,7 +1306,34 @@ struct DetailView: View {
                                 } else if Asset.kind(of: url) == .image {
                                     StillView(url: url)
                                 } else if Asset.kind(of: url) == .video, let commentRoot {
-                                    ReviewPlayer(url: url, session: commentRoot).id(url)
+                                    if let doc = library.current,
+                                       commentRoot.standardizedFileURL == doc.url.standardizedFileURL,
+                                       EditTimelineDraft.file(video: url, session: doc.url) != nil {
+                                        // Give editing its own space below the review player: overlaying the
+                                        // seek bar was an error: a modern editable filmstrip needs full width.
+                                        VStack(spacing: 0) {
+                                            ReviewPlayer(url: url, session: commentRoot).id(url)
+                                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                            HStack(spacing: 12) {
+                                                Image(systemName: "film.stack")
+                                                    .foregroundStyle(Theme.accent)
+                                                Text("Edit with the visual timeline")
+                                                    .font(Theme.sans(12, .medium))
+                                                Spacer(minLength: 6)
+                                                Button {
+                                                    TimelineEditorWindow.shared.open(video: url, doc: doc, app: app)
+                                                } label: {
+                                                    Label("Open editor", systemImage: "arrow.up.left.and.arrow.down.right")
+                                                }
+                                                .buttonStyle(AccentButtonStyle(kind: .solid))
+                                                .help("Open the full-width filmstrip, waveform, playhead and cut preview")
+                                            }
+                                            .padding(.horizontal, 16).frame(height: 55)
+                                            .background(Theme.paper)
+                                        }
+                                    } else {
+                                        ReviewPlayer(url: url, session: commentRoot).id(url)
+                                    }
                                 } else if PDFStage.handles(url) {
                                     PDFStage(url: url).id(url)
                                 } else if DocReview.handles(url), let commentRoot {
@@ -1300,8 +1415,7 @@ struct DetailView: View {
     @ViewBuilder private var overlay: some View {
         switch app.phase {
         case .warming:
-            // The camera comes on (it was off on the Storyboard): the picture shows, then the count.
-            Text(app.warmedUp ? "Get ready" : "Camera starting…")
+            Text(app.warmedUp ? "Get ready" : app.mode.recordsCamera ? "Camera starting…" : "Preparing screen…")
                 .font(Theme.sans(15, .semibold)).foregroundStyle(.white)
                 .padding(.horizontal, 16).padding(.vertical, 9)
                 .background(.black.opacity(0.45), in: .capsule)
@@ -1317,7 +1431,7 @@ struct DetailView: View {
         case .starting, .finishing:
             ProgressView().controlSize(.large).tint(.white)
         case .idle:
-            if let p = camera.permissionProblem {
+            if let p = camera.permissionProblem, app.mode.recordsCamera {
                 Text(p).foregroundStyle(.white).padding().background(Theme.stage.opacity(0.9), in: .rect(cornerRadius: Theme.radius))
             } else if let e = app.error {
                 Text(e).foregroundStyle(.white).padding().background(Theme.accent, in: .rect(cornerRadius: Theme.radius))
@@ -1346,11 +1460,16 @@ struct CameraCard: View {
     private var ratio: CGFloat { camera.orientation == .vertical ? 9.0 / 16.0 : 16.0 / 9.0 }
     private var next: Int { (doc?.meta.takes.map(\.number).max() ?? 0) + 1 }
     private var rolling: Bool { if case .recording = app.phase { return true }; return false }
+    private var cameraVisible: Bool { app.mode.recordsCamera && !camera.paused }
 
     var body: some View {
         ZStack {
-                CameraPreview(session: camera.session, fill: true, rotation: camera.previewRotation, corner: Self.corner)
-                if camera.paused {
+                if app.mode.recordsCamera {
+                    CameraPreview(session: camera.session, fill: true, rotation: camera.previewRotation, corner: Self.corner)
+                } else {
+                    Theme.stage
+                }
+                if !cameraVisible {
                     resting.transition(.opacity)
                 } else if !app.lightsDown {
                     FrameMarks().stroke(.white.opacity(0.6), style: StrokeStyle(lineWidth: 2, lineCap: .round))
@@ -1358,7 +1477,7 @@ struct CameraCard: View {
                 }
             }
             .clipShape(shape)
-            .background(shape.fill(Theme.stage).shadow(color: app.lightsDown ? .black.opacity(0.5) : Theme.shadow.opacity(camera.paused ? 0 : 2.2),
+            .background(shape.fill(Theme.stage).shadow(color: app.lightsDown ? .black.opacity(0.5) : Theme.shadow.opacity(cameraVisible ? 2.2 : 0),
                                                        radius: app.lightsDown ? 30 : 22, y: app.lightsDown ? 0 : 10))
             .overlay(shape.strokeBorder(rolling ? Theme.danger.opacity(0.7) : Theme.border.opacity(app.lightsDown ? 0 : 1),
                                         lineWidth: rolling ? 2 : 1))
@@ -1380,10 +1499,11 @@ struct CameraCard: View {
                 .contentTransition(.opacity)
             Spacer(minLength: 8)
             if let accessory, !rolling, !app.lightsDown { accessory.transition(.opacity) }
-            if app.mode == .cameraScreen {
-                Label("Screen too", systemImage: "display").font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.muted)
+            if app.mode.recordsScreen {
+                Label(app.mode == .screen || camera.paused ? "Screen only" : "Screen too", systemImage: "display")
+                    .font(Theme.sans(11.5, .medium)).foregroundStyle(Theme.muted)
             }
-            if !camera.formatDescription.isEmpty && !camera.paused {
+            if !camera.formatDescription.isEmpty && cameraVisible {
                 Text(camera.formatDescription).font(Theme.mono(11)).foregroundStyle(Theme.faint).lineLimit(1)
             }
         }
@@ -1400,7 +1520,8 @@ struct CameraCard: View {
                     LiveMascot(mood: .idle, size: 44)
                     Color.clear.frame(height: 0)
                 }
-                Text("Camera off").font(Theme.sans(15, .semibold)).foregroundStyle(Theme.ink)
+                Text(app.mode == .screen ? "Screen only" : "Camera off")
+                    .font(Theme.sans(15, .semibold)).foregroundStyle(Theme.ink)
                     .lineLimit(1).minimumScaleFactor(0.8)
                 // A narrow card drops the icon before the words wrap.
                 ViewThatFits(in: .horizontal) {
@@ -1413,8 +1534,18 @@ struct CameraCard: View {
     }
 
     private func turnOn(_ label: some View) -> some View {
-        Button { camera.setPaused(false) } label: { label.lineLimit(1).fixedSize() }
+        Button {
+            if app.mode == .screen { app.mode = .cameraScreen }
+            camera.setPaused(false)
+        } label: {
+            Group {
+                if app.mode == .screen { Label("Add camera", systemImage: "video") }
+                else { label }
+            }
+            .lineLimit(1).fixedSize()
+        }
             .buttonStyle(AccentButtonStyle(kind: .quiet))
+            .disabled(app.isRecording)
     }
 }
 
@@ -1511,11 +1642,100 @@ private struct StageHoverBar: ViewModifier {
     }
 }
 
+/// An independent view keeps screenshot updates and drag state out of the whole Record stage.
+private struct ScreenPreviewFloating: View {
+    @ObservedObject var feed: ScreenPreviewFeed
+    let displayName: String
+    let topInset: CGFloat
+    @AppStorage("screenPreviewVisible") private var visible = false
+    @AppStorage("screenPreviewX") private var savedX = 1.0
+    @AppStorage("screenPreviewY") private var savedY = 0.0
+    @State private var cardSize = CGSize(width: 240, height: 170)
+    @State private var dragOrigin: CGPoint?
+    @State private var dragPoint: CGPoint?
+
+    var body: some View {
+        GeometryReader { stage in
+            let aspect = feed.image.map { CGFloat($0.width) / max(1, CGFloat($0.height)) } ?? 16.0 / 10.0
+            let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
+            let resting = ScreenPreviewPlacement.point(normalized: saved, stage: stage.size,
+                                                       control: cardSize, topInset: topInset)
+            ScreenPreviewCard(feed: feed, displayName: displayName, onHide: { visible = false }) { translation, ended in
+                move(translation: translation, ended: ended, stage: stage.size)
+            }
+            .frame(width: ScreenPreviewPlacement.width(stage: stage.size, aspect: aspect))
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                if size.width > 0, size.height > 0, size != cardSize { cardSize = size }
+            }
+            .position(dragPoint ?? resting)
+        }
+    }
+
+    private func move(translation: CGSize, ended: Bool, stage: CGSize) {
+        let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
+        let base = dragOrigin ?? ScreenPreviewPlacement.point(normalized: saved, stage: stage,
+                                                               control: cardSize, topInset: topInset)
+        if dragOrigin == nil { dragOrigin = base }
+        let proposed = CGPoint(x: base.x + translation.width, y: base.y + translation.height)
+        let final = ScreenPreviewPlacement.clamped(point: proposed, stage: stage, control: cardSize,
+                                                   topInset: topInset)
+        if ended {
+            let normalized = ScreenPreviewPlacement.normalized(point: final, stage: stage, control: cardSize,
+                                                                 topInset: topInset)
+            savedX = Double(normalized.x)
+            savedY = Double(normalized.y)
+            dragOrigin = nil
+            dragPoint = nil
+        } else {
+            dragPoint = final
+        }
+    }
+}
+
+/// Reserve space for the prompter while keeping the whole preview inside a resized stage.
+struct ScreenPreviewPlacement {
+    /// Portrait displays need a narrower card in a short stage, not a clipped thumbnail.
+    static func width(stage: CGSize, aspect: CGFloat) -> CGFloat {
+        let preferred = min(260, max(180, stage.width * 0.34))
+        let fitsHeight = max(70, (stage.height - 36 - 28) * max(0.1, aspect))
+        return min(preferred, fitsHeight, max(70, stage.width - 36))
+    }
+
+    private static func region(stage: CGSize, control: CGSize, topInset: CGFloat, margin: CGFloat) -> (CGSize, CGFloat) {
+        let top = min(max(0, topInset), max(0, stage.height - control.height - 2 * margin))
+        return (CGSize(width: stage.width, height: max(0, stage.height - top)), top)
+    }
+
+    static func point(normalized: CGPoint, stage: CGSize, control: CGSize, topInset: CGFloat,
+                      margin: CGFloat = 18) -> CGPoint {
+        let (size, top) = region(stage: stage, control: control, topInset: topInset, margin: margin)
+        let p = RecordPillPlacement.point(normalized: normalized, stage: size, control: control, margin: margin)
+        return CGPoint(x: p.x, y: p.y + top)
+    }
+
+    static func clamped(point: CGPoint, stage: CGSize, control: CGSize, topInset: CGFloat,
+                        margin: CGFloat = 18) -> CGPoint {
+        let (size, top) = region(stage: stage, control: control, topInset: topInset, margin: margin)
+        let p = RecordPillPlacement.clamped(point: CGPoint(x: point.x, y: point.y - top),
+                                            stage: size, control: control, margin: margin)
+        return CGPoint(x: p.x, y: p.y + top)
+    }
+
+    static func normalized(point: CGPoint, stage: CGSize, control: CGSize, topInset: CGFloat,
+                           margin: CGFloat = 18) -> CGPoint {
+        let (size, top) = region(stage: stage, control: control, topInset: topInset, margin: margin)
+        return RecordPillPlacement.normalized(point: CGPoint(x: point.x, y: point.y - top),
+                                               stage: size, control: control, margin: margin)
+    }
+}
+
 /// The selected display as a small picture-in-picture while preparing a camera + screen take.
 /// ScreenRecorder publishes frames through a separate object so only this thumbnail redraws.
 private struct ScreenPreviewCard: View {
     @ObservedObject var feed: ScreenPreviewFeed
     let displayName: String
+    let onHide: () -> Void
+    let onMove: (CGSize, Bool) -> Void
 
     private var aspect: CGFloat {
         guard let image = feed.image, image.height > 0 else { return 16.0 / 10.0 }
@@ -1544,8 +1764,22 @@ private struct ScreenPreviewCard: View {
             HStack(spacing: 6) {
                 Image(systemName: "display")
                 Text(displayName).lineLimit(1)
-                Spacer(minLength: 6)
-                Text("PREVIEW").font(Theme.mono(9)).foregroundStyle(Theme.faint)
+                Spacer(minLength: 3)
+                Image(systemName: "line.3.horizontal")
+                    .foregroundStyle(Theme.faint)
+                    .frame(width: 20, height: 28)
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 1)
+                        .onChanged { onMove($0.translation, false) }
+                        .onEnded { onMove($0.translation, true) })
+                    .help("Drag to move screen preview")
+                    .accessibilityLabel("Move screen preview")
+                Button(action: onHide) {
+                    Image(systemName: "eye.slash").frame(width: 20, height: 28)
+                }
+                .buttonStyle(.plain)
+                .help("Hide preview. Screen recording stays on.")
+                .accessibilityLabel("Hide screen preview")
             }
             .font(Theme.sans(10.5, .medium))
             .foregroundStyle(Theme.ink)
@@ -1562,6 +1796,15 @@ private struct ScreenPreviewCard: View {
 /// Record controls remember a normalized centre so resizing keeps them in the same part of the
 /// stage. The clamp uses the measured control size, so the capsule cannot be dragged off-screen.
 struct RecordPillPlacement {
+    /// Preparation never uses last recording's free-drag position. While recording only, the
+    /// on-stage controls follow a clamped live position (for camera-only as well as paired).
+    static func stagePosition(recording: Bool, livePosition: CGPoint?, stage: CGSize,
+                              control: CGSize) -> CGPoint {
+        let fixed = point(normalized: CGPoint(x: 0.5, y: 1), stage: stage, control: control)
+        guard recording, let livePosition else { return fixed }
+        return clamped(point: livePosition, stage: stage, control: control)
+    }
+
     private static func limits(total: CGFloat, control: CGFloat, margin: CGFloat) -> (CGFloat, CGFloat) {
         let low = control / 2 + margin
         let high = total - control / 2 - margin
@@ -1611,18 +1854,20 @@ enum RecordPillLayout: Equatable {
     static let compactWidth: CGFloat = 292
 }
 
-/// Floats on the stage: the time, the record button, the shape, the screen and the devices.
+/// Preparation controls stay in one predictable place. Only the separate non-activating
+/// CaptureControlPanel is movable once recording has started.
 struct RecordPill: View {
     @Environment(AppModel.self) var app
     @ObservedObject var camera: CameraRecorder
     @ObservedObject var screen: ScreenRecorder
-    @AppStorage("recordPillX") private var savedX = 0.5
-    @AppStorage("recordPillY") private var savedY = 1.0
+    @AppStorage("screenPreviewVisible") private var screenPreviewVisible = false
     @State private var devices = false
+    @State private var sourcePicker = false
     @State private var hover = false
     @State private var pillSize = CGSize(width: 420, height: 60)
-    @State private var dragOrigin: CGPoint?
-    @State private var dragPoint: CGPoint?
+    @State private var activeDragOrigin: CGPoint?
+    @State private var activeDragPoint: CGPoint?
+    @State private var activeRestingPoint: CGPoint?
 
     private var recording: Bool { if case .recording = app.phase { return true }; return false }
     private var stoppable: Bool {
@@ -1634,22 +1879,53 @@ struct RecordPill: View {
     var body: some View {
         let _ = Perf.body("RecordPill")
         GeometryReader { stage in
-            let displayPicker = app.mode == .cameraScreen && screen.displays.count > 1
+            let displayPicker = app.mode.recordsScreen
             let layout = RecordPillLayout.choose(stageWidth: stage.size.width, showsDisplayPicker: displayPicker,
                                                  textScale: TextSize.shared.factor)
-            let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
-            let resting = RecordPillPlacement.point(normalized: saved, stage: stage.size, control: pillSize)
-            controls(stage: stage.size, layout: layout)
-                .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
-                    if size.width > 0, size.height > 0, size != pillSize { pillSize = size }
+            let position = RecordPillPlacement.stagePosition(recording: recording,
+                livePosition: activeDragPoint ?? activeRestingPoint,
+                stage: stage.size, control: pillSize)
+            if recording {
+                // The live on-stage controller is the ONLY draggable one. It owns its own
+                // position, independent of the preparation pill below.
+                controls(stage: stage.size, layout: layout)
+                    .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                        if size.width > 0, size.height > 0, size != pillSize { pillSize = size }
+                    }
+                    .position(position)
+                    .transaction { if activeDragPoint != nil { $0.animation = nil } }
+            } else {
+                // Never position the idle red Record button through the draggable controller.
+                // An explicit bottom-aligned layout stays centered even when the stage size,
+                // device picker, SwiftUI gesture tree, or a prior take's drag state changes.
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    controls(stage: stage.size, layout: layout)
+                        .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                            if size.width > 0, size.height > 0, size != pillSize { pillSize = size }
+                        }
                 }
-                .position(dragPoint ?? resting)
+                .padding(.bottom, 18)
+                .frame(width: stage.size.width, height: stage.size.height, alignment: .bottom)
+            }
+        }
+        .onChange(of: recording) { _, active in
+            // Preparation always returns to its fixed location; live movement is per take.
+            if !active { activeDragOrigin = nil; activeDragPoint = nil; activeRestingPoint = nil }
         }
     }
 
     @ViewBuilder private func controls(stage: CGSize, layout: RecordPillLayout) -> some View {
         HStack(spacing: layout == .compact ? 8 : 12) {
-            dragHandle(stage: stage)
+            if recording {
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.muted)
+                    .frame(width: 23, height: 34)
+                    .contentShape(Rectangle())
+                    .gesture(activeDrag(stage: stage, distance: 2))
+                    .help("Drag to move live recording controls")
+            }
             clock
             recordButton
             if layout == .compact {
@@ -1661,11 +1937,46 @@ struct RecordPill: View {
         .padding(.leading, 10).padding(.trailing, 10).padding(.vertical, 8)
         .frame(width: layout == .compact ? RecordPillLayout.compactWidth : nil)
         // Paper on the daylight stage; it follows the stage into the dark while you record.
-        .background(Capsule().fill(Theme.paper).shadow(color: Theme.shadow.opacity(1.8), radius: 18, y: 6))
+        .background {
+            if recording {
+                Capsule().fill(Theme.paper)
+                    .shadow(color: Theme.shadow.opacity(activeDragPoint == nil ? 1.8 : 0),
+                            radius: activeDragPoint == nil ? 18 : 0, y: activeDragPoint == nil ? 6 : 0)
+                    .gesture(activeDrag(stage: stage, distance: 5))
+            } else {
+                // No DragGesture exists anywhere on the preparation capsule.
+                Capsule().fill(Theme.paper)
+                    .shadow(color: Theme.shadow.opacity(1.8), radius: 18, y: 6)
+            }
+        }
         .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
         .foregroundStyle(Theme.ink)
         .animation(Theme.spring, value: recording)
-        .animation(Theme.spring, value: hover)
+    }
+
+    private func activeDrag(stage: CGSize, distance: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: distance)
+            .onChanged { value in
+                guard recording else { return }
+                let fallback = RecordPillPlacement.point(normalized: CGPoint(x: 0.5, y: 1),
+                                                         stage: stage, control: pillSize)
+                let origin = activeDragOrigin ?? activeRestingPoint ?? fallback
+                if activeDragOrigin == nil { activeDragOrigin = origin }
+                activeDragPoint = RecordPillPlacement.clamped(
+                    point: CGPoint(x: origin.x + value.translation.width,
+                                   y: origin.y + value.translation.height), stage: stage, control: pillSize)
+            }
+            .onEnded { value in
+                guard recording else { return }
+                let fallback = RecordPillPlacement.point(normalized: CGPoint(x: 0.5, y: 1),
+                                                         stage: stage, control: pillSize)
+                let origin = activeDragOrigin ?? activeRestingPoint ?? fallback
+                activeRestingPoint = RecordPillPlacement.clamped(
+                    point: CGPoint(x: origin.x + value.translation.width,
+                                   y: origin.y + value.translation.height), stage: stage, control: pillSize)
+                activeDragPoint = nil
+                activeDragOrigin = nil
+            }
     }
 
     private var recordButton: some View {
@@ -1694,9 +2005,9 @@ struct RecordPill: View {
                           help: "Switch between vertical and horizontal. \(camera.formatDescription)") {
                     camera.orientation = camera.orientation == .vertical ? .horizontal : .vertical
                 }
-                iconGhost(app.mode == .cameraScreen ? "display.fill" : "display",
-                          label: app.mode == .cameraScreen ? "Screen on" : "Screen off",
-                          help: "Record your screen too, as a second file") {
+                iconGhost(app.mode.recordsScreen ? "display.fill" : "display",
+                          label: app.mode == .screen ? "Screen only" : app.mode.recordsScreen ? "Screen on" : "Screen off",
+                          help: "Include or exclude the selected screen in recording") {
                     toggleScreen()
                 }
                 deviceButton
@@ -1718,29 +2029,31 @@ struct RecordPill: View {
                       help: "Switch between vertical and horizontal. \(camera.formatDescription)") {
                     camera.orientation = camera.orientation == .vertical ? .horizontal : .vertical
                 }
-                ghost(app.mode == .cameraScreen ? "Screen on" : "Screen off",
-                      help: "Record your screen too, as a second file") {
+                ghost(app.mode == .screen ? "Screen only" : app.mode.recordsScreen ? "Screen on" : "Screen off",
+                      help: "Include or exclude the selected screen in recording") {
                     toggleScreen()
                 }
-                // With two displays, which one records shows here, not only in the device panel
-                // (Jeremy could not find it, 2026-10-06). Compact keeps that choice in Devices.
-                if app.mode == .cameraScreen && screen.displays.count > 1 {
-                    let screen = screen
-                    CutmarkMenuButton(help: "Which display to record") {
+                // Choose a whole screen OR a specific app window, never an implicit crop.
+                // The one-shot preview is used only before Record to inspect this selection.
+                if app.mode.recordsScreen {
+                    Button {
+                        sourcePicker.toggle()
+                        if sourcePicker {
+                            Task { await screen.refreshCaptureSources(requestPermission: true) }
+                        }
+                    } label: {
                         HStack(spacing: 4) {
-                            Image(systemName: "display")
-                            Text(screen.displays.first { $0.id == screen.displayID }?.name ?? "Display")
+                            Image(systemName: "rectangle.dashed.on.rectangle")
+                            Text(screen.selectedSourceName)
                                 .lineLimit(1).frame(maxWidth: 110)
                         }
                         .font(Theme.sans(12, .medium))
                         .padding(.horizontal, 8).frame(height: 28)
                         .modifier(PillGhostLook())
-                    } content: {
-                        MenuLabel("Record")
-                        for d in screen.displays {
-                            MenuButton(d.name, icon: "display", checked: d.id == screen.displayID) { screen.displayID = d.id }
-                        }
                     }
+                    .buttonStyle(.plain)
+                    .cutmarkMenu(isPresented: $sourcePicker, width: 290) { sourceRows() }
+                    .help("Choose full screen or app window; preview one frame before recording")
                     .fixedSize()
                 }
                 deviceButton
@@ -1755,53 +2068,77 @@ struct RecordPill: View {
     }
 
     private var deviceButton: some View {
-        Button { devices.toggle() } label: {
+        Button {
+            devices.toggle()
+            if devices && app.mode.recordsScreen {
+                Task { await screen.refreshCaptureSources(requestPermission: true) }
+            }
+        } label: {
             Image(systemName: "slider.horizontal.3").font(.system(size: 12, weight: .medium))
                 .frame(width: 28, height: 28)
         }
         .buttonStyle(PillGhostStyle())
-        .help("Camera, microphone and screen")
-        .accessibilityLabel("Camera, microphone and screen")
+        .help("Choose camera, microphone, entire screen or app window")
+        .accessibilityLabel("Recording sources and screen window selection")
         .cutmarkMenu(isPresented: $devices, width: 270) { [app, camera, screen] in
-            DevicePanel.rows(mode: app.mode, camera: camera, screen: screen)
+            DevicePanel.rows(mode: app.mode, camera: camera, screen: screen,
+                             previewVisible: screenPreviewVisible,
+                             selectCaptureSource: selectCaptureSource,
+                             selectMode: { chosen in
+                                app.mode = chosen
+                                if !chosen.recordsScreen {
+                                    screenPreviewVisible = false
+                                    screen.setPreviewing(false)
+                                }
+                             }) {
+                screenPreviewVisible.toggle()
+                screen.setPreviewing(screenPreviewVisible, requestPermission: screenPreviewVisible)
+            }
         }
     }
 
     private func toggleScreen() {
-        let on = app.mode != .cameraScreen
+        let on = !app.mode.recordsScreen
         app.mode = on ? .cameraScreen : .camera
-        screen.setPreviewing(on, requestPermission: on)
+        if !on { screenPreviewVisible = false; screen.setPreviewing(false) }
     }
 
-    private func dragHandle(stage: CGSize) -> some View {
-        Image(systemName: "line.3.horizontal")
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(Theme.faint)
-            .frame(width: 22, height: 28)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 1)
-                    .onChanged { value in
-                        let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
-                        let base = dragOrigin ?? RecordPillPlacement.point(normalized: saved, stage: stage, control: pillSize)
-                        if dragOrigin == nil { dragOrigin = base }
-                        let proposed = CGPoint(x: base.x + value.translation.width, y: base.y + value.translation.height)
-                        dragPoint = RecordPillPlacement.clamped(point: proposed, stage: stage, control: pillSize)
-                    }
-                    .onEnded { value in
-                        let saved = CGPoint(x: CGFloat(savedX), y: CGFloat(savedY))
-                        let base = dragOrigin ?? RecordPillPlacement.point(normalized: saved, stage: stage, control: pillSize)
-                        let proposed = CGPoint(x: base.x + value.translation.width, y: base.y + value.translation.height)
-                        let final = RecordPillPlacement.clamped(point: proposed, stage: stage, control: pillSize)
-                        let normalized = RecordPillPlacement.normalized(point: final, stage: stage, control: pillSize)
-                        savedX = Double(normalized.x)
-                        savedY = Double(normalized.y)
-                        dragOrigin = nil
-                        dragPoint = nil
-                    }
-            )
-            .help("Drag to move recording controls")
-            .accessibilityLabel("Move recording controls")
+    @MainActor @MenuBuilder
+    private func sourceRows() -> [MenuItem] {
+        MenuLabel("Capture entire display")
+        for display in screen.displays {
+            MenuButton(display.name, icon: "display", checked: screen.selectedSource == .display(display.id)) {
+                selectCaptureSource(.display(display.id))
+            }
+        }
+        MenuDivider()
+        MenuLabel("Capture application window")
+        for window in screen.windows {
+            MenuButton(window.name, icon: "macwindow", checked: screen.selectedSource == window.source) {
+                selectCaptureSource(window.source)
+            }
+        }
+        if screen.windows.isEmpty {
+            MenuView("no-windows") {
+                Text("Select refresh to list available windows.")
+                    .font(Theme.sans(11)).foregroundStyle(Theme.muted).padding(.horizontal, 9)
+            }
+        }
+        MenuButton("Refresh windows", icon: "arrow.clockwise") {
+            Task { await screen.refreshCaptureSources(requestPermission: true) }
+        }
+        MenuDivider()
+        MenuButton("Preview selected source", icon: "eye", checked: screenPreviewVisible) {
+            screenPreviewVisible = true
+            screen.setPreviewing(true, requestPermission: true)
+        }
+    }
+
+    private func selectCaptureSource(_ source: ScreenRecorder.CaptureSource) {
+        screen.selectSource(source)
+        // DetailView's source/visibility observers request the one-shot image. Doing it here
+        // as well could issue two screenshots and bring the very preview lag we are removing.
+        screenPreviewVisible = true
     }
 
     /// The time since you started; the mic level while you wait.
@@ -1893,7 +2230,17 @@ struct LivePill: View {
 /// A Cutmark menu since 2026-10-11: one list, a section each for camera, microphone and screen.
 enum DevicePanel {
     @MainActor @MenuBuilder
-    static func rows(mode: Mode, camera: CameraRecorder, screen: ScreenRecorder) -> [MenuItem] {
+    static func rows(mode: Mode, camera: CameraRecorder, screen: ScreenRecorder,
+                     previewVisible: Bool,
+                     selectCaptureSource: @escaping (ScreenRecorder.CaptureSource) -> Void,
+                     selectMode: @escaping (Mode) -> Void,
+                     togglePreview: @escaping () -> Void) -> [MenuItem] {
+        MenuLabel("Recording sources")
+        for source in Mode.allCases {
+            MenuButton(source.rawValue, icon: source == .camera ? "video" : source == .screen ? "display" : "rectangle.on.rectangle",
+                       checked: mode == source) { selectMode(source) }
+        }
+        MenuDivider()
         MenuLabel("Camera")
         for d in camera.videoDevices {
             MenuButton(d.localizedName, icon: "video", checked: d.uniqueID == camera.videoID) { camera.chooseVideo(d.uniqueID) }
@@ -1908,13 +2255,26 @@ enum DevicePanel {
                 .padding(.leading, 33).padding(.trailing, 10).padding(.vertical, 4)
                 .help("Microphone level")
         }
-        if mode == .cameraScreen {
-            MenuLabel("Screen")
+        if mode.recordsScreen {
+            MenuLabel("Entire display")
             for d in screen.displays {
-                MenuButton(d.name, icon: "display", checked: d.id == screen.displayID) { screen.displayID = d.id }
+                MenuButton(d.name, icon: "display", checked: screen.selectedSource == .display(d.id)) {
+                    selectCaptureSource(.display(d.id))
+                }
             }
+            MenuLabel("Application window")
+            for window in screen.windows {
+                MenuButton(window.name, icon: "macwindow", checked: screen.selectedSource == window.source) {
+                    selectCaptureSource(window.source)
+                }
+            }
+            MenuButton("Refresh windows", icon: "arrow.clockwise") {
+                Task { await screen.refreshCaptureSources(requestPermission: true) }
+            }
+            MenuButton("Preview selected source", icon: "eye", checked: previewVisible,
+                       keepsOpen: true, action: togglePreview)
             MenuView("screen-note") {
-                Text("Cutmark hides itself from the screen file.").font(Theme.sans(11)).foregroundStyle(Theme.faint)
+                Text("Preview shows one frame before recording.").font(Theme.sans(11)).foregroundStyle(Theme.faint)
                     .padding(.leading, 33).padding(.trailing, 8).padding(.bottom, 4)
             }
         }
