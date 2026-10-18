@@ -350,7 +350,7 @@ private struct TimelineEditorWorkspace: View {
 
     private func clipView(_ segment: EditTimelineDraft.Segment, index: Int) -> some View {
         let envelope = draft?.trimBounds(index: index) ?? segment
-        TimelineFilmstripBar(segment: segment, number: index + 1,
+        return TimelineFilmstripBar(segment: segment, number: index + 1,
                              width: width(for: segment), thumbs: media.thumbnails[index] ?? [],
                              selected: selected == index, envelope: envelope,
                              pixelsPerSecond: pixelsPerSecond, fps: draft?.fps ?? 30,
