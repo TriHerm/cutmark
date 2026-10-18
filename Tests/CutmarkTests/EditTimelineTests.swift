@@ -9,18 +9,21 @@ struct EditTimelineTests {
                      .init(take: 2, kind: "camera", start: 4, end: 7)],
             segments: [.init(take: 1, kind: "screen", start: 0.5, end: 3.5),
                        .init(take: 2, kind: "camera", start: 4, end: 7)])
-        #expect(draft.apply(.init(op: "split", index: 0, at: 2)))
-        #expect(draft.apply(.init(op: "move", index: 2, to: 0)))
-        #expect(draft.apply(.init(op: "trim", index: 2, in: 2.2, out: 3)))
+        let didSplit = draft.apply(.init(op: "split", index: 0, at: 2))
+        let didMove = draft.apply(.init(op: "move", index: 2, to: 0))
+        let didTrim = draft.apply(.init(op: "trim", index: 2, in: 2.2, out: 3))
+        #expect(didSplit && didMove && didTrim)
         #expect(draft.duration == 3 + 1.5 + 0.8)
         #expect(draft.source[0].end == 3.5)
         #expect(draft.actions.count == 3)
-        #expect(draft.undoLast())
+        let undoTrim = draft.undoLast()
+        #expect(undoTrim)
         #expect(draft.actions.count == 2)
         #expect(draft.segments.last?.start == 2)
-        #expect(draft.undoLast())
-        #expect(draft.undoLast())
-        #expect(!draft.undoLast())
+        let undoMove = draft.undoLast()
+        let undoSplit = draft.undoLast()
+        let cannotUndo = draft.undoLast()
+        #expect(undoMove && undoSplit && !cannotUndo)
         #expect(draft.segments == draft.source)
     }
 
@@ -28,10 +31,11 @@ struct EditTimelineTests {
         var draft = EditTimelineDraft(base: "edits/demo-v1.mp4", fps: 30,
             source: [.init(take: 1, kind: "screen", start: 0, end: 4)],
             segments: [.init(take: 1, kind: "screen", start: 0, end: 4)])
-        #expect(!draft.apply(.init(op: "remove", index: 0)))
-        #expect(!draft.apply(.init(op: "split", index: 0, at: 0.01)))
-        #expect(!draft.apply(.init(op: "trim", index: 0, in: -.infinity, out: 3)))
-        #expect(!draft.apply(.init(op: "trim", index: 0, in: 1, out: 5)))
+        let removed = draft.apply(.init(op: "remove", index: 0))
+        let split = draft.apply(.init(op: "split", index: 0, at: 0.01))
+        let unbounded = draft.apply(.init(op: "trim", index: 0, in: -.infinity, out: 3))
+        let extended = draft.apply(.init(op: "trim", index: 0, in: 1, out: 5))
+        #expect(!removed && !split && !unbounded && !extended)
         #expect(draft.actions.isEmpty)
     }
 
@@ -49,7 +53,8 @@ struct EditTimelineTests {
         #expect(draft.sourcePoint(atOutput: 3.25, lead: 0.25) == nil)
 
         var reordered = draft
-        #expect(reordered.apply(.init(op: "move", index: 1, to: 0)))
+        let didReorder = reordered.apply(.init(op: "move", index: 1, to: 0))
+        #expect(didReorder)
         #expect(reordered.outputStart(of: 0, lead: 0.25) == 0.25)
         // Even though segment 2 is now first in the draft, the player still shows the published
         // version and its original order. Navigation and playhead editing must use that clock.

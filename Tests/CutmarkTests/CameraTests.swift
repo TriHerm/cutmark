@@ -31,10 +31,12 @@ struct CameraBitrateTests {
     @Test func audioFirstMovieStartWaitsForTheFirstEligibleVideoFrame() throws {
         var gate = CameraRecorder.VideoStartGate()
         gate.arm(at: CMTime(seconds: 10, preferredTimescale: 600))
-        #expect(gate.noteVideo(CMTime(seconds: 9.9, preferredTimescale: 600)) == nil)
-        #expect(gate.noteMovieStart(CMTime(seconds: 10.01, preferredTimescale: 600)) == nil)
+        let stale = gate.noteVideo(CMTime(seconds: 9.9, preferredTimescale: 600))
+        let audioFirst = gate.noteMovieStart(CMTime(seconds: 10.01, preferredTimescale: 600))
+        #expect(stale == nil && audioFirst == nil)
         let expected = CMTime(value: 6020, timescale: 600)
-        let first = try #require(gate.noteVideo(expected))
+        let firstCandidate = gate.noteVideo(expected)
+        let first = try #require(firstCandidate)
         #expect(CMTimeCompare(first, expected) == 0)
         #expect(!gate.isArmed)
     }
@@ -42,9 +44,11 @@ struct CameraBitrateTests {
     @Test func delayedMovieCallbackRejectsVideoFramesBeforeItsStartPTS() throws {
         var gate = CameraRecorder.VideoStartGate()
         gate.arm(at: CMTime(seconds: 20, preferredTimescale: 600))
-        #expect(gate.noteVideo(CMTime(seconds: 20.01, preferredTimescale: 600)) == nil)
-        #expect(gate.noteVideo(CMTime(seconds: 20.05, preferredTimescale: 600)) == nil)
-        let first = try #require(gate.noteMovieStart(CMTime(seconds: 20.03, preferredTimescale: 600)))
+        let earlier = gate.noteVideo(CMTime(seconds: 20.01, preferredTimescale: 600))
+        let eligible = gate.noteVideo(CMTime(seconds: 20.05, preferredTimescale: 600))
+        #expect(earlier == nil && eligible == nil)
+        let firstCandidate = gate.noteMovieStart(CMTime(seconds: 20.03, preferredTimescale: 600))
+        let first = try #require(firstCandidate)
         #expect(CMTimeCompare(first, CMTime(seconds: 20.05, preferredTimescale: 600)) == 0)
     }
 
@@ -52,10 +56,12 @@ struct CameraBitrateTests {
         var gate = CameraRecorder.VideoStartGate()
         let activation = CMTime(seconds: 40, preferredTimescale: 600)
         gate.arm(at: activation)
-        #expect(gate.noteMovieStart(CMTime(seconds: 39.9, preferredTimescale: 600)) == nil)
-        #expect(gate.noteVideo(CMTime(seconds: 39.99, preferredTimescale: 600)) == nil)
+        let earlierMovie = gate.noteMovieStart(CMTime(seconds: 39.9, preferredTimescale: 600))
+        let staleVideo = gate.noteVideo(CMTime(seconds: 39.99, preferredTimescale: 600))
+        #expect(earlierMovie == nil && staleVideo == nil)
         let expected = CMTime(seconds: 40.02, preferredTimescale: 600)
-        let first = try #require(gate.noteVideo(expected))
+        let firstCandidate = gate.noteVideo(expected)
+        let first = try #require(firstCandidate)
         #expect(CMTimeCompare(first, expected) == 0)
     }
 
@@ -65,7 +71,8 @@ struct CameraBitrateTests {
         _ = gate.noteVideo(CMTime(seconds: 30.1, preferredTimescale: 600))
         gate.reset()
         #expect(!gate.isArmed)
-        #expect(gate.noteMovieStart(CMTime(seconds: 30.05, preferredTimescale: 600)) == nil)
-        #expect(gate.noteVideo(CMTime(seconds: 30.2, preferredTimescale: 600)) == nil)
+        let staleMovie = gate.noteMovieStart(CMTime(seconds: 30.05, preferredTimescale: 600))
+        let staleVideo = gate.noteVideo(CMTime(seconds: 30.2, preferredTimescale: 600))
+        #expect(staleMovie == nil && staleVideo == nil)
     }
 }
