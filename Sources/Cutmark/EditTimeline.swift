@@ -81,6 +81,11 @@ struct EditTimelinePanel: View {
                             }
                             Button("Split at playhead") { splitAtPlayhead() }
                                 .buttonStyle(AccentButtonStyle(kind: .quiet))
+                            if draft.segments.contains(where: { $0.kind == "screen" }) {
+                                Button("Review auto-zoom") { reviewZooms() }
+                                    .buttonStyle(AccentButtonStyle(kind: .quiet))
+                                    .help("Suggest screen zooms without changing or publishing the edit")
+                            }
                             Text("Source seconds").font(Theme.sans(10)).foregroundStyle(Theme.faint)
                             timeField("In", $trimIn)
                             timeField("Out", $trimOut)
@@ -219,6 +224,16 @@ struct EditTimelinePanel: View {
             + "Do not publish_edit until I review the new result. Never overwrite the published edit or take files."
         app.chats.chat(doc.url).send(request, title: doc.meta.title, onStage: video,
                                      shown: "Render my \(draft.actions.count)-change timeline draft for review")
+        app.chats.open = true
+    }
+
+    private func reviewZooms() {
+        guard let draft, draft.segments.contains(where: { $0.kind == "screen" }) else { return }
+        app.chats.chat(doc.url).send(
+            "Call cutmark suggest_auto_zooms for the published edit \(draft.base). This is a read-only "
+            + "review: explain the proposed regions against the kept screen cuts. Do not apply_auto_zooms, "
+            + "render_edit or publish_edit without my approval.",
+            title: doc.meta.title, onStage: video, shown: "Review suggested screen zooms")
         app.chats.open = true
     }
 
