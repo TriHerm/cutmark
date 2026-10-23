@@ -26,6 +26,69 @@ struct RecordingRecoveryTests {
         #expect(abs(try #require(after.screenStartedAt).timeIntervalSince(screenStart)) < 0.001)
     }
 
+    @Test func recoveredPairedFramesRetainHostClockAndSignedOffset() async throws {
+        let s = try session()
+        defer { try? FileManager.default.removeItem(at: s.deletingLastPathComponent().deletingLastPathComponent()) }
+        let camera = s.appending(path: "take-09-camera.mov")
+        let screen = s.appending(path: "take-09-screen.mov")
+        #expect(RecordingRecovery.begin(in: s, number: 9, camera: camera, screen: screen,
+                                        script: nil, hook: nil, shot: nil))
+        let started = Date(timeIntervalSince1970: 1_700_000_000.42)
+        #expect(RecordingRecovery.started(in: s, number: 9,
+                                          camera: started, screen: started.addingTimeInterval(-0.180),
+                                          cameraHostTime: 1800.630, screenHostTime: 1800.450,
+                                          cameraTimingQuality: .videoFrame, screenTimingQuality: .videoFrame))
+        let journal = try #require(RecordingRecovery.read(s, number: 9))
+        #expect(journal.cameraHostTime == 1800.630 && journal.screenHostTime == 1800.450)
+        let recovered = await RecordingRecovery.recoverableTakes(
+            in: s, journal: journal, meta: SessionMeta(title: "x", createdAt: Date())
+        ) { _ in 10 }
+        #expect(recovered.count == 2)
+        #expect(recovered.allSatisfy { $0.number == 9 && $0.timingQuality == .videoFrame })
+        let offset = CaptureSync.screenMinusCameraSeconds(camera: recovered[0], screen: recovered[1])
+        #expect(abs(try #require(offset) + 0.18) < 0.000_001)
+        #expect(abs(recovered[1].startedAt.timeIntervalSince(recovered[0].startedAt) + 0.18) < 0.001)
+    }
+
+    @Test func legacyJournalWithoutHostClockCannotAssertMeasuredSync() async throws {
+        let s = try session()
+        defer { try? FileManager.default.removeItem(at: s.deletingLastPathComponent().deletingLastPathComponent()) }
+        // secondsSince1970 was the recovery journal's original date strategy.
+        let legacy = """
+        {"number":4,"camera":"take-04-camera.mov","screen":"take-04-screen.mov",
+         "requestedAt":1700000000,"cameraStartedAt":1700000000.10,"screenStartedAt":1700000000.24}
+        """
+        try Data(legacy.utf8).write(to: RecordingRecovery.url(in: s, number: 4))
+        let journal = try #require(RecordingRecovery.read(s, number: 4))
+        #expect(journal.cameraHostTime == nil && journal.screenHostTime == nil)
+        let recovered = await RecordingRecovery.recoverableTakes(
+            in: s, journal: journal, meta: SessionMeta(title: "x", createdAt: Date())
+        ) { _ in 4 }
+        #expect(recovered.count == 2)
+        #expect(recovered.allSatisfy { $0.timingQuality == nil && $0.captureHostTime == nil })
+        #expect(CaptureSync.screenMinusCameraSeconds(camera: recovered[0], screen: recovered[1]) == nil)
+    }
+
+    @Test func callbackQualitySurvivesRecoveryWithoutBecomingVideoFrameSync() async throws {
+        let s = try session()
+        defer { try? FileManager.default.removeItem(at: s.deletingLastPathComponent().deletingLastPathComponent()) }
+        let camera = s.appending(path: "take-05-camera.mov")
+        let screen = s.appending(path: "take-05-screen.mov")
+        #expect(RecordingRecovery.begin(in: s, number: 5, camera: camera, screen: screen,
+                                        script: nil, hook: nil, shot: nil))
+        #expect(RecordingRecovery.started(in: s, number: 5,
+                                          camera: Date(), screen: Date(),
+                                          cameraHostTime: 100, screenHostTime: 100.24,
+                                          cameraTimingQuality: .callback, screenTimingQuality: .videoFrame))
+        let journal = try #require(RecordingRecovery.read(s, number: 5))
+        let recovered = await RecordingRecovery.recoverableTakes(
+            in: s, journal: journal, meta: SessionMeta(title: "x", createdAt: Date())
+        ) { _ in 4 }
+        #expect(recovered.first?.timingQuality == .callback)
+        #expect(recovered.last?.timingQuality == .videoFrame)
+        #expect(CaptureSync.screenMinusCameraSeconds(camera: recovered[0], screen: recovered[1]) == nil)
+    }
+
     @Test func playableCameraAndScreenBecomeTheSameTake() async throws {
         let s = try session()
         defer { try? FileManager.default.removeItem(at: s.deletingLastPathComponent().deletingLastPathComponent()) }

@@ -292,10 +292,13 @@ extension ChatRunTests {
         #expect(!told("job-1"))
         // The user stops a run; a job that ends then waits too.
         chat.send("Make the cut", title: "T", onStage: nil)
-        await until { runs == 1 }
+        // The fake writes its run counter before draining stdin to ask-1.txt. Under the full
+        // concurrent suite, `runs == 1` can precede the complete captured ask.
+        await until { runs == 1 && ask(1)?.hasSuffix("Make the cut") == true }
         // His message carries the end that waited since the launch.
-        #expect(ask(1)?.hasPrefix("[Cutmark] Job job-1 ended") == true)
-        #expect(ask(1)?.hasSuffix("Make the cut") == true)
+        let firstAsk = try #require(ask(1))
+        #expect(firstAsk.hasPrefix("[Cutmark] Job job-1 ended"))
+        #expect(firstAsk.hasSuffix("Make the cut"))
         #expect(told("job-1"))
         chat.stop()
         await until { !chat.running }

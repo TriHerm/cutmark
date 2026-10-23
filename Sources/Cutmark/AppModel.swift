@@ -215,9 +215,9 @@ final class AppModel {
         let doc: SessionDoc
         let number: Int
         let cam: URL?
-        let camStart: Date?
+        let camStart: CameraRecorder.Start?
         let screen: URL?
-        let screenStart: Date?
+        let screenStart: ScreenRecorder.Start?
         let screenDisplayID: CGDirectDisplayID?
         let script: String?
         let hook: String?
@@ -731,13 +731,20 @@ final class AppModel {
                 async let screenStarted = screen.startRecording(to: screenURL, micID: micID)
                 (cameraStart, screenStart) = try await (cameraStarted, screenStarted)
             }
-            if !RecordingRecovery.started(in: doc.url, number: n, camera: cameraStart?.date, screen: screenStart?.date) {
+            let cameraQuality: CaptureTimingQuality? = cameraStart.map {
+                $0.timing == .videoFrame ? .videoFrame : .callback
+            }
+            if !RecordingRecovery.started(in: doc.url, number: n,
+                                          camera: cameraStart?.date, screen: screenStart?.date,
+                                          cameraHostTime: cameraStart?.hostTime, screenHostTime: screenStart?.hostTime,
+                                          cameraTimingQuality: cameraQuality,
+                                          screenTimingQuality: screenStart == nil ? nil : .videoFrame) {
                 // The original claim is still on disk. The take remains recoverable, but a crash may
                 // lose the exact sub-second camera/screen offset, so say so without stopping the take.
                 self.error = "Cutmark is recording, but it could not save exact crash-recovery timing for this take."
             }
-            pending = Pending(doc: doc, number: n, cam: camURL, camStart: cameraStart?.date,
-                              screen: screenURL, screenStart: screenStart?.date,
+            pending = Pending(doc: doc, number: n, cam: camURL, camStart: cameraStart,
+                              screen: screenURL, screenStart: screenStart,
                               screenDisplayID: screenStart?.displayID,
                               script: script, hook: hook, shot: shotID)
             recordingMarkerCount = 0
@@ -813,11 +820,14 @@ final class AppModel {
         var takes: [Take] = []
         if let c = p.cam, let cs = p.camStart {
             takes.append(Take(number: p.number, kind: .camera, file: c.lastPathComponent,
-                              startedAt: cs, duration: await Self.duration(c), script: p.script, hook: p.hook, shot: p.shot))
+                              startedAt: cs.date, duration: await Self.duration(c), script: p.script, hook: p.hook, shot: p.shot,
+                              captureHostTime: cs.hostTime,
+                              timingQuality: cs.timing == .videoFrame ? .videoFrame : .callback))
         }
         if let s = p.screen, let ss = p.screenStart {
             takes.append(Take(number: p.number, kind: .screen, file: s.lastPathComponent,
-                              startedAt: ss, duration: await Self.duration(s), script: p.script, hook: p.hook, shot: p.shot))
+                              startedAt: ss.date, duration: await Self.duration(s), script: p.script, hook: p.hook, shot: p.shot,
+                              captureHostTime: ss.hostTime, timingQuality: .videoFrame))
         }
         let recorded = p.doc.addCutmark(takes)
         if recorded {
