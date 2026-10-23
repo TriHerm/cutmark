@@ -107,6 +107,9 @@ let onboardingDir = ProcessInfo.processInfo.environment["CUTMARK_ONBOARDING"]
                 .overlay { OnboardingLayer().environment(app) }
         }
         let setup = Setup.shared
+        let previousTarget = setup.target
+        let previousChoice = setup.installChoice
+        defer { setup.target = previousTarget; setup.installChoice = previousChoice }
         for dark in [true, false] {
             let tag = dark ? "" : "-light"
             for p in 0..<Onboarding.pages {
@@ -114,8 +117,13 @@ let onboardingDir = ProcessInfo.processInfo.environment["CUTMARK_ONBOARDING"]
                 if p == 2 {
                     // A new Mac: nothing installed yet.
                     setup.agent = .missing; setup.signedIn = .missing; setup.ffmpeg = .missing; setup.devTools = .missing
+                    setup.installChoice = nil
                     await shoot("3-start-setup\(tag)", window(), dark: dark)
+                    // The same first-run screen after choosing a non-default provider.
+                    setup.chooseAgent(.codex)
+                    await shoot("3-start-codex\(tag)", window(), dark: dark)
                     setup.agent = .ok; setup.signedIn = .ok; setup.ffmpeg = .ok; setup.devTools = .ok; setup.devTools = .ok
+                    setup.installChoice = nil
                     await shoot("3-start-ready\(tag)", window(), dark: dark)
                 } else {
                     await shoot(p == 0 ? "1-welcome\(tag)" : "2-how\(tag)", window(), dark: dark)

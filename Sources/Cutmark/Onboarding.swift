@@ -527,10 +527,29 @@ private struct StartPage: View {
                 number(1, done: Onboarding.canWrite)
                 Text("Connect Cutmark to your agent").font(Theme.sans(13.5, .semibold))
                 Spacer()
-                Text("About 2 minutes").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+                if setup.agent == .ok {
+                    Text("About 2 minutes").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+                } else {
+                    CutmarkMenuButton(help: "Choose which AI agent to install") {
+                        HStack(spacing: 5) {
+                            Text(setup.installChoice?.name ?? "Choose agent")
+                            Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
+                        }
+                        .font(Theme.sans(12, .medium))
+                        .foregroundStyle(Theme.ink)
+                    } content: {
+                        for kind in AgentKind.allCases {
+                            MenuButton(kind.name, checked: setup.installChoice == kind) { setup.chooseAgent(kind) }
+                        }
+                    }
+                    .accessibilityLabel("Choose AI agent to install")
+                }
             }
             HStack(spacing: 8) {
-                item(setup.agent == .ok ? setup.target.name : "Claude Code", setup.agent, "Install", setup.installAgent)
+                item(setup.agent == .ok ? setup.target.name :
+                     setup.installChoice.map { "Install \($0.name)" } ?? "Select an agent above",
+                     setup.agent, "Install", setup.installAgent,
+                     enabled: setup.canInstallAgent)
                 item("Sign in", setup.agent == .ok ? setup.signedIn : .missing, "Sign in", setup.signIn,
                      enabled: setup.agent == .ok)
             }
