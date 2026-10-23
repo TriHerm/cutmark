@@ -67,6 +67,38 @@ struct PostRecordingPreviewTests {
         #expect(preview?.sourceCount == 1)
     }
 
+    @MainActor @Test func pairedPreviewSelectsEachSavedFileWithoutChangingOrMixingSources() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "cutmark-paired-source-\(UUID())")
+        let session = root.appending(path: "Demo/Session")
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let screen = Take(number: 6, kind: .screen, file: "take-06-screen.mov",
+                          startedAt: .distantPast, duration: 8)
+        let camera = Take(number: 6, kind: .camera, file: "take-06-camera.mov",
+                          startedAt: .distantPast, duration: 7)
+        for file in [screen.file, camera.file] {
+            try Data(file.utf8).write(to: session.appending(path: file))
+        }
+        let doc = SessionDoc(url: session)
+        doc.meta.takes = [camera, screen]
+        #expect(doc.save())
+        let recent = try #require(PostRecordingPreview.make(sessionID: doc.meta.id, session: session,
+                                                            number: 6, takes: doc.meta.takes))
+        #expect(recent.sourceCount == 2)
+        #expect(recent.source(in: doc)?.take.kind == .screen)
+        #expect(recent.source(in: doc, kind: .camera)?.url.lastPathComponent == camera.file)
+        #expect(recent.source(in: doc, kind: .screen)?.url.lastPathComponent == screen.file)
+        #expect(recent.source(in: doc, kind: .camera)?.take.duration == 7)
+
+        // If one source disappears from the disk, never substitute it for an explicit request.
+        try FileManager.default.removeItem(at: session.appending(path: camera.file))
+        #expect(recent.source(in: doc, kind: .camera) == nil)
+        #expect(recent.source(in: doc)?.take.kind == .screen)
+        #expect(doc.meta.takes.count == 2)
+        #expect(try Data(contentsOf: session.appending(path: screen.file)) == Data(screen.file.utf8))
+    }
+
     @Test func floatingCardPinsToLowerLeftOfVisibleDisplay() {
         let origin = PostRecordingPreviewPlacement.origin(
             screenFrame: CGRect(x: 1440, y: 24, width: 1920, height: 1056),
