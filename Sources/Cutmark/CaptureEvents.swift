@@ -161,26 +161,49 @@ enum CaptureEventLog {
         }
     }
 
-    static func markers(in session: URL, screenFile: URL, through duration: Double) -> [CaptureEvent] {
+    static func markers(in session: URL, screenFile: URL, through duration: Double,
+                        shouldCancel: () -> Bool = { false }) -> [CaptureEvent] {
         guard let take = takeNumber(forScreenFile: screenFile) else { return [] }
         let file = url(in: session, take: take)
         guard let h = header(file), valid(h, take: take),
               let handle = try? FileHandle(forReadingFrom: file) else { return [] }
         defer { try? handle.close() }
         let decoder = JSONDecoder()
-        var data = Data()
+        // A damaged JSONL can have an enormous unterminated line. Decode complete, bounded
+        // lines only; never retain the whole file or construct unlimited marker UI controls.
+        let maxLineBytes = 16 * 1024
+        let maxMarkers = 600
+        var line = Data()
+        var skippingOversizedLine = false
         var out: [CaptureEvent] = []
         while true {
-            guard let chunk = try? handle.read(upToCount: 64 * 1024), !chunk.isEmpty else { break }
-            data.append(chunk)
-            while let newline = data.firstIndex(of: 0x0A) {
-                let line = data[..<newline]
-                data.removeSubrange(...newline)
-                // Pointer events dominate the file. Avoid Codable work unless the flat line says marker.
-                guard line.range(of: Data("\"marker\"".utf8)) != nil,
-                      let event = try? decoder.decode(CaptureEvent.self, from: Data(line)),
-                      valid(event), event.type == .marker, event.t <= duration + 0.001 else { continue }
-                out.append(event)
+            guard !shouldCancel(), let chunk = try? handle.read(upToCount: 64 * 1024),
+                  !chunk.isEmpty else { break }
+            var position = chunk.startIndex
+            while position < chunk.endIndex {
+                if shouldCancel() { return [] }
+                let newline = chunk[position...].firstIndex(of: 0x0A)
+                let end = newline ?? chunk.endIndex
+                let piece = chunk[position..<end]
+                if !skippingOversizedLine {
+                    if line.count + piece.count <= maxLineBytes {
+                        line.append(contentsOf: piece)
+                    } else {
+                        line.removeAll(keepingCapacity: true)
+                        skippingOversizedLine = true
+                    }
+                }
+                guard let newline else { break }
+                // Pointer events dominate the file. Avoid Codable work unless the line says marker.
+                if !skippingOversizedLine, line.range(of: Data("\"marker\"".utf8)) != nil,
+                   let event = try? decoder.decode(CaptureEvent.self, from: line),
+                   valid(event), event.type == .marker, event.t <= duration + 0.001 {
+                    out.append(event)
+                    if out.count == maxMarkers { return out }
+                }
+                line.removeAll(keepingCapacity: true)
+                skippingOversizedLine = false
+                position = chunk.index(after: newline)
             }
         }
         return out

@@ -76,9 +76,12 @@ cp Info.plist "$APP/Contents/Info.plist"
 # file names and transcripts only. The model itself is never in the app: Cutmark downloads it.
 XCODE="${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null || true)}"
 if [[ -d embed && -d "$XCODE" ]] && DEVELOPER_DIR="$XCODE" xcrun metal --version >/dev/null 2>&1; then
+  echo "Building the semantic-search helper with Xcode and Metal..."
+  embed_build_started=$SECONDS
   (cd embed && DEVELOPER_DIR="$XCODE" xcodebuild -quiet -scheme CutmarkEmbed -configuration Release \
     -destination 'platform=macOS,arch=arm64' -derivedDataPath .build-xcode build > .build-xcode.log 2>&1) \
     || { tail -30 embed/.build-xcode.log; echo "The search helper did not build (embed/.build-xcode.log)." >&2; exit 1; }
+  echo "Semantic-search helper built in $((SECONDS - embed_build_started)) seconds."
   E=embed/.build-xcode/Build/Products/Release
   cp "$E/cutmark-embed" "$APP/Contents/MacOS/cutmark-embed"
   for b in "$E"/*.bundle; do cp -R "$b" "$APP/Contents/Resources/"; done
