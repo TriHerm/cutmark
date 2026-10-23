@@ -44,7 +44,9 @@ jobs:
   build:
     needs: test
     runs-on: xcode-27
-    timeout-minutes: 10
+    # Cold Swift release compilation + the optional Metal search helper exceeded the old
+    # 10-minute cap without a compiler error (PR #19). Keep a bounded job with enough headroom.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
       - name: Validate release scripts
