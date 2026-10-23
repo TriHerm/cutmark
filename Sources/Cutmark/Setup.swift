@@ -27,6 +27,8 @@ final class Setup {
     var target: AgentKind = .claude
     /// First-run choice only. Nil means the user has not picked a provider yet.
     var installChoice: AgentKind?
+    /// The installer is an explicit action for the chosen provider, never the default chat agent.
+    var canInstallAgent: Bool { agent != .ok && installChoice != nil }
     var ffmpeg: Status = .unknown
     var devTools: Status = .unknown
     private var checking = false
@@ -112,7 +114,7 @@ final class Setup {
     /// Opens the explicitly chosen provider's supported installer in Terminal. The app does not run
     /// an installer until the user chooses a provider and presses Install.
     func installAgent() {
-        guard agent != .ok, let kind = installChoice else { return }
+        guard canInstallAgent, let kind = installChoice else { return }
         let install = kind.installation
         let text = """
         #!/bin/bash

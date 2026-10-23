@@ -64,12 +64,17 @@ struct SetupTests {
         let s = Setup()
         s.agent = .missing
         #expect(s.installChoice == nil)
+        #expect(!s.canInstallAgent, "welcome must disable Install before choosing a provider")
+        s.installAgent()
+        #expect(s.installChoice == nil, "a disabled first-run action must not silently pick Claude")
         s.chooseAgent(.codex)
         #expect(s.installChoice == .codex && s.target == .codex)
+        #expect(s.canInstallAgent, "the welcome's Install action can now install the chosen agent")
         s.agent = .failed("old provider failed")
         s.chooseAgent(.opencode)
         #expect(s.agent == .missing && s.installChoice == .opencode && s.target == .opencode)
         s.agent = .ok
+        #expect(!s.canInstallAgent)
         s.chooseAgent(.pi)
         #expect(s.installChoice == .opencode && s.target == .opencode, "an installed-agent setup ignores first-run choices")
     }

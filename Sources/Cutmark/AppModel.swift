@@ -316,7 +316,9 @@ final class AppModel {
         }
         if let doc = library.current { _ = chats.chat(doc.url); wire(doc); shown = doc.url }
         screen.refreshDisplays()
-        Task { await camera.boot() }
+        // SwiftPM's test host has no camera/microphone usage descriptions. Snapshot and model
+        // tests don't need capture permissions, and TCC aborts the host if they are requested.
+        if !Self.testing { Task { await camera.boot() } }
         if !Self.testing {
             Store.markRecording(library.root, false)  // a marker a crash left behind
             Task { [weak self] in await self?.recoverInterruptedRecordings() }

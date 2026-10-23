@@ -454,22 +454,45 @@ private struct StartPage: View {
     init(flow: Onboarding) { self.flow = flow }
 
     var body: some View {
+        Group {
+            if setup.needed {
+                // Keep the first-run actions reachable at smaller window sizes and larger text.
+                ScrollView(.vertical) { content }
+                    .scrollIndicators(.hidden)
+            } else {
+                content
+            }
+        }
+        // The cursor waits in the field, so typing the idea is the first thing that works.
+        .onAppear { if Onboarding.canWrite { DispatchQueue.main.async { typing = true } } }
+        .onChange(of: Onboarding.canWrite) { _, ready in if ready { typing = true } }
+        .background(alignment: .top) {
+            RadialGradient(colors: [Theme.accent.opacity(0.18), .clear], center: .top, startRadius: 0, endRadius: 380)
+                .frame(height: 300).allowsHitTesting(false)
+        }
+    }
+
+    private var content: some View {
         VStack(spacing: 0) {
-            Spacer(minLength: 24)
+            Spacer(minLength: setup.needed ? 12 : 24)
             VStack(spacing: 8) {
-                Text("Make your first video.").font(Theme.display(36))
-                Text("Tell Cutmark your idea. It writes the script into a new session, and you read it on camera.")
+                Text("Make your first video.").font(Theme.display(setup.needed ? 30 : 36))
+                Text(setup.needed
+                    ? "Choose an agent for scripts and editing, or start recording now."
+                    : "Tell Cutmark your idea. It writes the script into a new session, and you read it on camera.")
                     .font(Theme.sans(14.5)).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
                     .frame(maxWidth: 580)
-                Text(Onboarding.sessionLine)
-                    .font(Theme.sans(12.5)).foregroundStyle(Theme.faint).multilineTextAlignment(.center)
-                    .frame(maxWidth: 580)
+                if !setup.needed {
+                    Text(Onboarding.sessionLine)
+                        .font(Theme.sans(12.5)).foregroundStyle(Theme.faint).multilineTextAlignment(.center)
+                        .frame(maxWidth: 580)
+                }
             }
             .arrive(0)
-            .padding(.bottom, 28)
+            .padding(.bottom, setup.needed ? 16 : 28)
             VStack(alignment: .leading, spacing: 14) {
                 if setup.needed { connect }
-                ideaBox
+                if Onboarding.canWrite { ideaBox }
             }
             .frame(width: 660)
             .arrive(1)
@@ -478,7 +501,7 @@ private struct StartPage: View {
                 Text("or").font(Theme.sans(12)).foregroundStyle(Theme.faint)
                 Rule().frame(width: 60)
             }
-            .padding(.vertical, 14)
+            .padding(.vertical, setup.needed ? 8 : 14)
             .arrive(2)
             Button { flow.recordNow(app: app) } label: {
                 HStack(spacing: 8) {
@@ -496,18 +519,11 @@ private struct StartPage: View {
                 }
             }
             .buttonStyle(AccentButtonStyle(kind: .quiet))
-            .padding(.top, 4)
+            .padding(.top, setup.needed ? 0 : 4)
             .arrive(2)
             Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity).padding(.bottom, 20)
-        // The cursor waits in the field, so typing the idea is the first thing that works.
-        .onAppear { if Onboarding.canWrite { DispatchQueue.main.async { typing = true } } }
-        .onChange(of: Onboarding.canWrite) { _, ready in if ready { typing = true } }
-        .background(alignment: .top) {
-            RadialGradient(colors: [Theme.accent.opacity(0.18), .clear], center: .top, startRadius: 0, endRadius: 380)
-                .frame(height: 300).allowsHitTesting(false)
-        }
+        .frame(maxWidth: .infinity).padding(.bottom, setup.needed ? 12 : 20)
     }
 
     private func number(_ n: Int, done: Bool = false) -> some View {
@@ -527,10 +543,29 @@ private struct StartPage: View {
                 number(1, done: Onboarding.canWrite)
                 Text("Connect Cutmark to your agent").font(Theme.sans(13.5, .semibold))
                 Spacer()
-                Text("About 2 minutes").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+                if setup.agent == .ok {
+                    Text("About 2 minutes").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)
+                } else {
+                    CutmarkMenuButton(help: "Choose which AI agent to install") {
+                        HStack(spacing: 5) {
+                            Text(setup.installChoice?.name ?? "Choose agent")
+                            Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
+                        }
+                        .font(Theme.sans(12, .medium))
+                        .foregroundStyle(Theme.ink)
+                    } content: {
+                        for kind in AgentKind.allCases {
+                            MenuButton(kind.name, checked: setup.installChoice == kind) { setup.chooseAgent(kind) }
+                        }
+                    }
+                    .accessibilityLabel("Choose AI agent to install")
+                }
             }
             HStack(spacing: 8) {
-                item(setup.agent == .ok ? setup.target.name : "Claude Code", setup.agent, "Install", setup.installAgent)
+                item(setup.agent == .ok ? setup.target.name :
+                     setup.installChoice.map { "Install \($0.name)" } ?? "Select an agent above",
+                     setup.agent, "Install", setup.installAgent,
+                     enabled: setup.canInstallAgent)
                 item("Sign in", setup.agent == .ok ? setup.signedIn : .missing, "Sign in", setup.signIn,
                      enabled: setup.agent == .ok)
             }
