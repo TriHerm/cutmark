@@ -94,10 +94,16 @@ let onboardingDir = ProcessInfo.processInfo.environment["CUTMARK_ONBOARDING"]
         Look.shared.palette = .graphite
         defer { Look.shared.reset() }
         let d = UserDefaults.standard
+        let previousChatOpen = d.object(forKey: "chatOpen")
         d.set(false, forKey: "chatOpen")
+        defer {
+            if let previousChatOpen { d.set(previousChatOpen, forKey: "chatOpen") }
+            else { d.removeObject(forKey: "chatOpen") }
+        }
 
         let empty = FileManager.default.temporaryDirectory.appending(path: "cutmark-onboarding-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: empty) }
         let app = AppModel()
         app.library.setRoot(empty)
         let flow = Onboarding.shared
@@ -107,9 +113,17 @@ let onboardingDir = ProcessInfo.processInfo.environment["CUTMARK_ONBOARDING"]
                 .overlay { OnboardingLayer().environment(app) }
         }
         let setup = Setup.shared
+        let previousAgent = setup.agent
+        let previousSignedIn = setup.signedIn
+        let previousFFmpeg = setup.ffmpeg
+        let previousDevTools = setup.devTools
         let previousTarget = setup.target
         let previousChoice = setup.installChoice
-        defer { setup.target = previousTarget; setup.installChoice = previousChoice }
+        defer {
+            setup.agent = previousAgent; setup.signedIn = previousSignedIn
+            setup.ffmpeg = previousFFmpeg; setup.devTools = previousDevTools
+            setup.target = previousTarget; setup.installChoice = previousChoice
+        }
         for dark in [true, false] {
             let tag = dark ? "" : "-light"
             for p in 0..<Onboarding.pages {
@@ -122,7 +136,10 @@ let onboardingDir = ProcessInfo.processInfo.environment["CUTMARK_ONBOARDING"]
                     // The same first-run screen after choosing a non-default provider.
                     setup.chooseAgent(.codex)
                     await shoot("3-start-codex\(tag)", window(), dark: dark)
-                    setup.agent = .ok; setup.signedIn = .ok; setup.ffmpeg = .ok; setup.devTools = .ok; setup.devTools = .ok
+                    // An agent is usable, but video and developer tools still need setup.
+                    setup.agent = .ok; setup.signedIn = .ok
+                    await shoot("3-start-partial\(tag)", window(), dark: dark)
+                    setup.agent = .ok; setup.signedIn = .ok; setup.ffmpeg = .ok; setup.devTools = .ok
                     setup.installChoice = nil
                     await shoot("3-start-ready\(tag)", window(), dark: dark)
                 } else {
