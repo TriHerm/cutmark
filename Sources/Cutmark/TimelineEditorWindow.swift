@@ -204,6 +204,7 @@ private struct TimelineEditorWorkspace: View {
     let doc: SessionDoc
     @StateObject private var playback = TimelineEditorPlayback()
     @StateObject private var media = TimelineMediaCache()
+    @StateObject private var markers = TimelineMarkerCache()
     @State private var draft: EditTimelineDraft?
     @State private var selected = 0
     @State private var revision = 0
@@ -298,8 +299,12 @@ private struct TimelineEditorWorkspace: View {
             guard let draft else { return }
             await media.load(draft: draft, session: doc.url)
         }
+        .task(id: revision) {
+            guard let draft else { return }
+            await markers.load(draft: draft, session: doc.url)
+        }
         .onChange(of: duration) { _, _ in if zoomToFit { fitTimeline() } }
-        .onDisappear { playback.close(); media.cancel() }
+        .onDisappear { playback.close(); media.cancel(); markers.clear() }
     }
 
     private var header: some View {
@@ -557,30 +562,14 @@ private struct TimelineEditorWorkspace: View {
     }
 
     private var ruler: some View {
-        Canvas { context, size in
-            let step = TimelineCanvasLayout.rulerStep(pixelsPerSecond: pixelsPerSecond)
-            let count = Int(min(6000, (Double(size.width) / pixelsPerSecond / step).rounded(.down)))
-            for n in 0...count {
-                let seconds = Double(n) * step
-                let x = CGFloat(seconds * pixelsPerSecond)
-                let pastOutput = seconds > duration
-                var line = Path()
-                line.move(to: CGPoint(x: x, y: 18))
-                line.addLine(to: CGPoint(x: x, y: 26))
-                context.stroke(line, with: .color(Theme.muted.opacity(pastOutput ? 0.25 : 0.8)),
-                               lineWidth: 0.7)
-                let label = context.resolve(Text(formatTime(seconds)).font(Theme.mono(9.5))
-                    .foregroundStyle(Theme.muted.opacity(pastOutput ? 0.35 : 1)))
-                context.draw(label, at: CGPoint(x: x + (n == 0 ? 20 : 3), y: 7), anchor: .leading)
-            }
-        }
-        .frame(height: TimelineCanvasLayout.rulerHeight)
-        .background(Theme.canvas)
-        .contentShape(Rectangle())
-        .gesture(DragGesture(minimumDistance: 0).onChanged { move in
-            scrubTimeline(at: move.location.x)
-        })
-        .help("Click or drag to move the playhead. The blank tail is not exported.")
+        TimelineMarkerRuler(pins: markers.pins, pixelsPerSecond: pixelsPerSecond,
+                            duration: duration, onSeek: { pin in
+            playback.stop()
+            selected = pin.index
+            // A marker is already on the renderer's source clock. Preserve its exact timestamp,
+            // even when draft.fps differs from the first source's output frame rate.
+            playback.seek(pin.outputTime, duration: duration)
+        }, onScrub: { scrubTimeline(at: $0) })
     }
 
     /// The red handle is deliberately wider than the 2px cursor, so it can be grabbed at
