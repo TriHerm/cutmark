@@ -36,9 +36,11 @@ struct PostRecordingPreview: Equatable, Sendable, Identifiable {
     func matches(_ doc: SessionDoc) -> Bool { doc.meta.id == sessionID }
 
     @MainActor
-    func source(in doc: SessionDoc) -> (take: Take, url: URL)? {
+    /// A requested source never silently substitutes the other kind. The default still
+    /// prefers screen and falls back to the only saved/playable file.
+    func source(in doc: SessionDoc, kind: TakeKind? = nil) -> (take: Take, url: URL)? {
         guard matches(doc) else { return nil }
-        let group = doc.meta.takes.filter { $0.number == number }
+        let group = doc.meta.takes.filter { $0.number == number && (kind == nil || $0.kind == kind) }
         let ordered = group.sorted { a, b in
             if a.kind == preferredKind { return true }
             if b.kind == preferredKind { return false }
@@ -138,10 +140,28 @@ struct PostRecordingPreviewCard: View {
     @State private var player = AVPlayer()
     @State private var loadedURL: URL?
     @State private var playing = false
+    @State private var selectedKind: TakeKind?
+
+    private var visibleSource: (take: Take, url: URL)? {
+        guard app.library.current?.meta.id == recent.sessionID else { return nil }
+        if let selectedKind, let selected = recent.source(in: doc, kind: selectedKind) { return selected }
+        return recent.source(in: doc)
+    }
 
     private var sourceURL: URL? {
-        guard app.library.current?.meta.id == recent.sessionID else { return nil }
-        return recent.source(in: doc)?.url
+        visibleSource?.url
+    }
+
+    private var labelForCurrentSource: String {
+        // The card can outlive a missing/removed file. Never claim the other source is saved
+        // unless both independently playable files still exist.
+        guard hasBothSources else { return visibleSource?.take.kind == .screen ? "Screen" : "Camera" }
+        return visibleSource?.take.kind == .camera
+            ? "Camera preview · screen saved" : "Screen preview · camera saved"
+    }
+
+    private var hasBothSources: Bool {
+        recent.source(in: doc, kind: .camera) != nil && recent.source(in: doc, kind: .screen) != nil
     }
 
     var body: some View {
@@ -149,7 +169,7 @@ struct PostRecordingPreviewCard: View {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Take \(recent.number)").font(Theme.sans(12, .semibold))
-                    Text(recent.sourceLabel).font(Theme.sans(10.5)).foregroundStyle(Theme.muted)
+                    Text(labelForCurrentSource).font(Theme.sans(10.5)).foregroundStyle(Theme.muted)
                 }
                 Spacer(minLength: 8)
                 Button { dismiss() } label: {
@@ -158,6 +178,14 @@ struct PostRecordingPreviewCard: View {
                 }
                 .buttonStyle(.plain)
                 .help("Dismiss saved-take preview")
+            }
+
+            if hasBothSources {
+                HStack(spacing: 6) {
+                    sourceButton(.screen)
+                    sourceButton(.camera)
+                }
+                .accessibilityLabel("Review saved recordings separately")
             }
 
             Button { togglePlayback() } label: {
@@ -247,6 +275,26 @@ struct PostRecordingPreviewCard: View {
         }
         player.play()
         playing = true
+    }
+
+    private func sourceButton(_ kind: TakeKind) -> some View {
+        let isSelected = visibleSource?.take.kind == kind
+        return Button {
+            guard recent.source(in: doc, kind: kind) != nil else { return }
+            selectedKind = kind
+            refreshPlayer()
+        } label: {
+            Text(kind == .screen ? "Screen" : "Camera")
+                .font(Theme.sans(10.5, isSelected ? .semibold : .medium))
+                .foregroundStyle(isSelected ? Theme.accent : Theme.muted)
+                .frame(maxWidth: .infinity, minHeight: 24)
+                .background(isSelected ? Theme.accent.opacity(0.12) : Theme.stage,
+                            in: RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .help("Review the saved \(kind.rawValue) file separately; this is not a synchronized composite")
+        .accessibilityLabel("Preview \(kind.rawValue) recording")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     private func refreshPlayer() {
