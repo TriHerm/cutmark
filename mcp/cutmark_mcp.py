@@ -91,10 +91,27 @@ def now_iso_ms():
 
 
 def parse_iso(s):
-    try:
-        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    except Exception:
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def paired_video_start_offset(camera, screen):
+    """Screen minus camera first-video host seconds; never an audio-sync or legacy-date estimate."""
+    if not camera or not screen or camera.get("number") != screen.get("number"):
         return None
+    if camera.get("timingQuality") != "videoFrame" or screen.get("timingQuality") != "videoFrame":
+        return None
+    values = (camera.get("captureHostTime"), screen.get("captureHostTime"))
+    if any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0 for v in values):
+        return None
+    offset = values[1] - values[0]
+    # A new paired recording starts both recorders together (8s camera/5s screen start limits).
+    # Reject corrupt or cross-boot host timestamps rather than advertise a fictional alignment.
+    return offset if abs(offset) <= 15 else None
 
 
 def lib_parts(path, r=None):
@@ -218,8 +235,9 @@ def write_meta(session, meta):
     if not takes:
         lines.append("_No takes yet._")
     else:
-        lines.append("Camera files carry the mic audio. Screen files carry the mic too, for syncing by waveform. "
-                     "`screen offset` is how many seconds after the camera file the screen file starts.\n")
+        lines.append("Camera and screen may each carry microphone audio for waveform alignment. "
+                     "`Screen offset` is the measured difference between first observed video frames, "
+                     "not proof of audio sync or a rendered composite. Older and callback-timed starts are unverified.\n")
         lines.append("| Take | Name | Keeper | Camera | Screen | Length | Screen offset |\n|---|---|---|---|---|---|---|")
         for n in sorted({t["number"] for t in takes}):
             g = [t for t in takes if t["number"] == n]
@@ -227,8 +245,11 @@ def write_meta(session, meta):
             scr = next((t for t in g if t["kind"] == "screen"), None)
             dur = (cam or scr or {}).get("duration")
             off = "–"
-            if cam and scr and parse_iso(cam["startedAt"]) and parse_iso(scr["startedAt"]):
-                off = "%+.2fs" % (parse_iso(scr["startedAt"]) - parse_iso(cam["startedAt"])).total_seconds()
+            if cam and scr:
+                off = "Unverified"
+            delta = paired_video_start_offset(cam, scr)
+            if delta is not None:
+                off = "%+.3fs" % delta
             lines.append("| %d | %s | %s | %s | %s | %s | %s |" % (
                 n, g[0].get("name") or "", "★" if g[0].get("keeper") else "",
                 "`%s`" % cam["file"] if cam else "–", "`%s`" % scr["file"] if scr else "–",

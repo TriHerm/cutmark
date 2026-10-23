@@ -29,6 +29,11 @@ enum RecordingRecovery {
         var script: String?
         var hook: String?
         var shot: String?
+        /// Optional monotonic host-clock media starts. Old claims have only wall dates.
+        var cameraHostTime: Double? = nil
+        var screenHostTime: Double? = nil
+        var cameraTimingQuality: CaptureTimingQuality? = nil
+        var screenTimingQuality: CaptureTimingQuality? = nil
     }
 
     static func url(in session: URL, number: Int) -> URL {
@@ -72,10 +77,17 @@ enum RecordingRecovery {
     }
 
     @discardableResult
-    static func started(in session: URL, number: Int, camera: Date?, screen: Date?) -> Bool {
+    static func started(in session: URL, number: Int, camera: Date?, screen: Date?,
+                        cameraHostTime: Double? = nil, screenHostTime: Double? = nil,
+                        cameraTimingQuality: CaptureTimingQuality? = nil,
+                        screenTimingQuality: CaptureTimingQuality? = nil) -> Bool {
         guard var journal = read(session, number: number) else { return false }
         journal.cameraStartedAt = camera
         journal.screenStartedAt = screen
+        journal.cameraHostTime = cameraHostTime?.isFinite == true ? cameraHostTime : nil
+        journal.screenHostTime = screenHostTime?.isFinite == true ? screenHostTime : nil
+        journal.cameraTimingQuality = cameraTimingQuality
+        journal.screenTimingQuality = screenTimingQuality
         return write(journal, in: session)
     }
 
@@ -142,7 +154,9 @@ enum RecordingRecovery {
             let cameraStart = journal.cameraStartedAt ?? created(camera) ?? journal.requestedAt
             if let cameraDuration = await duration(camera), cameraDuration > 0 {
                 takes.append(Take(number: journal.number, kind: .camera, file: cameraName, startedAt: cameraStart,
-                                  duration: cameraDuration, script: journal.script, hook: journal.hook, shot: journal.shot))
+                                  duration: cameraDuration, script: journal.script, hook: journal.hook, shot: journal.shot,
+                                  captureHostTime: journal.cameraHostTime,
+                                  timingQuality: journal.cameraTimingQuality))
             }
         }
         if let screenName = journal.screen {
@@ -150,7 +164,9 @@ enum RecordingRecovery {
             if let screenDuration = await duration(screen), screenDuration > 0 {
                 takes.append(Take(number: journal.number, kind: .screen, file: screenName,
                                   startedAt: journal.screenStartedAt ?? created(screen) ?? journal.requestedAt,
-                                  duration: screenDuration, script: journal.script, hook: journal.hook, shot: journal.shot))
+                                  duration: screenDuration, script: journal.script, hook: journal.hook, shot: journal.shot,
+                                  captureHostTime: journal.screenHostTime,
+                                  timingQuality: journal.screenTimingQuality))
             }
         }
         return takes

@@ -29,7 +29,83 @@ struct Take: Codable, Identifiable, Hashable {
     var script: String?  // variant read in this take; nil = main script
     var hook: String?    // the hook (from hooks.json) that opened the script in this take
     var shot: String?    // the storyboard shot (its id) this take films
+    /// Seconds on CMClockGetHostTimeClock, not UNIX time. Comparable only within one capture.
+    var captureHostTime: Double? = nil
+    /// Nil means an older take with unknown timing accuracy; never infer a frame timestamp.
+    var timingQuality: CaptureTimingQuality? = nil
     var id: String { file }
+
+    init(number: Int, kind: TakeKind, file: String, startedAt: Date, duration: Double? = nil,
+         keeper: Bool = false, name: String? = nil, script: String? = nil, hook: String? = nil,
+         shot: String? = nil, captureHostTime: Double? = nil, timingQuality: CaptureTimingQuality? = nil) {
+        self.number = number
+        self.kind = kind
+        self.file = file
+        self.startedAt = startedAt
+        self.duration = duration
+        self.keeper = keeper
+        self.name = name
+        self.script = script
+        self.hook = hook
+        self.shot = shot
+        self.captureHostTime = captureHostTime
+        self.timingQuality = timingQuality
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case number, kind, file, startedAt, duration, keeper, name, script, hook, shot
+        case captureHostTime, timingQuality
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        number = try c.decode(Int.self, forKey: .number)
+        kind = try c.decode(TakeKind.self, forKey: .kind)
+        file = try c.decode(String.self, forKey: .file)
+        if let dateString = try? c.decode(String.self, forKey: .startedAt) {
+            let withFraction = ISO8601DateFormatter()
+            withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let withoutFraction = ISO8601DateFormatter()
+            withoutFraction.formatOptions = [.withInternetDateTime]
+            guard let parsed = withFraction.date(from: dateString) ?? withoutFraction.date(from: dateString) else {
+                throw DecodingError.dataCorruptedError(forKey: .startedAt, in: c,
+                                                        debugDescription: "Invalid take start date")
+            }
+            startedAt = parsed
+        } else {
+            // JSONDecoder() callers (e.g. storyboard) use the original numeric Date representation.
+            // Preserve that legacy decoding while session.json uses ISO8601 strings.
+            startedAt = try c.decode(Date.self, forKey: .startedAt)
+        }
+        duration = try c.decodeIfPresent(Double.self, forKey: .duration)
+        keeper = try c.decodeIfPresent(Bool.self, forKey: .keeper) ?? false
+        name = try c.decodeIfPresent(String.self, forKey: .name)
+        script = try c.decodeIfPresent(String.self, forKey: .script)
+        hook = try c.decodeIfPresent(String.self, forKey: .hook)
+        shot = try c.decodeIfPresent(String.self, forKey: .shot)
+        captureHostTime = try c.decodeIfPresent(Double.self, forKey: .captureHostTime)
+        // Missing/unknown future quality remains absent instead of rewriting legacy takes.
+        timingQuality = try? c.decodeIfPresent(CaptureTimingQuality.self, forKey: .timingQuality)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(number, forKey: .number)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(file, forKey: .file)
+        // Only take starts use fractional ISO8601: createdAt and session IDs retain their legacy encoding.
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        try c.encode(formatter.string(from: startedAt), forKey: .startedAt)
+        try c.encodeIfPresent(duration, forKey: .duration)
+        try c.encode(keeper, forKey: .keeper)
+        try c.encodeIfPresent(name, forKey: .name)
+        try c.encodeIfPresent(script, forKey: .script)
+        try c.encodeIfPresent(hook, forKey: .hook)
+        try c.encodeIfPresent(shot, forKey: .shot)
+        try c.encodeIfPresent(captureHostTime, forKey: .captureHostTime)
+        try c.encodeIfPresent(timingQuality, forKey: .timingQuality)
+    }
 }
 
 struct SessionMeta: Codable, Equatable {
@@ -502,8 +578,9 @@ final class SessionDoc {
         if meta.takes.isEmpty {
             s += "_No takes yet._\n"
         } else {
-            s += "Camera files carry the mic audio. Screen files carry the mic too, for syncing by waveform. "
-            s += "`screen offset` is how many seconds after the camera file the screen file starts.\n\n"
+            s += "Camera files carry the mic audio. Screen files carry the mic too, for checking sync by waveform. "
+            s += "`screen offset` is the measured difference between the first camera and screen video frames. "
+            s += "It is not an audio-sync guarantee; older recordings and callback-based starts are unverified.\n\n"
             s += "| Take | Name | Keeper | Camera | Screen | Length | Screen offset |\n|---|---|---|---|---|---|---|\n"
             for g in takeGroups.reversed() {
                 let cam = g.takes.first { $0.kind == .camera }
@@ -511,7 +588,11 @@ final class SessionDoc {
                 let len = (cam ?? scr)?.duration.map(Self.clock) ?? "?"
                 var offset = "–"
                 if let c = cam, let sc = scr {
-                    offset = String(format: "%+.2fs", sc.startedAt.timeIntervalSince(c.startedAt))
+                    if let precise = CaptureSync.screenMinusCameraSeconds(camera: c, screen: sc) {
+                        offset = String(format: "%+.3fs", precise)
+                    } else {
+                        offset = "Unverified"
+                    }
                 }
                 let name = g.takes.first?.name ?? ""
                 s += "| \(g.number) | \(name) | \(g.takes.first?.keeper == true ? "★" : "") | \(cam.map { "`\($0.file)`" } ?? "–") | \(scr.map { "`\($0.file)`" } ?? "–") | \(len) | \(offset) |\n"
