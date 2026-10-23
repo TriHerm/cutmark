@@ -7,7 +7,7 @@ import Foundation
 /// app moved. It changes only Cutmark-owned MCP entries. The skills the build ships in
 /// Resources/skills go to ~/.claude/skills (Claude Code,
 /// Cursor) and ~/.agents/skills (Codex, pi, opencode, Gemini CLI). It touches only the `cutmark`
-/// server and the skill folders it ships. In the background, once per launch.
+/// server and installs missing skill folders. Existing skill folders remain user-owned.
 enum AgentSetup {
     static func run() {
         let resources = Bundle.main.bundleURL.appending(path: "Contents/Resources")
@@ -23,15 +23,104 @@ enum AgentSetup {
         }
     }
 
-    /// Copies each shipped skill folder over the user's copy of the same name. Only these names.
-    nonisolated static func copySkills(from dir: URL, to target: URL = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".claude/skills")) {
+    nonisolated struct SkillSyncResult {
+        var installed: [String] = []
+        var preserved: [String] = []
+        var failed: [String: String] = [:]
+    }
+
+    /// Install a missing skill once. Existing same-name folders can be customized or from an
+    /// older version with no provenance, so upgrading them requires a deliberate manual action.
+    @discardableResult
+    nonisolated static func copySkills(from dir: URL,
+                                       to target: URL = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".claude/skills")) -> SkillSyncResult {
         let fm = FileManager.default
-        guard let skills = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
-        try? fm.createDirectory(at: target, withIntermediateDirectories: true)
-        for s in skills where fm.fileExists(atPath: s.appending(path: "SKILL.md").path) {
-            let dest = target.appending(path: s.lastPathComponent)
-            try? fm.removeItem(at: dest)
-            try? fm.copyItem(at: s, to: dest)
+        var result = SkillSyncResult()
+        do {
+            let sources = try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+            guard !sources.isEmpty else { return result }
+            try requireSafeTargetPath(target)
+            try fm.createDirectory(at: target, withIntermediateDirectories: true)
+            for source in sources.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+                guard fm.fileExists(atPath: source.appending(path: "SKILL.md").path) else { continue }
+                let name = source.lastPathComponent
+                let destination = target.appending(path: name)
+                if existsIncludingSymlinks(destination) {
+                    result.preserved.append(name)
+                    continue
+                }
+                do {
+                    try requireSourceTree(source)
+                    let stage = target.appending(path: ".cutmark-stage-\(UUID().uuidString)")
+                    defer { try? fm.removeItem(at: stage) }
+                    try fm.copyItem(at: source, to: stage)
+                    try requireSourceTree(stage)
+                    try requireSafeTargetPath(target)
+                    // Another process may have installed this skill while the copy was staged.
+                    if existsIncludingSymlinks(destination) {
+                        result.preserved.append(name)
+                        continue
+                    }
+                    // Rename is atomic on this volume and never replaces an existing directory.
+                    try fm.moveItem(at: stage, to: destination)
+                    result.installed.append(name)
+                } catch {
+                    result.failed[name] = error.localizedDescription
+                }
+            }
+        } catch {
+            result.failed["setup"] = error.localizedDescription
+        }
+        return result
+    }
+
+    nonisolated private static func existsIncludingSymlinks(_ url: URL) -> Bool {
+        let fm = FileManager.default
+        return fm.fileExists(atPath: url.path)
+            || (try? fm.destinationOfSymbolicLink(atPath: url.path)) != nil
+    }
+
+    /// Reject symlinked directories or files inside a bundled skill before copying them.
+    nonisolated private static func requireSourceTree(_ root: URL) throws {
+        let fm = FileManager.default
+        func visit(_ path: URL) throws {
+            let values = try path.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey])
+            guard values.isSymbolicLink != true else { throw CocoaError(.fileReadCorruptFile) }
+            if values.isDirectory == true {
+                for child in try fm.contentsOfDirectory(at: path, includingPropertiesForKeys: nil) {
+                    try visit(child)
+                }
+            } else if values.isRegularFile != true {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+        }
+        try visit(root)
+        let skill = root.appending(path: "SKILL.md")
+        guard (try skill.resourceValues(forKeys: [.isRegularFileKey])).isRegularFile == true else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+    }
+
+    /// Do not write through a redirected ~/.claude, ~/.agents or skills ancestor.
+    /// Stop at the home/temp root to allow the macOS /var -> /private/var system alias.
+    nonisolated private static func requireSafeTargetPath(_ target: URL) throws {
+        let fm = FileManager.default
+        let boundaries = Set([fm.homeDirectoryForCurrentUser, fm.temporaryDirectory]
+            .map { $0.standardizedFileURL.resolvingSymlinksInPath().path })
+        var cursor = target.standardizedFileURL
+        while cursor.path != "/" {
+            if let values = try? cursor.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) {
+                guard values.isSymbolicLink != true,
+                      values.isDirectory == true || !fm.fileExists(atPath: cursor.path) else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+            } else if fm.fileExists(atPath: cursor.path) {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            if boundaries.contains(cursor.resolvingSymlinksInPath().path) { break }
+            let parent = cursor.deletingLastPathComponent()
+            if parent.path == cursor.path { break }
+            cursor = parent
         }
     }
 
