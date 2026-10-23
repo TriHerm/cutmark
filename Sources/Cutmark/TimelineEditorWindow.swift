@@ -211,6 +211,8 @@ private struct TimelineEditorWorkspace: View {
     @State private var timelineViewportWidth: CGFloat = 900
     @State private var zoomToFit = true
     @State private var problem: String?
+    @State private var renderJob: String?
+    @State private var rendering = false
     @State private var playheadDragStart: Double?
     @FocusState private var keyboardFocus: Bool
 
@@ -320,8 +322,8 @@ private struct TimelineEditorWorkspace: View {
             }
             Button("Reset") { reset() }.disabled(draft?.actions.isEmpty ?? true)
                 .buttonStyle(AccentButtonStyle(kind: .quiet))
-            Button("Render edit") { render() }
-                .disabled(draft == nil || (!((draft?.isRawTake) ?? false) && (draft?.actions.isEmpty ?? true)))
+            Button(rendering ? "Starting render…" : "Render edit") { render() }
+                .disabled(rendering || draft == nil || (!((draft?.isRawTake) ?? false) && (draft?.actions.isEmpty ?? true)))
                 .buttonStyle(AccentButtonStyle(kind: .solid))
         }
         .padding(.horizontal, 14).frame(height: 50)
@@ -413,6 +415,10 @@ private struct TimelineEditorWorkspace: View {
             if let problem {
                 Text(problem).font(Theme.sans(10.5)).foregroundStyle(Theme.danger).lineLimit(1)
                     .help(problem)
+            } else if let renderJob {
+                Label("Render started · \(renderJob) · Review in Jobs", systemImage: "film.stack")
+                    .font(Theme.sans(10.5)).foregroundStyle(Theme.muted).lineLimit(1)
+                    .help("The render is unpublished. Review it from the session's Jobs row.")
             }
         }
         .padding(.horizontal, 14)
@@ -715,6 +721,7 @@ private struct TimelineEditorWorkspace: View {
             draft = next
             selected = min(selected, next.segments.count - 1)
             problem = nil
+            renderJob = nil
             revision += 1
         } catch { problem = "Could not save the draft: \(error.localizedDescription)" }
     }
@@ -785,6 +792,7 @@ private struct TimelineEditorWorkspace: View {
             draft = previous
             selected = min(selected, previous.segments.count - 1)
             problem = nil
+            renderJob = nil
             revision += 1
         } catch { problem = "Could not save undo: \(error.localizedDescription)" }
     }
@@ -798,28 +806,23 @@ private struct TimelineEditorWorkspace: View {
         selected = 0
         playback.seek(0, duration: fresh.duration)
         problem = nil
+        renderJob = nil
         revision += 1
     }
 
     private func render() {
-        guard let draft else { return }
-        let request: String
-        if draft.isRawTake {
-            guard let recipe = draft.initialRecipe(),
-                  let data = try? JSONSerialization.data(withJSONObject: recipe, options: [.sortedKeys]),
-                  let json = String(data: data, encoding: .utf8) else { return }
-            request = "Render a new non-destructive Cutmark edit using render_edit with this exact recipe: \(json). "
-                + "Inspect the output. Do not publish_edit until I review the result. Do not modify original takes."
-        } else {
-            guard let data = try? JSONEncoder().encode(draft.actions),
-                  let actions = String(data: data, encoding: .utf8) else { return }
-            request = "For the published edit \(draft.base), call plan_timeline_edit with base=\(draft.base) "
-                + "and these ordered actions: \(actions). Then render_edit using returned arguments, inspect checks, "
-                + "and do not publish_edit until I review. Original edits and takes must remain unchanged."
+        guard let draft, !rendering else { return }
+        rendering = true
+        renderJob = nil
+        problem = nil
+        Task {
+            defer { rendering = false }
+            do {
+                renderJob = try await TimelineRender.start(draft: draft, session: doc.url)
+            } catch {
+                problem = error.localizedDescription
+            }
         }
-        app.chats.chat(doc.url).send(request, title: doc.meta.title, onStage: video,
-                                     shown: "Render visual timeline for review")
-        app.chats.open = true
     }
 
     private func suggestZooms(_ draft: EditTimelineDraft) {
