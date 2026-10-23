@@ -13495,6 +13495,30 @@ def t_plan_timeline_edit(a):
             "next": "Review this timeline first. Then call render_edit with render_edit arguments; check its output before publish_edit. No files were changed."}
 
 
+def t_render_timeline_request(a):
+    """The native timeline's exact render operation: plan, validate and start one unpublished job.
+
+    Unlike the agent-facing planner, the native caller supplies an immutable edit recipe OR
+    ordered actions from its draft. No publish or recipe mutation is accepted from this entrypoint.
+    """
+    if not isinstance(a, dict) or not isinstance(a.get("session"), str) or not a["session"]:
+        raise ValueError("A Cutmark session is required.")
+    raw = "recipe" in a
+    if raw:
+        if set(a) != {"session", "recipe"} or not isinstance(a["recipe"], dict):
+            raise ValueError("Give only session and a complete raw-take recipe.")
+        render = {"session": a["session"], "recipe": a["recipe"], "wait_s": 0}
+    else:
+        if (set(a) != {"session", "base", "actions"} or
+                not isinstance(a.get("base"), str) or not a["base"].startswith("edits/") or
+                not isinstance(a.get("actions"), list) or not a["actions"]):
+            raise ValueError("Give a published edit base and its ordered timeline actions.")
+        plan = t_plan_timeline_edit({"session": a["session"], "base": a["base"],
+                                     "actions": a["actions"]})
+        render = dict(plan["render_edit"], wait_s=0)
+    return t_render_edit(render)
+
+
 def recipe_short(r):
     """get_session's form: only the fields the agent sets, the cut as a count."""
     out = {k: r.get(k) for k in ("name", "edit", "note", "frame", "over", "music", "sfx", "steps", "cover", "loudness")}
@@ -15541,6 +15565,16 @@ if __name__ == "__main__":
         except (ValueError, KeyError) as e:
             res = {"error": str(e)}
         print(json.dumps(res))
+    elif sys.argv[1:2] == ["--timeline-render"]:  # Native editor: one checked, unpublished job.
+        try:
+            request = sys.stdin.read(1024 * 1024 + 1)
+            if len(request) > 1024 * 1024:
+                raise ValueError("The timeline render request is too large.")
+            res = t_render_timeline_request(json.loads(request))
+            print(json.dumps(res, allow_nan=False))
+        except (ValueError, TypeError, KeyError, OSError) as e:
+            print(json.dumps({"error": str(e)}))
+            sys.exit(1)
     elif sys.argv[1:2] == ["--sketch-run"]:
         sketch_run(sys.argv[2], retry="--retry" in sys.argv[3:])
     elif sys.argv[1:2] == ["--detach"]:

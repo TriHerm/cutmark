@@ -2,6 +2,8 @@
 import os
 import sys
 import unittest
+import json
+import subprocess
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -129,8 +131,78 @@ class TimelineEditing(unittest.TestCase):
         op_schema = tool[2]["actions"]["items"]["properties"]["op"]
         self.assertIn("extend", op_schema["enum"])
 
+    def test_native_raw_render_passes_recipe_only_and_never_publishes(self):
+        recipe = {"name": "clip-take-01-screen", "frame": {"shape": "source"},
+                  "cut": [{"take": 1, "kind": "screen", "in": 0, "out": 5}]}
+        with patch.object(t, "t_render_edit", return_value={"job": "job-123", "status": "running"}) as render, \
+                patch.object(t, "t_publish_edit") as publish, \
+                patch.object(t, "t_plan_timeline_edit") as plan:
+            result = t.t_render_timeline_request({"session": "/scratch/session", "recipe": recipe})
+        self.assertEqual(result["job"], "job-123")
+        render.assert_called_once_with({"session": "/scratch/session", "recipe": recipe, "wait_s": 0})
+        publish.assert_not_called()
+        plan.assert_not_called()
+
+    def test_native_published_render_uses_exact_validated_plan(self):
+        actions = [{"op": "split", "index": 0, "at": 1.5},
+                   {"op": "move", "index": 1, "to": 0}]
+        validated = {"session": "/scratch/session", "base": "edits/demo-v1.mp4",
+                     "changes": {"cut": [{"take": 1, "in": 1.5, "out": 3.0}]}}
+        with patch.object(t, "t_plan_timeline_edit",
+                          return_value={"render_edit": validated}) as plan, \
+                patch.object(t, "t_render_edit", return_value={"job": "job-789"}) as render, \
+                patch.object(t, "t_publish_edit") as publish:
+            out = t.t_render_timeline_request({"session": "/scratch/session",
+                                               "base": "edits/demo-v1.mp4", "actions": actions})
+        self.assertEqual(out["job"], "job-789")
+        plan.assert_called_once_with({"session": "/scratch/session", "base": "edits/demo-v1.mp4",
+                                      "actions": actions})
+        render.assert_called_once_with(dict(validated, wait_s=0))
+        publish.assert_not_called()
+
+    def test_native_render_rejects_ambiguous_or_unauthorized_payloads(self):
+        invalid = [
+            {}, [], {"session": "/scratch", "base": "edits/demo-v1.mp4", "actions": []},
+            {"session": "/scratch", "base": "edits/demo-v1.mp4", "actions": [],
+             "publish": True},
+            {"session": "/scratch", "base": "../evil", "actions": [{"op": "remove", "index": 0}]},
+            {"session": "/scratch", "recipe": {}, "base": "edits/demo-v1.mp4"},
+            {"session": "/scratch", "recipe": {}, "wait_s": 999},
+        ]
+        with patch.object(t, "t_render_edit") as render, patch.object(t, "t_plan_timeline_edit") as plan:
+            for request in invalid:
+                with self.subTest(request=request), self.assertRaises(ValueError):
+                    t.t_render_timeline_request(request)
+        render.assert_not_called()
+        plan.assert_not_called()
+
+    def test_native_cli_invalid_request_returns_structured_error_and_does_not_start_job(self):
+        script = os.path.join(os.path.dirname(__file__), "..", "cutmark_mcp.py")
+        process = subprocess.run([sys.executable, script, "--timeline-render"],
+                                 input=json.dumps({"session": "/scratch", "publish": True}),
+                                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(process.returncode, 1)
+        self.assertIn("error", json.loads(process.stdout))
+
 
 class TimelineRenderIntegration(Base):
+    def test_native_raw_render_job_keeps_take_and_session_unchanged(self):
+        file = self.add_take(1, secs=3, kind="screen")
+        original_meta = t.read_meta(self.s)
+        output = t.t_render_timeline_request({
+            "session": self.s,
+            "recipe": {"name": "clip-native-screen", "cut": [
+                {"take": 1, "kind": "screen", "in": 0.25, "out": 2.25}],
+                "frame": {"shape": "source"}},
+        })
+        self.assertIn(output.get("status"), ("running", "done"), output)
+        job = t.t_get_job({"session": self.s, "id": output["job"], "wait_s": 120})
+        self.assertEqual(job["status"], "done", job)
+        self.assertTrue(os.path.isfile(os.path.join(self.s, output["render"])))
+        self.assertTrue(os.path.isfile(os.path.join(self.s, file)))
+        self.assertEqual(t.read_meta(self.s), original_meta)
+        self.assertFalse(os.path.isdir(os.path.join(self.s, "edits")))
+
     def test_plan_changes_generate_checked_unpublished_render_without_overwriting_base(self):
         self.add_take(1, secs=6)
         first = self.render(recipe={"name": "demo", "cut": [
