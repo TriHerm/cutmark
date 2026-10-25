@@ -69,9 +69,24 @@ final class AppModel {
         get { access(keyPath: \.followVoice); return followVoiceStore }
         set { withMutation(keyPath: \.followVoice) { followVoiceStore = newValue }; syncVoice() }
     }
+    @ObservationIgnored @AppStorage("recordingGuideMode") private var guideModeStore: RecordingGuideMode = .teleprompter
+    var guideMode: RecordingGuideMode {
+        get { access(keyPath: \.guideMode); return guideModeStore }
+        set {
+            withMutation(keyPath: \.guideMode) { guideModeStore = newValue }
+            scrolling = false
+            syncVoice()
+            if notchOpen { NotchPanel.shared.place() }
+        }
+    }
+    var usesTeleprompter: Bool { guideMode == .teleprompter }
+    var hasRecordingGuide: Bool {
+        !(usesTeleprompter ? promptText : library.current?.recordingNotes ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
     let voice = VoiceFollow()
     /// The prompters follow the voice now. False while it can't hear (they scroll at `speed`).
-    var following: Bool { followVoice && !voice.failed }
+    var following: Bool { usesTeleprompter && followVoice && !voice.failed }
 
     /// What every prompter shows: a storyboard shot's own lines, else the open script.
     var promptText: String { shot?.say ?? library.current?.activeText ?? "" }
@@ -108,7 +123,7 @@ final class AppModel {
 
     /// Voice follow listens while the script plays.
     private func syncVoice() {
-        if scrolling && followVoice { voice.start() } else { voice.stop() }
+        if usesTeleprompter && scrolling && followVoice { voice.start() } else { voice.stop() }
     }
     /// A take file playing in the left pane instead of the live camera.
     var preview: URL? {
@@ -678,6 +693,7 @@ final class AppModel {
         doc.snapshotDirty()
         preview = nil
         resetToken += 1
+        doc.recordingCue = 0
         scrolling = false
         // The camera is off on the Storyboard and other covering tabs. It comes on first and the
         // count waits for a live picture, then a beat to get ready (2026-10-10: the iPhone camera
@@ -768,7 +784,7 @@ final class AppModel {
             let firstFrame = [cameraStart?.date, screenStart?.date].compactMap { $0 }.min()
             phase = .recording(firstFrame ?? Date())
             for h in Plugins.recordHooks { h.take(TakeMoment(session: doc.url, number: n, started: firstFrame)) }
-            if autoScroll && Plugins.recordStage(doc.url) == nil { scrolling = true }
+            if usesTeleprompter && autoScroll && Plugins.recordStage(doc.url) == nil { scrolling = true }
         } catch {
             self.error = error is CancellationError ? nil : error.localizedDescription
             if camURL != nil { await camera.stopRecording() }

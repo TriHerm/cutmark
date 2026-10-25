@@ -8,6 +8,14 @@ description: Turn a video idea into a Cutmark session with a script and a sketch
 The storyboard helps the user plan a shoot. The sketches are low fidelity on purpose. They show
 who is in the frame, where the camera is, and what moves. They are not the final look.
 
+## Talking points while recording
+
+For a user who wants notes or a board to guide a take, read `get_session` and use
+`update_session(recording_notes=...)`. Each paragraph is one card: a short title, then supporting
+notes on the following lines, with a blank line between cards. This leaves `script.md` and the
+storyboard unchanged. The user chooses Notes or Board on Record; Board advances manually through
+Done, Now and Next, including in the near-camera panel.
+
 ## Before you start
 
 - The sketches use Nano Banana 2.1 (`GEMINI_API_KEY` or `GOOGLE_AI_API_KEY`), then GPT Image 2.5

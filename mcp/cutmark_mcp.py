@@ -610,11 +610,43 @@ def t_list_sessions(a):
     return {"sessions": sessions_in(resolve_project(a["project"]))}
 
 
+# Same UTF-8 paragraph format as Sources/Cutmark/RecordingGuide.swift.
+RECORDING_NOTES = "recording-notes.md"
+
+
+def recording_notes(session):
+    path = os.path.join(session, RECORDING_NOTES)
+    if not os.path.exists(path):
+        return ""
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def set_recording_notes(session, text):
+    if not isinstance(text, str):
+        raise ValueError("recording_notes must be text")
+    # Refuse unreadable existing notes before replacing them.
+    recording_notes(session)
+    fd, tmp = tempfile.mkstemp(prefix=".recording-notes-", dir=session)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, os.path.join(session, RECORDING_NOTES))
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def t_get_session(a):
     s = resolve_session(a["session"])
     meta = read_meta(s)
     script_path = os.path.join(s, "script.md")
     script = open(script_path).read() if os.path.exists(script_path) else ""
+    notes_error = None
+    try:
+        notes = recording_notes(s)
+    except (OSError, UnicodeError) as e:
+        notes, notes_error = None, str(e)
     takes = []
     cuts = read_cuts(s)
     ready, jobs = {}, None
@@ -639,7 +671,7 @@ def t_get_session(a):
                           **({"best_cut": c} if c else {}), **take_said(s, t, meta.get("takes", []))))
     checks = check_states(s)
     out = {"session": os.path.relpath(s, root()), "path": s, "id": shown_id(s, meta), "title": meta["title"],
-           "created": meta["createdAt"], "script": script, "variants": variants(s),
+           "created": meta["createdAt"], "script": script, "recording_notes": notes, "variants": variants(s),
            "favorite_script": meta.get("favorite"),
            "published": meta.get("published") or False,
            "style": dict(zip(("name", "picked_by"), style_pick(os.path.dirname(s), s))),
@@ -663,6 +695,8 @@ def t_get_session(a):
            **({"posting_plan": plan_brief()} if read_plan() else {}),
            "manifest": os.path.join(s, "SESSION.md")}
     # The rules for what comes next on this session, once per chat: no refusal later (2026-10-10).
+    if notes_error:
+        out["recording_notes_error"] = notes_error
     return with_rules(out, *next_steps(s))
 
 
@@ -7867,8 +7901,10 @@ def t_create_session(a):
 def t_update_session(a):
     s = old = resolve_session(a["session"])
     meta = read_meta(s)
-    if "script" in a:
+    if "script" in a or "recording_notes" in a:
         need_rules("script")
+    if "recording_notes" in a:
+        set_recording_notes(s, a["recording_notes"])
     if "script" in a:
         set_main_script(s, a["script"], a.get("author", "claude"), a.get("note", ""))
     if a.get("title", "").strip():
@@ -14166,8 +14202,10 @@ TOOLS = [
       "open": {"type": "boolean"}}, ["title"], t_create_session),
     ("update_session", "Change a session's title (renames its folder) and/or replace its main script. "
      "Script changes are saved to history on both sides, so they can be undone. Give a short note. After a "
-     "rename, use the returned path or the session id; the old path still works.",
-     {"session": SESSION, "title": S, "script": S, "note": {"type": "string", "description": "What changed, e.g. 'Tighter hook'."}},
+     "rename, use the returned path or the session id; the old path still works. "
+     "recording_notes replaces the separate Notes/Board recording guide without changing the script: "
+     "one talking point per paragraph, title on its first line, supporting notes below. Read get_session first.",
+     {"session": SESSION, "title": S, "script": S, "recording_notes": {"type": "string", "description": "Notes/Board guide: one paragraph per talking point, title first, supporting notes below. Empty text clears it."}, "note": {"type": "string", "description": "What changed, e.g. 'Tighter hook'."}},
      ["session"], t_update_session),
     ("set_hooks", "Offer several hooks (opening lines) for a session. Replaces earlier hook options. The app "
      "shows them above the teleprompter; picking one puts it in the script's first paragraph (the hook slot), "

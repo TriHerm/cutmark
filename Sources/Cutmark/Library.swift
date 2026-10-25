@@ -7,6 +7,7 @@ import Foundation
 //
 //   <root>/<Project>/<yyyy-MM-dd-slug>/
 //       script.md                 the script (the source of truth; Claude can drop one here)
+//       recording-notes.md        separate talking points for Notes and Board recording modes
 //       session.json              title + list of takes
 //       SESSION.md                human/Claude-readable summary, regenerated on every change
 //       take-01-camera.mov        or take-01-<name>-camera.mov once the take is named
@@ -337,6 +338,46 @@ final class SessionDoc {
     }
     var variants: [Variant] = []
     var activeDraft = "main"
+    private(set) var recordingNotes = ""
+    private(set) var recordingNotesError: String?
+    var recordingCue = 0
+    @ObservationIgnored private var recordingNotesStamp: Date?
+
+    func advanceRecordingCue(_ offset: Int) {
+        recordingCue = RecordingGuide.position(recordingCue + offset, count: RecordingGuide.cards(recordingNotes).count)
+    }
+
+    /// Save separately from the spoken script (2026-10-24). A failed read never becomes a blank write.
+    func setRecordingNotes(_ text: String) {
+        let file = url.appending(path: RecordingGuide.file)
+        do {
+            if FileManager.default.fileExists(atPath: file.path) {
+                _ = try String(contentsOf: file, encoding: .utf8)
+            }
+            try text.write(to: file, atomically: true, encoding: .utf8)
+            recordingNotes = text
+            recordingNotesStamp = Store.modified(file)
+            recordingNotesError = nil
+            recordingCue = min(recordingCue, RecordingGuide.cards(text).count)
+        } catch {
+            recordingNotesError = "Could not save your notes. \(error.localizedDescription)"
+        }
+    }
+
+    func reloadRecordingNotes() {
+        let file = url.appending(path: RecordingGuide.file)
+        let stamp = Store.modified(file)
+        guard stamp != recordingNotesStamp else { return }
+        do {
+            let text = FileManager.default.fileExists(atPath: file.path)
+                ? try String(contentsOf: file, encoding: .utf8) : ""
+            if text != recordingNotes { recordingNotes = text; recordingCue = 0 }
+            recordingNotesStamp = stamp
+            recordingNotesError = nil
+        } catch {
+            recordingNotesError = "Could not read your notes. \(error.localizedDescription)"
+        }
+    }
     var historyCount = 0
     @ObservationIgnored var onScriptSettled: (() -> Void)?
     @ObservationIgnored var variantSaveTask: Task<Void, Never>?
@@ -372,6 +413,7 @@ final class SessionDoc {
         scriptStamp = Store.modified(url.appending(path: "script.md"))
         // Reads the variants once (it read them twice on every session switch).
         reloadVariantsFromDisk()
+        reloadRecordingNotes()
     }
 
     var projectName: String { url.deletingLastPathComponent().lastPathComponent }
@@ -437,6 +479,7 @@ final class SessionDoc {
             scriptStamp = ss
         }
         reloadVariantsFromDisk()
+        reloadRecordingNotes()
         return true
     }
 

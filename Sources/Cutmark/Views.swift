@@ -108,10 +108,19 @@ struct CutmarkApp: App {
                 Button("Start / Stop Recording") { app.toggleRecord() }.keyboardShortcut("r")
                     .disabled(Onboarding.shared.shown)
                 Button("Play / Pause Script") { app.scrolling.toggle() }.keyboardShortcut("p")
+                    .disabled(!app.usesTeleprompter)
                 Button("Script to Top") { app.resetToken += 1 }.keyboardShortcut(.upArrow, modifiers: .command)
                 Toggle("Follow My Voice", isOn: Binding(get: { app.followVoice }, set: { app.followVoice = $0 }))
+                    .disabled(!app.usesTeleprompter)
                 Divider()
-                Button("Script in the Notch") { NotchPanel.shared.toggle(app) }.keyboardShortcut("n", modifiers: [.command, .option])
+                Button("Previous Talking Point") { app.library.current?.advanceRecordingCue(-1) }
+                    .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                    .disabled(app.guideMode != .board || app.library.current == nil)
+                Button("Next Talking Point") { app.library.current?.advanceRecordingCue(1) }
+                    .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                    .disabled(app.guideMode != .board || app.library.current == nil)
+                Divider()
+                Button("Recording Guide in the Notch") { NotchPanel.shared.toggle(app) }.keyboardShortcut("n", modifiers: [.command, .option])
                 PrompterWindowButton()
                 Divider()
                 Button("Bigger Script") { app.fontSize = min(96, app.fontSize + 4) }.keyboardShortcut("=", modifiers: [.command, .option])
@@ -1129,7 +1138,7 @@ struct DetailView: View {
     /// got in the way. Write one and it opens; clear it and the notch it opened goes again.
     private var notchRecord: Bool {
         recordOnly && library.current != nil && !(library.selectedSessions.count > 1) && !Onboarding.shared.shown
-            && !app.promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && app.hasRecordingGuide
     }
 
     var body: some View {
@@ -3017,6 +3026,10 @@ struct ScriptPane: View {
     var body: some View {
         let _ = Perf.body("ScriptPane")
         VStack(spacing: 0) {
+            if onRecord == nil { RecordingGuidePicker() }
+            if onRecord == nil && !app.usesTeleprompter {
+                RecordingGuidePane(doc: doc)
+            } else {
             if let shot = app.shot {
                 ShotBanner(shot: shot)
             } else {
@@ -3088,6 +3101,7 @@ struct ScriptPane: View {
             // The round chat button sits over the bar's right end, except beside the chat.
             .padding(.trailing, 64)
             .background(Theme.paper)
+            }
             }
         }
         .background(Theme.paper)

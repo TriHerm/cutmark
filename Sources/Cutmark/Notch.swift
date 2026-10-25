@@ -227,7 +227,7 @@ final class NotchPanel {
         var lines = UserDefaults.standard.object(forKey: "notchLines") as? Int ?? 3
         // The tour needs five lines of room; the panel goes back to your size after it.
         if UserDefaults.standard.integer(forKey: NotchView.introKey) < NotchView.intro.count { lines = max(lines, 5) }
-        let layout = NotchLayout.make(for: screen, body: Self.body(lines: lines))
+        let layout = NotchLayout.make(for: screen, body: app.usesTeleprompter ? Self.body(lines: lines) : 300)
         panel.contentView = NSHostingView(rootView: NotchView(layout: layout, glow: glow, close: { [weak self] in self?.close() }).environment(app))
         // Clear room round the sides and the bottom for the glow. Clicks there go to the app under it.
         let m = NotchView.margin
@@ -286,7 +286,7 @@ struct NotchView: View {
         ("waveform", "Press ▶ and just talk", "The text moves with your voice. There is no speed to set.", ["play", "voice"]),
         ("record.circle", "Press ● to record a take", "Point at any button to see what it does.", ["record"]),
     ]
-    private var introOn: Bool { introStep < Self.intro.count }
+    private var introOn: Bool { app.usesTeleprompter && introStep < Self.intro.count }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -308,6 +308,15 @@ struct NotchView: View {
         let size = NotchPanel.fontSize
         return VStack(spacing: 0) {
             Color.clear.frame(height: layout.band)
+            Group {
+            if !app.usesTeleprompter, let doc = app.library.current {
+                if app.guideMode == .board {
+                    RecordingGuideBoard(cards: RecordingGuide.cards(doc.recordingNotes),
+                                        index: Binding(get: { doc.recordingCue }, set: { doc.recordingCue = $0 }), compact: true)
+                } else {
+                    RecordingNotesView(cards: RecordingGuide.cards(doc.recordingNotes), fontSize: size)
+                }
+            } else {
             Prompter(text: .constant(app.promptText), contentKey: "notch#" + app.promptKey, fontSize: size,
                      scrolling: app.scrolling && !hover, speed: app.speed * size / max(app.fontSize, 1),
                      editable: false, resetToken: app.resetToken, dark: true,
@@ -317,13 +326,15 @@ struct NotchView: View {
                 // The last line fades into the bar instead of being cut.
                 .mask(LinearGradient(stops: [.init(color: .black, location: 0.8), .init(color: .clear, location: 1)],
                                      startPoint: .top, endPoint: .bottom))
+            }
+            }
                 .overlay {
                     if case .countdown(let n) = app.phase {
                         Text("\(n)").font(.system(size: 34, weight: .bold, design: .rounded)).foregroundStyle(.white)
                             .frame(maxWidth: .infinity, maxHeight: .infinity).background(.black)
                     } else if introOn {
                         introCard
-                    } else if app.promptText.isEmpty {
+                    } else if app.usesTeleprompter && app.promptText.isEmpty {
                         Text("Write a script in Cutmark, and it shows here.")
                             .font(Theme.sans(13)).foregroundStyle(.white.opacity(0.55))
                     }
@@ -402,6 +413,7 @@ struct NotchView: View {
                     .padding(.trailing, 6)
                     .transition(.opacity)
             }
+            if app.usesTeleprompter {
             button(app.scrolling ? "pause.fill" : "play.fill",
                    app.following ? (app.scrolling ? "Stop listening" : "Start: the text follows your voice")
                                  : (app.scrolling ? "Pause" : "Start scrolling"), id: "play") {
@@ -425,6 +437,7 @@ struct NotchView: View {
             button("rectangle.expand.vertical", lines >= most ? "More lines (\(most) is the most)" : "More lines") { lines = min(most, lines + 1) }
                 .disabled(lines >= most)
             button("questionmark", "Take the quick tour again", id: "tour") { introStep = 0 }
+            }
             button("xmark", "Close the panel (⌥⌘N)") { close() }
         }
         .animation(.easeOut(duration: 0.12), value: tip)
@@ -499,6 +512,15 @@ struct PrompterWindowView: View {
     @State private var hover = false
 
     var body: some View {
+        Group {
+            if !app.usesTeleprompter, let doc = app.library.current {
+                if app.guideMode == .board {
+                    RecordingGuideBoard(cards: RecordingGuide.cards(doc.recordingNotes),
+                                        index: Binding(get: { doc.recordingCue }, set: { doc.recordingCue = $0 }))
+                } else {
+                    RecordingNotesView(cards: RecordingGuide.cards(doc.recordingNotes), fontSize: size)
+                }
+            } else {
         ZStack(alignment: .top) {
             // The reading line flips with the text, so it stays beside the line to read.
             ZStack(alignment: .topLeading) {
@@ -516,6 +538,8 @@ struct PrompterWindowView: View {
             }
             .scaleEffect(x: mirror ? -1 : 1, y: flip ? -1 : 1)
             if hover || app.promptText.isEmpty { toolbar.padding(.top, 10).transition(.opacity) }
+        }
+            }
         }
         .background(Color.black)
         .environment(\.colorScheme, .dark)
