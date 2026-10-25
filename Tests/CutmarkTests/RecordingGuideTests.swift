@@ -66,6 +66,32 @@ struct RecordingGuideTests {
         #expect(try Data(contentsOf: file) == bytes)
     }
 
+    @Test func failedSaveKeepsTypedNotesAndCanBeRetried() throws {
+        let url = try session()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let file = url.appending(path: RecordingGuide.file)
+        let doc = SessionDoc(url: url)
+        doc.setRecordingNotes("Saved point")
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+        doc.setRecordingNotes("New point\nDo not lose these words")
+        #expect(doc.recordingNotesError != nil)
+        #expect(doc.recordingNotes == "New point\nDo not lose these words")
+        doc.reloadRecordingNotes()
+        #expect(doc.recordingNotes == "New point\nDo not lose these words")
+        try FileManager.default.removeItem(at: file)
+        try "Outside edit".write(to: file, atomically: true, encoding: .utf8)
+        doc.reloadRecordingNotes()
+        #expect(doc.recordingNotes == "New point\nDo not lose these words")
+        doc.setRecordingNotes(doc.recordingNotes)
+        #expect(doc.recordingNotesError == nil)
+        #expect(SessionDoc(url: url).recordingNotes == "New point\nDo not lose these words")
+        #expect(!doc.recordingNotesUnsaved)
+        try "Later outside edit".write(to: file, atomically: true, encoding: .utf8)
+        doc.reloadRecordingNotes()
+        #expect(doc.recordingNotes == "Later outside edit")
+    }
+
     @Test func guidanceDoesNotListenOrScrollTheScript() {
         let app = AppModel()
         let previous = app.guideMode
@@ -171,5 +197,11 @@ struct RecordingGuideTests {
         doc.setRecordingNotes("")
         try snapshot(ScriptPane(doc: doc).environment(app).environment(\.colorScheme, .dark),
                      name: "record-notes-empty", width: 430, height: 660, directory: directory)
+        let notesFile = folder.appending(path: RecordingGuide.file)
+        try FileManager.default.removeItem(at: notesFile)
+        try FileManager.default.createDirectory(at: notesFile, withIntermediateDirectories: false)
+        doc.setRecordingNotes("Keep these notes\nRetry when the folder is writable")
+        try snapshot(ScriptPane(doc: doc).environment(app).environment(\.colorScheme, .dark),
+                     name: "record-notes-save-error", width: 430, height: 660, directory: directory)
     }
 }

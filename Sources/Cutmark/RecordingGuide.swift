@@ -66,7 +66,16 @@ struct RecordingGuidePane: View {
                 .help("Show your guide near the camera")
             }.padding(16)
             if let error = doc.recordingNotesError {
-                Text(error).font(Theme.sans(12)).foregroundStyle(Theme.danger).padding(.horizontal, 16)
+                HStack(alignment: .top, spacing: 12) {
+                    Text(error).font(Theme.sans(12)).foregroundStyle(Theme.danger)
+                    Spacer(minLength: 0)
+                    if !app.isRecording {
+                        Button(doc.recordingNotesUnsaved ? "Retry save" : "Retry loading") {
+                            if doc.recordingNotesUnsaved { doc.setRecordingNotes(doc.recordingNotes) }
+                            else { doc.reloadRecordingNotes() }
+                        }.buttonStyle(PillGhostStyle()).font(Theme.sans(12, .medium))
+                    }
+                }.padding(.horizontal, 16)
             }
             if !app.isRecording && (editing || cards.isEmpty) {
                 VStack(alignment: .leading, spacing: 12) {
@@ -77,7 +86,9 @@ struct RecordingGuidePane: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .padding(12).background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
                         .accessibilityLabel("Recording notes")
-                    Text("Notes are saved with this session. Your script stays separate.")
+                    Text(doc.recordingNotesUnsaved
+                         ? "Your latest notes are not saved yet. Retry before leaving this session."
+                         : "Notes are saved with this session. Your script stays separate.")
                         .font(Theme.sans(12)).foregroundStyle(Theme.muted)
                 }.padding(16)
             } else if app.guideMode == .board {

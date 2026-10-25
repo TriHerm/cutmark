@@ -340,6 +340,7 @@ final class SessionDoc {
     var activeDraft = "main"
     private(set) var recordingNotes = ""
     private(set) var recordingNotesError: String?
+    private(set) var recordingNotesUnsaved = false
     var recordingCue = 0
     @ObservationIgnored private var recordingNotesStamp: Date?
 
@@ -349,22 +350,26 @@ final class SessionDoc {
 
     /// Save separately from the spoken script (2026-10-24). A failed read never becomes a blank write.
     func setRecordingNotes(_ text: String) {
+        // Keep the editor's text even when the disk refuses the write (2026-10-25).
+        recordingNotes = text
+        recordingNotesUnsaved = true
+        recordingCue = min(recordingCue, RecordingGuide.cards(text).count)
         let file = url.appending(path: RecordingGuide.file)
         do {
             if FileManager.default.fileExists(atPath: file.path) {
                 _ = try String(contentsOf: file, encoding: .utf8)
             }
             try text.write(to: file, atomically: true, encoding: .utf8)
-            recordingNotes = text
             recordingNotesStamp = Store.modified(file)
             recordingNotesError = nil
-            recordingCue = min(recordingCue, RecordingGuide.cards(text).count)
+            recordingNotesUnsaved = false
         } catch {
             recordingNotesError = "Could not save your notes. \(error.localizedDescription)"
         }
     }
 
     func reloadRecordingNotes() {
+        guard !recordingNotesUnsaved else { return }
         let file = url.appending(path: RecordingGuide.file)
         let stamp = Store.modified(file)
         guard stamp != recordingNotesStamp else { return }
