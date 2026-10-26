@@ -288,9 +288,9 @@ struct TimelineEditorWorkspace: View {
                   !press.modifiers.contains(.option) else { return .ignored }
             playback.playForward(); return .handled
         }
-        .onKeyPress(characters: ["=", "-", "z", "e"], phases: .down) { press in
+        .onKeyPress(characters: ["=", "-", "z", "Z", "e", "E"], phases: .down) { press in
             guard press.modifiers.contains(.command) else { return .ignored }
-            switch press.characters {
+            switch press.characters.lowercased() {
             case "=": adjustZoom(1.18)
             case "-": adjustZoom(1 / 1.18)
             case "z": if press.modifiers.contains(.shift) { redo() } else { undo() }

@@ -117,6 +117,16 @@ enum SessionJourney {
 }
 
 struct SessionJourneyBar: View {
+    let doc: SessionDoc
+
+    var body: some View {
+        // The library replaces the selected document directly. Give the state owner a new
+        // identity before its next disk read so another session's actions cannot remain live.
+        SessionJourneyContent(doc: doc).id(doc.url)
+    }
+}
+
+private struct SessionJourneyContent: View {
     @Environment(AppModel.self) private var app
     let doc: SessionDoc
     @State private var files = SessionJourney.Files()
