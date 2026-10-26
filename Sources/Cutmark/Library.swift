@@ -340,6 +340,8 @@ final class SessionDoc {
     var activeDraft = "main"
     /// Shared by Script and Storyboard; navigation only, never written into the script.
     var focusedSceneID: String?
+    /// A prepared unscripted take, like a selected shot: temporary UI intent, never a file change.
+    var quickTake = false
     private(set) var recordingNotes = ""
     private(set) var recordingNotesError: String?
     private(set) var recordingNotesUnsaved = false

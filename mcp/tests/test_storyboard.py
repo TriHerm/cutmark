@@ -13,6 +13,23 @@ FAKE = "import sys\nopen(sys.argv[-1], 'wb').write(b'\\x89PNG fake')\n"
 
 
 class Storyboard(unittest.TestCase):
+    def test_text_plan_never_starts_image_generation_until_draw_is_requested(self):
+        with mock.patch.object(t, "start_sketches") as start:
+            r = t.t_set_storyboard({"session": self.s, "draw": False,
+                                    "shots": [{"id": "intro", "say": "One idea.", "sketch": "To camera."}]})
+        start.assert_not_called()
+        d = t.read_storyboard(self.s)
+        self.assertTrue(d["sketches_deferred"])
+        self.assertNotIn("nokey", d)
+        self.assertEqual((r["drawing"], r["ids"]), (0, ["intro"]))
+        with mock.patch.object(t, "draw_sketch") as draw:
+            t.sketch_run(self.s)
+        draw.assert_not_called()
+        t.sketch_run(self.s, retry=True)
+        d = t.read_storyboard(self.s)
+        self.assertNotIn("sketches_deferred", d)
+        self.assertIn("image", d["shots"][0])
+
     def setUp(self):
         self.root = tempfile.mkdtemp()
         os.environ["CUTMARK_ROOT"] = self.root

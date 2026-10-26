@@ -490,10 +490,14 @@ struct PersistentSplit<Left: View, Right: View>: View {
 /// (Rail.swift, 2026-10-11).
 struct BoardRows: View {
     @Environment(AppModel.self) var app
+    @AppStorage("rightTab") private var route = SessionMode.record.rawValue
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            SetupButton()
+            if app.library.grouped.values.joined().contains(where: { $0.takeCount > 0 })
+                || (app.library.current != nil && app.chats.open && (app.chats.onRecord || route == "write" || route == "storyboard")) {
+                SetupButton()
+            }
             UpdateButton(library: app.library)
             ReleaseRow()
         }
@@ -1180,7 +1184,8 @@ struct DetailView: View {
     /// then the file plays on the stage and the list sits beside it.
     private var cover: String? {
         guard !app.isRecording, library.current != nil, !(library.selectedSessions.count > 1) else { return nil }
-        return Self.covers(rightTab, previewing: app.preview != nil) ? rightTab : nil
+        return Self.covers(rightTab, previewing: app.preview != nil)
+            ? (rightTab == "storyboard" ? "write" : rightTab) : nil
     }
 
     nonisolated static func covers(_ tab: String, previewing: Bool) -> Bool {
@@ -1221,7 +1226,7 @@ struct DetailView: View {
                                 // Under the pages as they cross-fade: never the Record stage and
                                 // its camera between two tabs (2026-10-04).
                                 Theme.canvas
-                                ForEach(["storyboard", "write", "assets", "sounds", "broll", "post"], id: \.self) { k in
+                                ForEach(["write", "assets", "sounds", "broll", "post"], id: \.self) { k in
                                     if k == cover || kept.contains(k) { pane(k, doc) }
                                 }
                             }
@@ -1266,7 +1271,6 @@ struct DetailView: View {
         Group {
             switch k {
             case "post": PostPane(doc: doc)
-            case "storyboard": StoryboardPane(doc: doc)
             case "write": ScriptPage(doc: doc)
             case "assets": AssetsPane(doc: doc, wide: true)
             case "broll": BrollPane(doc: doc)
@@ -1409,7 +1413,8 @@ struct DetailView: View {
                             } else if rightTab == "sounds" && cover == nil && !app.isRecording {
                                 SoundsPane(doc: doc)
                             } else {
-                                ScriptPane(doc: doc)
+                                if doc.quickTake { QuickTakePane(doc: doc) }
+                                else { ScriptPane(doc: doc) }
                                 Rule()
                                 CutmarkList(doc: doc).fixedSize(horizontal: false, vertical: true)
                             }
@@ -2385,6 +2390,7 @@ struct TakeRow: View {
     @State private var hooks: [Hook] = []
     /// What the take says, from its transcript (Transcripts.swift).
     @State private var said: String?
+    @State private var showPlan = false
     @FocusState private var editing: Bool
 
     private var voiceFile: URL? {
@@ -2453,6 +2459,7 @@ struct TakeRow: View {
                 .cutmarkContextMenu { [trashRow] in
                     MenuButton("Open in QuickTime", icon: "play.rectangle") { NSWorkspace.shared.openSoon(url) }
                     MenuButton("Reveal in Finder", icon: "folder") { NSWorkspace.shared.revealSoon([url]) }
+                    MenuButton("Plan from this take…", icon: "text.bubble", enabled: !app.isRecording) { showPlan = true }
                     MenuDivider()
                     trashRow
                 }
@@ -2480,7 +2487,14 @@ struct TakeRow: View {
         .buttonStyle(.borderless)
         .padding(.horizontal, 10).padding(.vertical, 6)
         .contentShape(Rectangle())
-        .cutmarkContextMenu { [trashRow] in trashRow }
+        .cutmarkContextMenu { [trashRow] in
+            MenuButton("Plan from this take…", icon: "text.bubble", enabled: !app.isRecording) { showPlan = true }
+            MenuDivider()
+            trashRow
+        }
+        .cutmarkPopover(isPresented: $showPlan) {
+            TakePlanCard(doc: doc, number: number, onImported: { showPlan = false }).environment(app).frame(width: 360).padding(12)
+        }
         .onAppear { name = takes.first?.name ?? "" }
         .onDisappear { if name != (takes.first?.name ?? "") { doc.nameTake(number, name) } }
         .onAppear { hooks = HookStore.read(doc.url).hooks }
@@ -2507,16 +2521,15 @@ struct EmptySessionView: View {
                      + Text("Just hit record.").foregroundStyle(Theme.accent))
                         .font(Theme.display(42))
                         .lineSpacing(2)
-                    Text("Cutmark makes the session for you and names it from your script.")
+                    Text("Capture one rough idea. You can turn its transcript into a plan afterward.")
                         .font(Theme.sans(15)).foregroundStyle(Theme.muted)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 HStack(spacing: 10) {
-                    Button { app.toggleRecord() } label: {
+                    Button { app.prepareQuickTake() } label: {
                         HStack(spacing: 7) {
                             Circle().frame(width: 9, height: 9)
-                            Text("Record")
-                            Text("⌘R").font(Theme.mono(10.5)).opacity(0.75)
+                            Text("Quick take")
                         }
                     }
                     .buttonStyle(AccentButtonStyle(kind: .solid))
@@ -2991,17 +3004,19 @@ struct StagePill: View {
     }
 }
 
-/// The Script tab (2026-10-06): the script as a page of its own, for writing
-/// it with Cutmark. The chat docks beside it, as on the other full-window tabs. Record shows the
-/// same text as the prompter.
+/// Plan keeps the complete script, scenes and optional visual previews in one workspace.
 struct ScriptPage: View {
     var doc: SessionDoc
 
     var body: some View {
         // The whole width, one page: a column of 860 left dark strips beside it (2026-10-12).
-        ScriptPane(doc: doc, onRecord: { SessionMode.set(.record) })
+        VStack(spacing: 0) {
+            PlanActions(doc: doc)
+            ScriptPane(doc: doc, onRecord: { app.shot = nil; doc.quickTake = false; SessionMode.set(.record) })
+        }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+    @Environment(AppModel.self) private var app
 }
 
 struct ScriptPane: View {

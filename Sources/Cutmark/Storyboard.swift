@@ -64,7 +64,11 @@ struct StoryShot: Decodable, Equatable, Identifiable {
     }
 
     static let noSketchKeyMessage = "No sketch: Cutmark has no image key."
+    static let deferredSketchMessage = "Preview sketches are optional."
     var sketchNeedsSetup: Bool { image == nil && video == nil && error == Self.noSketchKeyMessage }
+    var hasOptionalSketchPlaceholder: Bool {
+        image == nil && video == nil && (error == Self.noSketchKeyMessage || error == Self.deferredSketchMessage)
+    }
     var kindTitle: String {
         switch kind {
         case "DESK", "WALK": return "On camera"
@@ -128,6 +132,11 @@ struct Storyboard: Decodable, Equatable {
     var format: String?
     /// The MCP found no image key (Gemini, OpenAI or Replicate) and drew nothing (2026-10-09).
     var nokey: Bool?
+    var sketchesDeferred: Bool?
+    enum CodingKeys: String, CodingKey {
+        case shots, format, nokey
+        case sketchesDeferred = "sketches_deferred"
+    }
 
     /// One visible take tile per recording, including screen-only, with paired camera preferred.
     nonisolated static func shotTakes(_ all: [Take]) -> [String: [Take]] {
@@ -156,11 +165,11 @@ struct Storyboard: Decodable, Equatable {
         + "for this request. Use update_session only if the script needs to be written or revised, "
         + "never create a duplicate session. "
         + "then call set_storyboard with "
-        + "the full ordered shots (hook, main, end), each with say, do, sketch and stable ids. "
+        + "the full ordered shots (hook, main, end), each with say, do, sketch and stable ids, with draw=false. "
         + "For new scripts, keep spoken words in script.md and filming directions in each shot's do field. "
         + "Use cutmark-storyboard skill instructions if available, but do not require a Skill tool. "
         + "An image generation API key is optional: always save the text storyboard even when sketches "
-        + "cannot be drawn. Report shot count and invite me to review the Storyboard tab."
+        + "cannot be drawn. Report scene count and invite me to review Plan."
 
     /// Width over height.
     var ratio: CGFloat { Self.ratio(format) }
@@ -209,9 +218,9 @@ struct Storyboard: Decodable, Equatable {
         // A storyboard from before ids (2026-10-03): the MCP numbers them the same way.
         for i in b.shots.indices where b.shots[i].id.isEmpty { b.shots[i].id = "s\(i + 1)" }
         // No image key: a shot with no sketch says so, instead of "Drawing…" forever.
-        if b.nokey == true {
+        if b.nokey == true || b.sketchesDeferred == true {
             for i in b.shots.indices where b.shots[i].image == nil && b.shots[i].video == nil && b.shots[i].error == nil {
-                b.shots[i].error = StoryShot.noSketchKeyMessage
+                b.shots[i].error = b.sketchesDeferred == true ? StoryShot.deferredSketchMessage : StoryShot.noSketchKeyMessage
             }
         }
         // Hook, main, end, each in the order written.
@@ -260,15 +269,18 @@ struct Storyboard: Decodable, Equatable {
 /// (Claude Code, Codex, pi or opencode) the user chose for chat.
 struct NoSketchKeyCard: View {
     var session: URL
+    var needsKey = true
     @Environment(\.openSettings) private var openSettings
     @State private var asked = false
+    @State private var missingKey = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "pencil.and.outline").font(.system(size: 14)).foregroundStyle(Theme.accent).padding(.top, 2)
             VStack(alignment: .leading, spacing: 4) {
                 Text("Sketches are optional").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
-                Text("You can record from your script now. Add an image key only if you want preview sketches.")
+                Text(needsKey || missingKey ? "You can record from your script now. Add an image key only if you want preview sketches."
+                              : "Your text plan is ready. Draw preview sketches when they would help.")
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 12)
@@ -277,7 +289,7 @@ struct NoSketchKeyCard: View {
                     UserDefaults.standard.set(SettingsView.SettingsPage.gemini.rawValue, forKey: "settingsPage")
                     openSettings()
                 } label: {
-                    Text("Add a Key").font(Theme.sans(12, .medium)).foregroundStyle(Theme.ink)
+                    Text(needsKey || missingKey ? "Add a Key" : "Image settings").font(Theme.sans(12, .medium)).foregroundStyle(Theme.ink)
                         .padding(.horizontal, 12).padding(.vertical, 6)
                         .background(Capsule().strokeBorder(Theme.border))
                 }
@@ -292,6 +304,9 @@ struct NoSketchKeyCard: View {
                 .disabled(asked)
             }
             .buttonStyle(PressScale())
+        }
+        .onFilesChanged(in: session) {
+            if asked, Storyboard.read(session)?.nokey == true { missingKey = true; asked = false }
         }
         .padding(14)
         .background(RoundedRectangle(cornerRadius: 10).fill(Theme.paper))
@@ -313,6 +328,7 @@ struct StoryboardPane: View {
     @Environment(AppModel.self) var app
     @Environment(\.paneShown) private var shown
     var doc: SessionDoc
+    var onEditScript: (() -> Void)? = nil
     @State private var board: Storyboard?
     @State private var stamp: Date?
     @State private var images: [String: NSImage] = [:]
@@ -330,7 +346,9 @@ struct StoryboardPane: View {
     /// Preloaded: the load task stays off.
     private var still = false
 
-    init(doc: SessionDoc) { self.doc = doc }
+    init(doc: SessionDoc, onEditScript: (() -> Void)? = nil) {
+        self.doc = doc; self.onEditScript = onEditScript
+    }
 
     /// With the storyboard already read: snapshot tests, where the load task does not run.
     init(doc: SessionDoc, board: Storyboard, images: [String: NSImage]) {
@@ -426,7 +444,7 @@ struct StoryboardPane: View {
         let drawing = b.shots.filter { $0.image == nil && $0.video == nil && $0.error == nil }.count
         let done = b.shots.filter { takes[$0.id] != nil }.count
         return HStack(spacing: 10) {
-            Text("\(b.shots.count) scenes").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
+            Text("\(b.shots.count) scene\(b.shots.count == 1 ? "" : "s")").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
             Text("·").foregroundStyle(Theme.faint)
             Text("about \(Storyboard.clock(b.total))").font(Theme.sans(13)).foregroundStyle(Theme.muted)
             if done > 0 {
@@ -439,13 +457,13 @@ struct StoryboardPane: View {
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted)
             }
             Spacer()
-            Button("Edit script") { SessionMode.set(.write) }
+            Button("Back to script") { if let onEditScript { onEditScript() } else { SessionMode.set(.write) } }
                 .buttonStyle(.plain).font(Theme.sans(11.5)).foregroundStyle(Theme.accent)
-            if b.nokey == true {
+            if b.nokey == true || b.sketchesDeferred == true {
                 Button("Sketches (optional)") { showSketchOptions = true }
                     .buttonStyle(.plain).font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
                     .cutmarkPopover(isPresented: $showSketchOptions) {
-                        NoSketchKeyCard(session: doc.url).frame(width: 520).padding(.top, 12)
+                        NoSketchKeyCard(session: doc.url, needsKey: b.nokey == true).frame(width: 520).padding(.top, 12)
                     }
             }
             Button { NSWorkspace.shared.openSoon(Storyboard.folder(doc.url)) } label: {
@@ -667,7 +685,7 @@ private struct ShotThumb: View {
             shape.fill(Theme.paper)
             if let img = image ?? poster ?? shot.video.flatMap({ StoryShot.cachedPoster(doc.url.appending(path: $0)) }) {
                 Image(nsImage: img).resizable().scaledToFill()
-            } else if shot.sketchNeedsSetup {
+            } else if shot.hasOptionalSketchPlaceholder {
                 VStack(spacing: 5) {
                     Image(systemName: shot.kindIcon).font(.system(size: 15)).foregroundStyle(Theme.muted)
                     Text(shot.section.title).font(Theme.sans(9.5, .medium)).foregroundStyle(Theme.faint)
@@ -940,7 +958,7 @@ private struct ShotDetail: View {
                         Image(nsImage: image).resizable().scaledToFill()
                             .onTapGesture(count: 2) { if let n = shot.image { NSWorkspace.shared.openSoon(Storyboard.folder(doc.url).appending(path: n)) } }
                             .help(shot.sketch)
-                    } else if shot.sketchNeedsSetup {
+                    } else if shot.hasOptionalSketchPlaceholder {
                         VStack(spacing: 14) {
                             Image(systemName: shot.kindIcon).font(.system(size: 32)).foregroundStyle(Theme.accent)
                             Text("Scene \(number)").font(Theme.sans(22, .semibold)).foregroundStyle(Theme.ink)

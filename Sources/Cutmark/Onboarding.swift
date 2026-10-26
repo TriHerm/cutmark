@@ -78,8 +78,7 @@ final class Onboarding {
 
     /// An empty session on Record: the camera is ready, the script can wait.
     func recordNow(app: AppModel) {
-        _ = app.library.createSession()
-        SessionMode.set(.record)
+        guard app.prepareQuickTake() != nil else { return }
         finish()
     }
 }
@@ -449,23 +448,18 @@ private struct StartPage: View {
     var flow: Onboarding
     private var setup = Setup.shared
     @State private var idea = ""
+    @State private var planFirst = false
     @FocusState private var typing: Bool
 
     init(flow: Onboarding) { self.flow = flow }
 
     var body: some View {
         Group {
-            if setup.needed {
-                // Keep the first-run actions reachable at smaller window sizes and larger text.
-                ScrollView(.vertical) { content }
-                    .scrollIndicators(.hidden)
-            } else {
-                content
-            }
+            ScrollView(.vertical) { content }.scrollIndicators(.hidden)
         }
         // The cursor waits in the field, so typing the idea is the first thing that works.
-        .onAppear { if Onboarding.canWrite { DispatchQueue.main.async { typing = true } } }
-        .onChange(of: Onboarding.canWrite) { _, ready in if ready { typing = true } }
+        .onChange(of: planFirst) { _, on in if on && Onboarding.canWrite { typing = true } }
+        .onChange(of: Onboarding.canWrite) { _, ready in if planFirst && ready { typing = true } }
         .background(alignment: .top) {
             RadialGradient(colors: [Theme.accent.opacity(0.18), .clear], center: .top, startRadius: 0, endRadius: 380)
                 .frame(height: 300).allowsHitTesting(false)
@@ -476,13 +470,11 @@ private struct StartPage: View {
         VStack(spacing: 0) {
             Spacer(minLength: setup.needed ? 12 : 24)
             VStack(spacing: 8) {
-                Text("Make your first video.").font(Theme.display(setup.needed ? 30 : 36))
-                Text(setup.needed
-                    ? "Choose an agent for scripts and editing, or start recording now."
-                    : "Tell Cutmark your idea. It writes the script into a new session, and you read it on camera.")
+                Text("Capture the idea first.").font(Theme.display(36))
+                Text("No script or AI setup needed. Say it now; shape it into a plan afterward.")
                     .font(Theme.sans(14.5)).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
                     .frame(maxWidth: 580)
-                if !setup.needed {
+                if !planFirst {
                     Text(Onboarding.sessionLine)
                         .font(Theme.sans(12.5)).foregroundStyle(Theme.faint).multilineTextAlignment(.center)
                         .frame(maxWidth: 580)
@@ -490,27 +482,22 @@ private struct StartPage: View {
             }
             .arrive(0)
             .padding(.bottom, setup.needed ? 16 : 28)
-            VStack(alignment: .leading, spacing: 14) {
-                if setup.needed { connect }
-                if Onboarding.canWrite { ideaBox }
-            }
-            .frame(width: 660)
-            .arrive(1)
-            HStack(spacing: 10) {
-                Rule().frame(width: 60)
-                Text("or").font(Theme.sans(12)).foregroundStyle(Theme.faint)
-                Rule().frame(width: 60)
-            }
-            .padding(.vertical, setup.needed ? 8 : 14)
-            .arrive(2)
             Button { flow.recordNow(app: app) } label: {
                 HStack(spacing: 8) {
                     Circle().fill(Theme.danger).frame(width: 8, height: 8)
-                    Text("Record without a script")
+                    Text("Quick take")
                 }
             }
-            .buttonStyle(AccentButtonStyle(kind: .quiet))
-            .arrive(2)
+            .buttonStyle(AccentButtonStyle(kind: .solid))
+            .arrive(1)
+            Button(planFirst ? "Hide planning options" : "Plan first instead") { planFirst.toggle() }
+                .buttonStyle(AccentButtonStyle(kind: .quiet)).padding(.top, 10)
+            if planFirst {
+                VStack(alignment: .leading, spacing: 14) {
+                    if !Onboarding.canWrite { connect }
+                    if Onboarding.canWrite { ideaBox }
+                }.frame(width: 660).padding(.vertical, 14)
+            }
             // The demo session: a finished video by a made-up creator, to see first (Demo.swift).
             Button { flow.example(app: app) } label: {
                 HStack(spacing: 6) {

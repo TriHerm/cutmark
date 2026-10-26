@@ -1,6 +1,6 @@
 ---
 name: cutmark-storyboard
-description: Turn a video idea into a Cutmark session with a script and a sketch storyboard, so the user sees how to film it before they start. Use when the user brainstorms or rambles about a video idea, says "storyboard this", "plan this video", "how would I film this", or presses "Storyboard this video" on the Storyboard tab in Cutmark. Writes script.md, then calls set_storyboard (Cutmark MCP), which draws one marker sketch per shot in the background and shows them on a timeline with the script lines under each shot.
+description: Turn a video idea or a rough take into a script and scenes in Cutmark's Plan workspace. Use when the user brainstorms a video, says "storyboard this" or "plan this video", or chooses Organize draft. Preserve the existing session and scripts. Save text scenes with set_storyboard(draw=false); generated preview sketches are an explicit optional step.
 ---
 
 # Cutmark storyboard
@@ -21,38 +21,42 @@ Done, Now and Next, including in the near-camera panel.
 - The sketches use Nano Banana 2.1 (`GEMINI_API_KEY` or `GOOGLE_AI_API_KEY`), then GPT Image 2.5
   Flare (`OPENAI_API_KEY`), then Nano Banana on Replicate (the Replicate plugin's token), from the
   environment, `~/.config/cutmark/.env`, the legacy read-only `~/.claude/.env` fallback, or the Keychain.
-- **No image key:** `set_storyboard` still saves the shots, draws nothing, and its answer has
+- Start with `draw=false`. Do not ask for image keys or generate previews unless the user asks.
+- **Preview images requested, but no image key:** `set_storyboard` still saves the shots, draws nothing, and its answer has
   `no_sketches` and a note. Then do one of these:
   - If you can make images yourself, draw each sketch (the marker style below) and call
     `set_storyboard` again with each shot's `image` set to your PNG or JPG.
   - Else ask the user for a Gemini key (Cutmark › Settings › Gemini, from aistudio.google.com/apikey)
     or an OpenAI key. When they have added it, call `set_storyboard` again, or tell them to click
-    **Draw** on the Storyboard tab.
+    **Draw** in Plan's visual previews.
   Do not look for keys or logins anywhere else on the Mac.
 - All work goes through the `cutmark` MCP. Never write `session.json` or `storyboard/` by hand.
 
 ## Steps
 
-1. **Session.** In a Cutmark chat, the session is given. From a terminal, call `create_session`
+1. **Session.** Read `get_session` first. In a Cutmark chat, reuse that session. From a terminal, call `create_session`
    with `project`, `title` and `script`. If the project is unclear, ask. Do not storyboard into a
    session that already has takes, unless the user asks.
-2. **Script first.** Write `script.md` with `create_session` or `update_session` (give a short
+2. **Script first.** When the request names an alternative, read its full text and use `update_variant`
+   on that alternative only; preserve `script.md` and the other versions. For a new main script,
+   write `script.md` with `create_session` or `update_session` (give a short
    `note`). Short spoken sentences. The hook is the first paragraph. Aim for about 45–75 s unless
    the user says otherwise. For new scripts, keep only the words to say in `script.md`; put filming
-   directions in each shot's `do` field. Script shows those directions beside the scene, so the
+   directions in each shot's `do` field. Plan shows those directions beside the scene, so the
    teleprompter stays easy to read. Do not rewrite an existing script just to remove its directions.
    For several opening options, call `set_hooks` with `[{text, note}]`. Keep your best hook as the
    first paragraph of `script.md`.
 3. **Shots.** One shot per paragraph, sometimes two. Usually 6–12 shots in three sections. The
-   Storyboard tab shows each section as its own row:
+   Plan groups scenes in this order:
    - `hook`: the opening 3–8 s, one or two shots. Other openings go in `set_hooks`, not here.
    - `main`: the body.
    - `end`: the last line and the call to action. A shot of kind `END` goes here.
-4. **`set_storyboard`** with `session` and the full `shots` list. It returns at once. The sketches
-   draw in the background (about 30 s each, a few at a time) and the tab fills in.
+4. **`set_storyboard`** with `session`, the full `shots` list, and `draw=false` for a text plan.
+   Generate preview images only when the user requests them; use `draw=true` then. Text scenes
+   work for recording on their own. The user can choose Draw in visual previews later.
 5. **Reply** in two or three lines: the idea in one sentence, the shot count and the length, and
-   "Open Script to review the scenes with your script, or Storyboard for the visual plan". Do not
-   list the shots in chat. Both tabs keep the same scene selection.
+   "Open Plan to review the scenes with your script". Do not list the shots in chat. Optional
+   visual previews live inside Plan and keep the same scene selection.
 
 ## A shot
 

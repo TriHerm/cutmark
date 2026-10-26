@@ -53,7 +53,8 @@ final class FirstTake {
         guard !d.bool(forKey: Self.doneKey) else { return }
         d.set(true, forKey: Self.doneKey)
         let others = library.grouped.values.joined().contains { $0.takeCount > 0 && Store.dir($0.url) != Store.dir(doc.url) }
-        guard number == 1, !others else { return }
+        // A quick take goes straight to its transcript, without an editing/setup detour (2026-10-25).
+        guard number == 1, !others, !doc.quickTake else { return }
         show(doc, number: number)
     }
 

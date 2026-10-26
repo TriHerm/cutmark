@@ -279,6 +279,7 @@ struct SetupPanel: View {
     var settings: OpenSettingsAction? = nil
     @Environment(\.openSettings) private var openSettings
     @State private var hasGemini = GeminiKey.found
+    @State private var advanced = false
 
     /// Not a step: Cutmark works without it. It says what the key adds and opens Settings › Gemini.
     private var gemini: some View {
@@ -360,7 +361,10 @@ struct SetupPanel: View {
             }
             .padding(18)
             Divider().overlay(Theme.border)
-            gemini.padding(.horizontal, 18).padding(.vertical, 14)
+            Button(advanced ? "Hide advanced options" : "Advanced options") { advanced.toggle() }
+                .buttonStyle(.plain).font(Theme.sans(12, .medium)).foregroundStyle(Theme.muted)
+                .padding(.horizontal, 18).padding(.vertical, 14)
+            if advanced { gemini.padding(.horizontal, 18).padding(.bottom, 14) }
         }
         .frame(width: 400)
         .background(Theme.paper)

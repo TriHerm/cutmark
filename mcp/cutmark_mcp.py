@@ -4243,22 +4243,26 @@ def t_set_storyboard(a):
     # The app shows hook, main, end in that order: keep the file in the same order.
     shots.sort(key=lambda x: SECTIONS.index(x["section"]))
     todo = sum(1 for x in shots if not x.get("image") and not x.get("video"))
-    nokey = bool(todo) and not image_sources()
-    write_storyboard(s, dict({"shots": shots, "format": fmt}, **({"nokey": True} if nokey else {})))
+    deferred = bool(todo) and a.get("draw") is False
+    nokey = bool(todo) and not deferred and not image_sources()
+    flags = {"sketches_deferred": True} if deferred else ({"nokey": True} if nokey else {})
+    write_storyboard(s, dict({"shots": shots, "format": fmt}, **flags))
     for given in a["shots"]:
         if given.get("redraw") and not given.get("image"):
             p = os.path.join(s, STORYBOARD_DIR, sketch_name((given.get("sketch") or "").strip(), fmt))
             if os.path.exists(p):
                 os.remove(p)
     gone = {o.get("id") for o in old} - {x["id"] for x in shots} - {None}
-    if todo and not nokey:
+    if todo and not nokey and not deferred:
         start_sketches(s)
-    out = {"shots": len(shots), "format": fmt, "drawing": 0 if nokey else todo, "ids": [x["id"] for x in shots],
-           "note": ("Drawing %d sketches in the background (about 30 s). The Storyboard tab fills in as they land."
+    out = {"shots": len(shots), "format": fmt, "drawing": 0 if nokey or deferred else todo, "ids": [x["id"] for x in shots],
+           "note": ("Drawing %d sketches in the background (about 30 s). Visual previews in Plan fill in as they land."
                     % todo) if todo else "All sketches already drawn."}
     if nokey:
         out["no_sketches"] = todo
         out["note"] = NO_KEY_NOTE
+    if deferred:
+        out["note"] = "Text plan saved. Review Plan; preview sketches wait until Draw is requested."
     linked = sorted({t.get("shot") for t in read_meta(s).get("takes", [])} & gone)
     if linked:
         out["warning"] = "Shots %s are gone but takes point at them. Give their id to the shot that replaces them." % ", ".join(linked)
@@ -4344,6 +4348,10 @@ def sketch_run(s, retry=False):
         return  # another runner draws; it re-reads the storyboard before it stops
     mu = threading.Lock()
     d = read_storyboard(s)
+    if d.get("sketches_deferred") and not retry:
+        return
+    if retry:
+        d.pop("sketches_deferred", None)
     nokey = not image_sources()
     if retry and not nokey:
         for x in d["shots"]:
@@ -4368,7 +4376,10 @@ def sketch_run(s, retry=False):
             write_storyboard(s, d)
 
     def draw(sketch):
-        fmt = read_storyboard(s).get("format") or DEFAULT_FORMAT
+        current = read_storyboard(s)
+        if current.get("sketches_deferred"):
+            return
+        fmt = current.get("format") or DEFAULT_FORMAT
         name = sketch_name(sketch, fmt)
         out = os.path.join(s, STORYBOARD_DIR, name)
         try:
@@ -4385,7 +4396,10 @@ def sketch_run(s, retry=False):
     tried = set()
     while True:
         todo = []
-        for x in read_storyboard(s)["shots"]:
+        current = read_storyboard(s)
+        if current.get("sketches_deferred"):
+            return
+        for x in current["shots"]:
             k = x.get("sketch")
             if k and not x.get("image") and not x.get("video") and k not in tried and k not in todo:
                 todo.append(k)
@@ -9026,7 +9040,7 @@ def t_create_variants(a):
             v["script"]))
         made.append(sl)
     return {"session": os.path.relpath(s, root()), "created_variants": made,
-            "note": "They show up as tabs above the teleprompter within 2 seconds."}
+            "note": "Choose them from the script version menu in Plan."}
 
 
 def t_update_variant(a):
@@ -14215,12 +14229,13 @@ TOOLS = [
          "text": {"type": "string"}, "note": {"type": "string", "description": "Short why, e.g. 'curiosity gap'"}},
          "required": ["text"]}}}, ["session", "hooks"], t_set_hooks),
     ("set_storyboard", "Write the session's storyboard: the video as a row of shots that the user sees as a "
-     "horizontal timeline of sketches on the Storyboard tab, each with its script lines. Use it with the "
+     "scene strip in Plan, each with its script lines. Use it with the "
      "storyboard skill when the user brainstorms a video idea. Replaces the earlier storyboard. Each shot covers "
-     "one or two script paragraphs: 'say' is those lines word for word from script.md, 'do' is how to film or "
+     "one or two script paragraphs: 'say' is those lines word for word from the current script version, 'do' is how to film or "
      "build it in one short line, 'sketch' is what the frame shows (people, props, framing, the camera move or "
      "the motion as arrows; never text in the frame). A sketch already drawn is kept; a new or changed sketch is "
-     "drawn in the background, about 30 s. redraw=true draws a shot again with the same sketch text. "
+     "drawn in the background, about 30 s. Pass draw=false for a text plan without image generation; "
+     "the user can request Draw later. redraw=true draws a shot again with the same sketch text. "
      "With no image key, nothing is drawn and the answer says so: ask the user for a key, or pass your own "
      "sketch as the shot's 'image'. "
      "'video' puts a real clip on the shot instead of a sketch (a file from list_broll, or a file in the "
@@ -14231,7 +14246,7 @@ TOOLS = [
      "shot keeps the old one as a variant. "
      "The user records takes per shot and comments on shots: get_session's 'storyboard' lists each shot's id, "
      "section, takes and open comments. 'format' is the video's shape: the cards and sketches use it.",
-     {"session": SESSION,
+     {"session": SESSION, "draw": {"type": "boolean", "description": "False saves a text plan without generating images. Default true for compatibility; use false unless previews were requested."},
       "format": {"type": "string",
                  "description": "The video's shape as W:H, any shape: 16:9 (YouTube, a landscape launch video), "
                                 "9:16 (Reels, Shorts, TikTok), 4:5 (LinkedIn feed), 1:1, 21:9 (cinema), 4:3, 3:4... "

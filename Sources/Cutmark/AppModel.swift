@@ -84,9 +84,10 @@ final class AppModel {
             if notchOpen { NotchPanel.shared.place() }
         }
     }
-    var usesTeleprompter: Bool { guideMode == .teleprompter }
+    var usesTeleprompter: Bool { guideMode == .teleprompter && library.current?.quickTake != true }
     var hasRecordingGuide: Bool {
-        !(usesTeleprompter ? promptText : library.current?.recordingNotes ?? "")
+        guard library.current?.quickTake != true else { return false }
+        return !(usesTeleprompter ? promptText : library.current?.recordingNotes ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     let voice = VoiceFollow()
@@ -256,6 +257,7 @@ final class AppModel {
     /// (2026-10-10: starting at once left him no time to prepare).
     func record(shot: StoryShot) {
         guard !isRecording else { return }
+        library.current?.quickTake = false
         self.shot = shot
         preview = nil
         SessionMode.set(.record)
@@ -813,7 +815,7 @@ final class AppModel {
     func endShot() {
         guard shot != nil else { return }
         shot = nil
-        SessionMode.set(.storyboard)
+        SessionMode.set(.write)
     }
 
     private func stop() async {
@@ -864,7 +866,7 @@ final class AppModel {
         if recorded {
             postRecordingPreview = PostRecordingPreview.make(sessionID: p.doc.meta.id, session: p.doc.url,
                                                              number: p.number, takes: p.doc.meta.takes)
-            if let postRecordingPreview {
+            if let postRecordingPreview, !p.doc.quickTake {
                 if postRecordingPanel == nil { postRecordingPanel = PostRecordingPreviewPanel() }
                 postRecordingPanel?.present(postRecordingPreview, doc: p.doc, app: self,
                                             displayID: p.screenDisplayID)

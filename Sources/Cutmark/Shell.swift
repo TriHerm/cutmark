@@ -4,15 +4,15 @@ import SwiftUI
 // The frame of the app (redesign 2026-09-30): one sidebar (project switcher, sessions, boards) and
 // one header per session (title, four modes, Schedule, ⋯). Everything else lives inside a mode.
 
-/// The five things you do with a session. Stored in "rightTab" (old values: "script" is Record).
+/// Stored routes stay compatible; Script and Storyboard share one Plan workspace (2026-10-25).
 enum SessionMode: String, CaseIterable, Identifiable {
     case storyboard, write, record = "script", assets, sounds, broll, post
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .storyboard: return "Storyboard"
-        case .write: return "Script"
+        case .storyboard: return "Visual previews"
+        case .write: return "Plan"
         case .record: return "Record"
         case .assets: return "Assets"
         case .sounds: return "Sound"
@@ -23,8 +23,8 @@ enum SessionMode: String, CaseIterable, Identifiable {
 
     var help: String {
         switch self {
-        case .storyboard: return "The idea as sketches on a timeline, with the script under each shot (⌘5)"
-        case .write: return "The script, with Cutmark beside it to write it (⌘7)"
+        case .storyboard: return "Open visual previews inside Plan (⌘5)"
+        case .write: return "Your full script, scenes and filming directions together (⌘7)"
         case .record: return "Camera, prompter and takes (⌘1)"
         case .assets: return "This video's files, your b-roll library, and its sound (⌘2; ⌘6 for b-roll, ⌘3 for sound)"
         case .sounds: return "Music and sound effects under the video (⌘3)"
@@ -48,12 +48,19 @@ enum SessionMode: String, CaseIterable, Identifiable {
 
     /// The tabs in the header. B-roll (2026-10-03) and Sound (2026-10-04) live inside Assets,
     /// switched at its top.
-    static let tabs: [SessionMode] = [.storyboard, .write, .record, .assets, .post]
+    static let tabs: [SessionMode] = [.write, .record, .assets, .post]
 
     /// The header tab a mode shows under.
-    var tab: SessionMode { self == .broll || self == .sounds ? .assets : self }
+    var tab: SessionMode {
+        if self == .storyboard { return .write }
+        return self == .broll || self == .sounds ? .assets : self
+    }
 
     @MainActor static func set(_ m: SessionMode) {
+        if m == .storyboard {
+            let d = UserDefaults.standard
+            d.set(d.integer(forKey: "visualPreviewRequest") + 1, forKey: "visualPreviewRequest")
+        }
         Perf.mark("tab \(m.rawValue)")
         UserDefaults.standard.set(m.rawValue, forKey: "rightTab")
     }
@@ -152,7 +159,13 @@ struct Sidebar: View {
             .onAppear { finding = true }
             .transition(.opacity.combined(with: .move(edge: .top)))
             }
-            // New session as a row, as New chat in Codex.
+            SideRow(selected: false) {
+                NavLabel(icon: "record.circle", title: "Quick take", key: "")
+            }
+            .onTapGesture { app.prepareQuickTake() }
+            .help("Open a fresh recording. No script or AI setup needed.")
+            .padding(.horizontal, 6).padding(.bottom, 4)
+            // Planning first remains available beside the quick recording path.
             SideRow(selected: false) {
                 NavLabel(icon: "square.and.pencil", title: "New session", key: "⌘N")
             }

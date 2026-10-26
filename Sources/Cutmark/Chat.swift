@@ -1578,6 +1578,7 @@ private struct ChatPanel: View {
     @State private var hideTools: Task<Void, Never>?
     @State private var showHistory = false
     @State private var showMeter = false
+    @State private var showAgentOptions = false
     @AppStorage("claudeAccess") private var access = "bypassPermissions"
     @State private var dropping = false
 
@@ -1614,9 +1615,7 @@ private struct ChatPanel: View {
                 if chat.boardName.hasPrefix("comments") {
                     LaneSwitch(hub: hub, find: hub.comments, post: hub.commentsPost)
                 } else {
-                    // Which agent and model work here (2026-10-11): a click picks another. The
-                    // session's title moved to the line's tooltip; the panel sits on that session.
-                    AgentLine(chat: chat).help(target.title)
+                    Text("Your video assistant").font(Theme.sans(11.5)).foregroundStyle(Theme.muted).help(target.title)
                 }
             }
             Spacer()
@@ -1644,6 +1643,8 @@ private struct ChatPanel: View {
                     MenuButton("Past conversations…", icon: "clock.arrow.circlepath") { showHistory = true }
                     MenuButton("Compact the conversation", icon: "arrow.down.right.and.arrow.up.left",
                                enabled: chat.hasMessages && !chat.compacting) { send("/compact") }
+                    MenuDivider()
+                    MenuButton("Advanced assistant options…", icon: "cpu") { showAgentOptions = true }
                     MenuDivider()
                     // Two choices: check rows, not a switch (a switch in this menu looked messy, 2026-10-11).
                     MenuLabel("Access")
@@ -1692,6 +1693,9 @@ private struct ChatPanel: View {
         .padding(.horizontal, 16).padding(.vertical, 12)
         .animation(Theme.motion, value: chat.running)
         .animation(Theme.motion, value: chat.context)
+        .cutmarkPopover(isPresented: $showAgentOptions) {
+            AgentCard(chat: chat) { showAgentOptions = false }
+        }
     }
 
     private func hoverTools(_ inside: Bool) {
@@ -1705,7 +1709,7 @@ private struct ChatPanel: View {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2.5))
                 if Task.isCancelled { return }
-                if !showHistory && !MenuPanel.shared.isOpen { break }
+                if !showHistory && !showAgentOptions && !MenuPanel.shared.isOpen { break }
             }
             withAnimation(Theme.spring) { tools = false }
         }
@@ -1838,7 +1842,7 @@ private struct ChatPanel: View {
                 }
             } else {
                 Text("Ask Cutmark about this video.").font(Theme.display(22)).foregroundStyle(Theme.ink)
-                Text("It runs \(chat.agent.name), like your terminal, and it knows this session.")
+                Text("Work on your script, scenes and takes in this session.")
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
                 VStack(alignment: .leading, spacing: 6) {
                     if openComments > 0 { suggestion(commentsAsk, commentsLabel) }

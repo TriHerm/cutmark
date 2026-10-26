@@ -30,6 +30,8 @@ struct ScriptScenes: View {
     @Environment(AppModel.self) private var app
     @Environment(\.paneShown) private var shown
     @State private var lastFocused: String?
+    @State private var showVisuals = false
+    @AppStorage("visualPreviewRequest") private var visualRequest = 0
     var doc: SessionDoc
     var board: Storyboard
     var jump: (NSRange) -> Void
@@ -45,8 +47,13 @@ struct ScriptScenes: View {
                 Text("SCENES").font(Theme.sans(10, .bold)).tracking(1).foregroundStyle(Theme.muted)
                 Text("\(board.shots.count)").font(Theme.mono(10)).foregroundStyle(Theme.faint)
                 Spacer()
-                Button("Open storyboard") { SessionMode.set(.storyboard) }
+                Button("Visual previews") { showVisuals = true }
                     .buttonStyle(.plain).font(Theme.sans(11)).foregroundStyle(Theme.muted)
+                    .cutmarkPopover(isPresented: $showVisuals) {
+                        StoryboardPane(doc: doc, onEditScript: { showVisuals = false; SessionMode.set(.write) })
+                            .environment(app).environment(\.paneShown, true)
+                            .frame(width: 820, height: 600)
+                    }
             }
             ScrollViewReader { proxy in
                 ScrollView(.horizontal) {
@@ -105,8 +112,11 @@ struct ScriptScenes: View {
         .background(Theme.canvas)
         .overlay(alignment: .bottom) { Rule() }
         .disabled(app.isRecording)
-        .onAppear { jumpIfChanged() }
-        .onChange(of: shown) { _, on in if on { jumpIfChanged() } }
+        .onAppear { jumpIfChanged(); openRequestedVisuals() }
+        .onChange(of: shown) { _, on in if on { jumpIfChanged(); openRequestedVisuals() } }
+        .onChange(of: shown) { _, on in if !on { showVisuals = false } }
+        .onChange(of: doc.focusedSceneID) { jumpIfChanged() }
+        .onChange(of: visualRequest) { if shown { showVisuals = true } }
         .onChange(of: doc.activeDraft) { lastFocused = nil; jumpIfChanged() }
     }
 
@@ -114,5 +124,9 @@ struct ScriptScenes: View {
         guard shown, let scene = selected, scene.id != lastFocused else { return }
         if let range = matches[scene.id] { jump(range) }
         lastFocused = scene.id
+    }
+
+    private func openRequestedVisuals() {
+        if shown && UserDefaults.standard.string(forKey: "rightTab") == SessionMode.storyboard.rawValue { showVisuals = true }
     }
 }
