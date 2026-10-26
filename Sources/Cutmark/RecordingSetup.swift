@@ -60,7 +60,12 @@ struct RecordingSetupPanel: View {
                 deviceID: camera.audioID, monitoring: !camera.paused && !camera.held)
             row("internaldrive", "Save location", doc.url.lastPathComponent)
             Text(space).font(Theme.sans(11)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
-            Button { inputs = true; Task { await screen.refreshCaptureSources(requestPermission: true) } } label: {
+            Button {
+                inputs = true
+                if app.mode.recordsScreen {
+                    Task { await screen.refreshCaptureSources(requestPermission: true) }
+                }
+            } label: {
                 Label("Change recording inputs", systemImage: "slider.horizontal.3")
             }
             .buttonStyle(AccentButtonStyle(kind: .quiet))
