@@ -115,6 +115,47 @@ struct QuickPlanTests {
         #expect(try Data(contentsOf: doc.variantsDir) == Data("file blocks directory".utf8))
     }
 
+    private func renderedCard(_ host: NSView) throws -> Data {
+        host.layoutSubtreeIfNeeded()
+        let rep = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: rep)
+        return try #require(rep.representation(using: .png, properties: [:]))
+    }
+
+    @Test func anExternalTranscriptRefreshesTheOpenHandoffCard() async throws {
+        let (root, app, doc) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try take(doc)
+        let file = try #require(TakePlan.voiceFile(doc, number: 1))
+        try FileManager.default.removeItem(at: Transcript.file(for: file))
+        let host = NSHostingView(rootView: TakePlanCard(doc: doc, number: 1).environment(app).frame(width: 430, height: 260))
+        let window = NSWindow(contentRect: NSRect(x: -3000, y: -3000, width: 430, height: 260), styleMask: .borderless, backing: .buffered, defer: false)
+        window.contentView = host; host.layoutSubtreeIfNeeded()
+        defer { window.orderOut(nil) }
+        var before = try renderedCard(host), stable = 0
+        var deadline = Date().addingTimeInterval(3)
+        while stable < 3 && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+            let next = try renderedCard(host)
+            stable = next == before ? stable + 1 : 0
+            before = next
+        }
+        #expect(stable == 3)
+        try Transcript.write([Word(word: "The prepared transcript.", start: 0, end: 2)], source: "external fixture", for: file)
+        NotificationCenter.default.post(name: .cutmarkFilesChanged, object: [Transcript.file(for: file).path])
+        deadline = Date().addingTimeInterval(3)
+        var after = try renderedCard(host)
+        while after == before && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+            after = try renderedCard(host)
+        }
+        #expect(after != before, "the mounted card must show the transcript handoff without reopening")
+        if let directory = ProcessInfo.processInfo.environment["CUTMARK_SNAPSHOT"] {
+            try before.write(to: URL(fileURLWithPath: directory).appending(path: "transcript-before-external-write.png"))
+            try after.write(to: URL(fileURLWithPath: directory).appending(path: "transcript-after-external-write.png"))
+        }
+    }
+
     @Test func recordSceneLeavesQuickTakeAndUsesTheSelectedScene() throws {
         let (root, app, doc) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

@@ -137,6 +137,7 @@ struct TakePlanCard: View {
     @State private var text: String?
     @State private var failure: String?
     @State private var setup = false
+    @State private var filesVersion = 0
     private var voice: URL? { TakePlan.voiceFile(doc, number: number) }
 
     var body: some View {
@@ -162,7 +163,8 @@ struct TakePlanCard: View {
         .padding(16).frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.canvas, in: RoundedRectangle(cornerRadius: 12))
         .disabled(app.isRecording)
-        .task(id: "\(Transcripts.shared.version)-\(voice?.path ?? "")") {
+        .onFilesChanged(in: doc.url) { filesVersion += 1 }
+        .task(id: "\(Transcripts.shared.version)-\(filesVersion)-\(voice?.path ?? "")") {
             let file = voice
             text = await Task.detached(priority: .utility) { file.flatMap { Transcript.text(for: $0) } }.value
         }
