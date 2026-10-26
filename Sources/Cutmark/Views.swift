@@ -110,8 +110,10 @@ struct CutmarkApp: App {
                 Button("Play / Pause Script") { app.scrolling.toggle() }.keyboardShortcut("p")
                     .disabled(!app.usesTeleprompter)
                 Button("Script to Top") { app.resetToken += 1 }.keyboardShortcut(.upArrow, modifiers: .command)
-                Toggle("Follow My Voice", isOn: Binding(get: { app.followVoice }, set: { app.followVoice = $0 }))
-                    .disabled(!app.usesTeleprompter)
+                ForEach(PrompterScrollMode.allCases) { mode in
+                    Toggle(mode.title, isOn: Binding(get: { app.prompterScrollMode == mode }, set: { on in if on { app.prompterScrollMode = mode } }))
+                        .disabled(!app.usesTeleprompter)
+                }
                 Divider()
                 Button("Previous Talking Point") { app.library.current?.advanceRecordingCue(-1) }
                     .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
@@ -3014,6 +3016,9 @@ struct ScriptPane: View {
     @State private var draft: ReviewPlayer.Draft?
     @State private var focused: String?
     @State private var reveal: (quote: String, token: Int)?
+    @State private var sceneReveal: (range: NSRange, token: Int)?
+    @State private var sceneJumpToken = 0
+    @State private var sceneBoard: Storyboard?
 
     /// The file of the script on screen, as comments name it.
     private var scriptFile: String { doc.activeDraft == "main" ? "script.md" : "variants/\(doc.activeDraft).md" }
@@ -3035,6 +3040,9 @@ struct ScriptPane: View {
             } else {
                 DraftBar(doc: doc, showHistory: $showHistory)
                 HookPicker(doc: doc)
+                if onRecord != nil, let board = sceneBoard, !board.shots.isEmpty {
+                    ScriptScenes(doc: doc, board: board, jump: jumpToScene).id(doc.url)
+                }
             }
             if inNotch {
                 NotchStandIn()
@@ -3053,14 +3061,14 @@ struct ScriptPane: View {
                          speed: app.speed, editable: !app.isRecording, resetToken: app.resetToken,
                          dark: app.lightsDown,
                          highlights: app.isRecording ? [] : scriptComments.filter(\.open).compactMap(\.quote),
-                         reveal: reveal,
+                         reveal: reveal, revealRange: sceneReveal,
                          onSelect: { selection = $0 },
                          onComment: startComment,
                          voice: app.following && !app.notchOpen ? app.voice : nil)
                 if doc.activeText.isEmpty {
                     // In the script's own font, size and place, so the cursor sits just before it.
                     // The text view starts at its inset (40, 36) plus 5 pt of line padding on each side.
-                    Text("Paste your script here.\nOr have Cutmark write script.md into the session folder.")
+                    Text("Write what you want to say.\nA rough first draft is enough.")
                         .font(Font(Theme.prompter(app.fontSize))).lineSpacing(app.fontSize * 0.35)
                         .foregroundStyle(Theme.faint)
                         .padding(.horizontal, 45).padding(.top, 36)
@@ -3088,6 +3096,7 @@ struct ScriptPane: View {
             .overlay(alignment: .bottomLeading) { commentCard.padding(12) }
             .animation(Theme.motion, value: selection.isEmpty)
             Rule()
+            if onRecord == nil { PrompterMotionControls() }
             // The full bar when it fits; half a screen wide, the two options go in a menu
             // (2026-10-02: the bar overflowed beside the chat, under a floating camera pill).
             ViewThatFits(in: .horizontal) {
@@ -3109,88 +3118,64 @@ struct ScriptPane: View {
         .environment(\.colorScheme, app.lightsDown ? .dark : scheme)
         .animation(.easeInOut(duration: 0.45), value: app.lightsDown)
         .sheet(isPresented: $showHistory) { HistorySheet(doc: doc) }
-        .onAppear { comments.load(doc.url) }
-        .onChange(of: doc.url) { comments.load(doc.url); draft = nil; focused = nil }
-        .onChange(of: doc.activeDraft) { draft = nil; focused = nil }
-        .onFilesChanged(in: doc.url) { if !app.isRecording { comments.load(doc.url) } }
+        .onAppear { comments.load(doc.url); reloadScenes() }
+        .onChange(of: doc.url) { comments.load(doc.url); draft = nil; focused = nil; sceneReveal = nil; reloadScenes() }
+        .onChange(of: doc.activeDraft) { draft = nil; focused = nil; sceneReveal = nil }
+        .onFilesChanged(in: doc.url) { if !app.isRecording { comments.load(doc.url); reloadScenes() } }
+    }
+
+    private func jumpToScene(_ range: NSRange) {
+        let text = doc.activeText
+        // Run after version-change handlers; an older selection must not land in a new draft.
+        DispatchQueue.main.async {
+            guard (app.library.current == nil || app.library.current === doc), doc.activeText == text else { return }
+            sceneJumpToken += 1
+            sceneReveal = (range, sceneJumpToken)
+        }
+    }
+
+    private func reloadScenes() {
+        guard onRecord != nil else { return }
+        let next = Storyboard.read(doc.url)
+        if next != sceneBoard { sceneBoard = next }
+        if !(next?.shots.contains { $0.id == doc.focusedSceneID } ?? false) {
+            doc.focusedSceneID = next?.shots.first?.id
+        }
     }
 
     private func controls(compact: Bool) -> some View {
         HStack(spacing: 8) {
             if let onRecord {
-                Button(action: onRecord) {
-                    Label("Record", systemImage: "record.circle").labelStyle(.titleAndIcon).padding(.horizontal, 6).frame(height: 28)
-                }
-                .buttonStyle(PillGhostStyle())
-                .help("Open Record: the camera, this script as the prompter, and the takes (⌘1)")
-            }
-            Button { app.scrolling.toggle() } label: {
-                Image(systemName: app.scrolling ? "pause.fill" : "play.fill")
-                    .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
-                    .contentTransition(.symbolEffect(.replace))
-                    .frame(width: 30, height: 30)
-                    .background(Theme.accent, in: Circle())
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .help(app.following ? "Listen and follow your voice / stop (Space when not typing, ⌘P)"
-                                : "Play / pause (Space when not typing, ⌘P)")
-            Button { app.resetToken += 1 } label: {
-                Image(systemName: "arrow.up.to.line").frame(width: 28, height: 28)
-            }
-            .buttonStyle(PillGhostStyle())
-            .help("Back to top")
-            HStack(spacing: 7) {
-                Image(systemName: "tortoise").foregroundStyle(Theme.faint)
-                Slider(value: Binding(get: { app.speed }, set: { app.speed = $0 }), in: 5...200)
-                    .frame(width: compact ? 64 : 100)
-                Image(systemName: "hare").foregroundStyle(Theme.faint)
-            }
-            .padding(.horizontal, 10).frame(height: 28)
-            .background(Theme.hover, in: Capsule())
-            .opacity(app.following ? 0.45 : 1)
-            .help(app.following ? "Scroll speed, when the prompter does not follow your voice" : "Scroll speed")
-            if !compact {
-                ToggleChip(title: "Voice", icon: "waveform", on: Binding(get: { app.followVoice }, set: { app.followVoice = $0 }))
-                    .help(app.followVoice ? "Follows your voice: the text moves as you talk. Off: it scrolls at the set speed."
-                                          : "Follow your voice: the text moves as you talk")
-            }
-            Spacer(minLength: 6)
-            PrompterPlaces()
-            HStack(spacing: 0) {
+                Button(action: onRecord) { Label("Record video", systemImage: "record.circle") }
+                    .buttonStyle(AccentButtonStyle(kind: .solid))
+                    .help("Open Record for the full video (⌘1)")
+                Spacer(minLength: 6)
                 Button { app.fontSize = max(14, app.fontSize - 4) } label: {
                     Text("A").font(Theme.sans(11, .semibold)).frame(width: 26, height: 28)
-                }
-                .help("Smaller text")
-                Rectangle().fill(Theme.border).frame(width: 1, height: 14)
+                }.buttonStyle(PillGhostStyle()).help("Smaller text")
                 Button { app.fontSize = min(96, app.fontSize + 4) } label: {
                     Text("A").font(Theme.sans(15, .semibold)).frame(width: 26, height: 28)
-                }
-                .help("Larger text")
-            }
-            .buttonStyle(PillGhostStyle())
-            .background(Theme.hover, in: Capsule())
-            if compact {
-                let app = app
-                CutmarkMenuButton(help: "Voice follow, auto-scroll and countdown") {
-                    Image(systemName: "slider.horizontal.3")
-                } content: {
-                    // Checks that switch in place, as the toggles did.
-                    MenuButton("Follow my voice", icon: "waveform", checked: app.followVoice, keepsOpen: true) { app.followVoice.toggle() }
-                    MenuButton("Auto-scroll when recording starts", icon: "arrow.down", checked: app.autoScroll, keepsOpen: true) {
-                        app.autoScroll.toggle()
-                    }
-                    MenuButton("3s countdown", icon: "timer", checked: app.countdownOn, keepsOpen: true) { app.countdownOn.toggle() }
-                }
-                .fixedSize()
+                }.buttonStyle(PillGhostStyle()).help("Larger text")
             } else {
-                ToggleChip(title: "Auto-scroll", icon: "arrow.down", on: Binding(get: { app.autoScroll }, set: { app.autoScroll = $0 }))
-                    .help("Start scrolling when recording starts")
-                ToggleChip(title: "Countdown", icon: "timer", on: Binding(get: { app.countdownOn }, set: { app.countdownOn = $0 }))
-                    .help("Count down 3, 2, 1 before the take starts")
+                Button { app.scrolling.toggle() } label: {
+                    Image(systemName: app.scrolling ? "pause.fill" : "play.fill")
+                        .font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
+                        .frame(width: 30, height: 30).background(Theme.accent, in: Circle())
+                }.buttonStyle(.plain)
+                    .help(app.following ? "Listen and follow your voice / stop (⌘P)" : "Start / pause automatic scrolling (⌘P)")
+                Button { app.resetToken += 1 } label: { Image(systemName: "arrow.up.to.line").frame(width: 28, height: 28) }
+                    .buttonStyle(PillGhostStyle()).help("Back to top")
+                Spacer(minLength: 6)
+                PrompterPlaces()
+                CutmarkMenuButton(help: "Prompter options") { Image(systemName: "slider.horizontal.3") } content: {
+                    MenuButton("Start with recording", icon: "record.circle", checked: app.autoScroll, keepsOpen: true) { app.autoScroll.toggle() }
+                    MenuButton("3-second countdown", icon: "timer", checked: app.countdownOn, keepsOpen: true) { app.countdownOn.toggle() }
+                    MenuDivider()
+                    MenuButton("Smaller text", icon: "textformat.size.smaller", keepsOpen: true) { app.fontSize = max(14, app.fontSize - 4) }
+                    MenuButton("Larger text", icon: "textformat.size.larger", keepsOpen: true) { app.fontSize = min(96, app.fontSize + 4) }
+                }
             }
-        }
-        .fixedSize(horizontal: false, vertical: true)
+        }.fixedSize(horizontal: false, vertical: true)
     }
 
     private func startComment() {
@@ -3267,7 +3252,7 @@ struct NotchStandIn: View {
             .frame(width: 180, height: 62)
             VStack(spacing: 6) {
                 Text("Your script is in the notch").font(Theme.sans(18, .semibold)).foregroundStyle(Theme.ink)
-                Text("Read it right under your camera. Press play and talk, and it follows your voice.")
+                Text("Read it right under your camera. Choose how it moves, then press play.")
                     .font(Theme.sans(13)).foregroundStyle(Theme.muted)
                     .multilineTextAlignment(.center).frame(maxWidth: 300)
             }
@@ -3284,6 +3269,7 @@ struct NotchStandIn: View {
             }
             .buttonStyle(.plain)
             .help("Start or stop a take: camera and mic")
+            PrompterMotionControls().frame(maxWidth: 320)
             HStack(spacing: 8) {
                 Button { app.scrolling.toggle() } label: {
                     Label(app.scrolling ? (app.following ? "Stop listening" : "Pause") : (app.following ? "Listen" : "Scroll"),
@@ -3293,8 +3279,6 @@ struct NotchStandIn: View {
                 .buttonStyle(PillGhostStyle())
                 .background(Theme.hover, in: Capsule())
                 .help("Start or stop the script in the notch")
-                ToggleChip(title: "Voice", icon: "waveform", on: Binding(get: { app.followVoice }, set: { app.followVoice = $0 }))
-                    .help("On: the text follows your voice. Off: it scrolls at a set speed.")
                 Button { app.resetToken += 1 } label: {
                     Image(systemName: "arrow.up.to.line").frame(width: 28, height: 28)
                 }
@@ -3443,18 +3427,26 @@ struct DraftBar: View {
         let _ = Perf.body("DraftBar")
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        chip("main", "Main", author: "", note: "The main script")
-                        ForEach(doc.variants) { v in chip(v.slug, v.name, author: v.author, note: v.note) }
-                        Button {
-                            doc.newVariant(name: "Variant \(doc.variants.count + 1)", text: doc.activeText)
-                        } label: { Image(systemName: "plus").padding(5).foregroundStyle(Theme.muted) }
-                        .buttonStyle(.borderless)
-                        .help("New variant (copy of what you see)")
+                let current = doc.variants.first { $0.slug == doc.activeDraft }
+                chip(doc.activeDraft, doc.activeDraft == "main" ? "Main script" : doc.draftName(doc.activeDraft),
+                     author: current?.author ?? "", note: current?.note ?? "")
+                CutmarkMenuButton(help: "Switch script version or create an alternative") {
+                    Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold))
+                } content: {
+                    MenuLabel("Script version")
+                    MenuButton("Main script", icon: "doc.text", checked: doc.activeDraft == "main") { doc.activeDraft = "main" }
+                    for v in doc.variants {
+                        MenuButton(v.name, icon: "doc.on.doc", checked: doc.activeDraft == v.slug) { doc.activeDraft = v.slug }
                     }
-                    .padding(.vertical, 9)
+                    MenuDivider()
+                    MenuButton("New alternative", icon: "plus") {
+                        doc.newVariant(name: "Alternative \(doc.variants.count + 1)", text: doc.activeText)
+                    }
+                    MenuGroup("Manage this version", icon: "ellipsis") {
+                        versionActions(doc.activeDraft, doc.draftName(doc.activeDraft))
+                    }
                 }
+                Spacer(minLength: 8)
                 Button { showHistory = true } label: {
                     Label("\(doc.historyCount)", systemImage: "clock.arrow.circlepath")
                         .font(Theme.mono(11, .medium)).foregroundStyle(Theme.muted)
@@ -3462,7 +3454,7 @@ struct DraftBar: View {
                 .buttonStyle(.borderless)
                 .help("Script history")
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 14).padding(.vertical, 8)
             if doc.activeDraft != "main", let v = doc.variants.first(where: { $0.slug == doc.activeDraft }) {
                 HStack(spacing: 8) {
                     Image(systemName: v.author == "claude" ? "sparkles" : "person.fill")
@@ -3512,16 +3504,19 @@ struct DraftBar: View {
         .gesture(TapGesture(count: 2).onEnded { startRename(slug, name) })
         .simultaneousGesture(TapGesture().onEnded { if renaming != slug && doc.activeDraft != slug { doc.activeDraft = slug } })
         .help(slug == "main" ? "Main script" : "\(note.isEmpty ? name : note) · double-click to rename")
-        .cutmarkContextMenu { [doc] in
-            MenuButton(favorite ? "Remove favorite" : "Mark as favorite", icon: favorite ? "star.slash" : "star") {
-                doc.toggleFavorite(slug)
-            }
-            if slug != "main" {
-                MenuButton("Rename…", icon: "pencil") { startRename(slug, name) }
-                MenuButton("Use as main script", icon: "arrow.up.doc") { doc.promote(slug) }
-                MenuDivider()
-                MenuButton("Delete variant", icon: "trash", danger: true) { doc.deleteVariant(slug) }
-            }
+        .cutmarkContextMenu { versionActions(slug, name) }
+    }
+
+    @MenuBuilder private func versionActions(_ slug: String, _ name: String) -> [MenuItem] {
+        let favorite = doc.meta.favorite == slug
+        MenuButton(favorite ? "Remove favorite" : "Mark as favorite", icon: favorite ? "star.slash" : "star") {
+            doc.toggleFavorite(slug)
+        }
+        if slug != "main" {
+            MenuButton("Rename…", icon: "pencil") { startRename(slug, name) }
+            MenuButton("Use as main script", icon: "arrow.up.doc") { doc.promote(slug) }
+            MenuDivider()
+            MenuButton("Delete variant", icon: "trash", danger: true) { doc.deleteVariant(slug) }
         }
     }
 
@@ -3730,6 +3725,7 @@ struct Prompter: NSViewRepresentable {
     var highlights: [String] = []
     /// Bump with a quote to select and show it.
     var reveal: (quote: String, token: Int)? = nil
+    var revealRange: (range: NSRange, token: Int)? = nil
     var onSelect: (String) -> Void = { _ in }
     var onComment: () -> Void = {}
     /// Voice follow: keeps the next word to say on the reading line and dims the words said.
@@ -3821,6 +3817,24 @@ struct Prompter: NSViewRepresentable {
         c.setScrolling(scrolling && voice == nil, speed: speed)
         c.follow(tv)
         c.highlight(tv, highlights)
+        if let target = revealRange, target.token != c.lastSceneReveal {
+            c.lastSceneReveal = target.token
+            if target.range.location != NSNotFound, target.range.location >= 0,
+               NSMaxRange(target.range) <= (tv.string as NSString).length {
+                tv.setSelectedRange(target.range)
+                tv.scrollRangeToVisible(target.range)
+                if let scroll = c.scroll, let layout = tv.layoutManager, let box = tv.textContainer {
+                    layout.ensureLayout(for: box)
+                    let glyphs = layout.glyphRange(forCharacterRange: target.range, actualCharacterRange: nil)
+                    let rect = layout.boundingRect(forGlyphRange: glyphs, in: box)
+                    let maxY = max(0, tv.frame.height - scroll.contentView.bounds.height)
+                    let y = min(maxY, max(0, rect.minY + tv.textContainerInset.height - 24))
+                    scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                }
+                tv.showFindIndicator(for: target.range)
+            }
+        }
         if let reveal, reveal.token != c.lastReveal {
             c.lastReveal = reveal.token
             let r = (tv.string as NSString).range(of: reveal.quote)
@@ -3835,6 +3849,7 @@ struct Prompter: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: Prompter
         weak var scroll: NSScrollView?
+        var lastSceneReveal = 0
         var lastReset: Int
         var lastKey: String
         var fontApplied: Double = 0

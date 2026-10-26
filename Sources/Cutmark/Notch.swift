@@ -283,7 +283,7 @@ struct NotchView: View {
     static let introKey = "notchIntroStep"
     static let intro: [(icon: String, title: String, text: String, buttons: Set<String>)] = [
         ("eye", "Look here while you talk", "Your script sits right under the camera, so your eyes stay on the lens.", []),
-        ("waveform", "Press ▶ and just talk", "The text moves with your voice. There is no speed to set.", ["play", "voice"]),
+        ("waveform", "Choose how the script moves", "Voice follows your words. Automatic scrolls at a steady speed. Press ▶ when you are ready.", ["play", "voice"]),
         ("record.circle", "Press ● to record a take", "Point at any button to see what it does.", ["record"]),
     ]
     private var introOn: Bool { app.usesTeleprompter && introStep < Self.intro.count }
@@ -419,24 +419,33 @@ struct NotchView: View {
                                  : (app.scrolling ? "Pause" : "Start scrolling"), id: "play") {
                 app.scrolling.toggle()
             }
-            button("waveform", app.followVoice ? "Voice follow is on. Click to scroll at a set speed." : "Voice follow is off. Click to follow your voice.",
-                   on: app.followVoice, id: "voice") { app.followVoice.toggle() }
+            PrompterModePicker(compact: true)
+                .opacity(dim("voice"))
+                .overlay { if ring("voice") { RoundedRectangle(cornerRadius: 9).strokeBorder(Theme.accent, lineWidth: 2) } }
             button("arrow.up.to.line", "Back to the top") { app.resetToken += 1 }
-            let sizes = NotchPanel.fontSizes
-            button("textformat.size.smaller", fontSize <= sizes.lowerBound ? "Smaller text (this is the smallest)" : "Smaller text") {
-                fontSize = max(sizes.lowerBound, fontSize - 2)
+            CutmarkMenuButton(help: "Text size, panel height and automatic speed") {
+                Image(systemName: "slider.horizontal.3").font(.system(size: 12, weight: .semibold))
+                    .frame(width: 26, height: 26).foregroundStyle(.white.opacity(0.75))
+            } content: {
+                if app.prompterScrollMode == .automatic {
+                    MenuLabel("Automatic speed")
+                    MenuView("speed") {
+                        Slider(value: Binding(get: { app.speed }, set: { app.speed = $0 }), in: 5...200).frame(width: 180)
+                            .accessibilityLabel("Automatic scroll speed")
+                    }
+                    MenuDivider()
+                }
+                MenuButton("Smaller text", icon: "textformat.size.smaller", enabled: fontSize > NotchPanel.fontSizes.lowerBound, keepsOpen: true) {
+                    fontSize = max(NotchPanel.fontSizes.lowerBound, fontSize - 2)
+                }
+                MenuButton("Larger text", icon: "textformat.size.larger", enabled: fontSize < NotchPanel.fontSizes.upperBound, keepsOpen: true) {
+                    fontSize = min(NotchPanel.fontSizes.upperBound, fontSize + 2)
+                }
+                MenuButton("Fewer lines", icon: "rectangle.compress.vertical", enabled: lines > 2, keepsOpen: true) { lines = max(2, lines - 1) }
+                MenuButton("More lines", icon: "rectangle.expand.vertical", enabled: lines < NotchPanel.maxLines, keepsOpen: true) { lines = min(NotchPanel.maxLines, lines + 1) }
+                MenuDivider()
+                MenuButton("Show quick tour", icon: "questionmark") { introStep = 0 }
             }
-            .disabled(fontSize <= sizes.lowerBound)
-            button("textformat.size.larger", fontSize >= sizes.upperBound ? "Bigger text (this is the biggest)" : "Bigger text") {
-                fontSize = min(sizes.upperBound, fontSize + 2)
-            }
-            .disabled(fontSize >= sizes.upperBound)
-            button("rectangle.compress.vertical", lines <= 2 ? "Fewer lines (2 is the least)" : "Fewer lines") { lines = max(2, lines - 1) }
-                .disabled(lines <= 2)
-            let most = NotchPanel.maxLines
-            button("rectangle.expand.vertical", lines >= most ? "More lines (\(most) is the most)" : "More lines") { lines = min(most, lines + 1) }
-                .disabled(lines >= most)
-            button("questionmark", "Take the quick tour again", id: "tour") { introStep = 0 }
             }
             button("xmark", "Close the panel (⌥⌘N)") { close() }
         }
@@ -548,36 +557,34 @@ struct PrompterWindowView: View {
     }
 
     private var toolbar: some View {
-        HStack(spacing: 6) {
-            chip("Mirror", "arrow.left.and.right.righttriangle.left.righttriangle.right", on: $mirror)
-                .help("Flip left to right, for a glass rig")
-            chip("Upside down", "arrow.up.and.down.righttriangle.up.righttriangle.down", on: $flip)
-                .help("Flip top to bottom, for rigs that need it")
-            Divider().frame(height: 16)
-            Button { size = max(24, size - 6) } label: { Image(systemName: "textformat.size.smaller").frame(width: 26, height: 24) }
-                .help("Smaller text")
-            Button { size = min(140, size + 6) } label: { Image(systemName: "textformat.size.larger").frame(width: 26, height: 24) }
-                .help("Larger text")
-            Divider().frame(height: 16)
+        HStack(spacing: 8) {
+            PrompterModePicker(compact: true)
             Button { app.scrolling.toggle() } label: {
                 Image(systemName: app.scrolling ? "pause.fill" : "play.fill").frame(width: 26, height: 24)
             }
-            .help(app.following ? "Listen and follow your voice" : "Play / pause")
+            .help(app.following ? "Listen and follow your voice" : "Start / pause automatic scrolling")
+            CutmarkMenuButton(help: "Mirror, text size and automatic speed") { Image(systemName: "slider.horizontal.3") } content: {
+                MenuButton("Mirror", icon: "arrow.left.and.right", checked: mirror, keepsOpen: true) { mirror.toggle() }
+                MenuButton("Upside down", icon: "arrow.up.and.down", checked: flip, keepsOpen: true) { flip.toggle() }
+                MenuDivider()
+                MenuButton("Smaller text", icon: "textformat.size.smaller", keepsOpen: true) { size = max(24, size - 6) }
+                MenuButton("Larger text", icon: "textformat.size.larger", keepsOpen: true) { size = min(140, size + 6) }
+                if app.prompterScrollMode == .automatic {
+                    MenuDivider()
+                    MenuLabel("Automatic speed")
+                    MenuView("speed") {
+                        Slider(value: Binding(get: { app.speed }, set: { app.speed = $0 }), in: 5...200).frame(width: 180)
+                            .accessibilityLabel("Automatic scroll speed")
+                    }
+                }
+            }
         }
-        .buttonStyle(.plain)
-        .font(Theme.sans(12, .medium))
-        .foregroundStyle(.white.opacity(0.85))
+        .buttonStyle(.plain).font(Theme.sans(12, .medium)).foregroundStyle(.white.opacity(0.85))
         .padding(.horizontal, 10).padding(.vertical, 5)
         .background(.white.opacity(0.12), in: Capsule())
     }
 
-    private func chip(_ title: String, _ icon: String, on: Binding<Bool>) -> some View {
-        Button { on.wrappedValue.toggle() } label: {
-            Label(title, systemImage: icon).labelStyle(.titleAndIcon)
-                .foregroundStyle(on.wrappedValue ? Theme.accent : .white.opacity(0.85))
-                .padding(.horizontal, 6).frame(height: 24)
-        }
-    }
+
 }
 
 /// How far the notch prompter reaches into the view it sits behind, so the view can keep clear

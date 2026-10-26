@@ -39,6 +39,7 @@ struct RecordingGuidePicker: View {
         CutmarkSwitch(selection: Binding(get: { app.guideMode }, set: { app.guideMode = $0 }),
                       title: { $0.title }, fill: true)
             .padding(12)
+            .accessibilityElement(children: .contain)
             .accessibilityLabel("Recording guide")
     }
 }

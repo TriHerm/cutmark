@@ -69,6 +69,11 @@ final class AppModel {
         get { access(keyPath: \.followVoice); return followVoiceStore }
         set { withMutation(keyPath: \.followVoice) { followVoiceStore = newValue }; syncVoice() }
     }
+    /// Two explicit choices, backed by the existing preference so upgrades keep the user's choice.
+    var prompterScrollMode: PrompterScrollMode {
+        get { followVoice ? .voice : .automatic }
+        set { followVoice = newValue == .voice }
+    }
     @ObservationIgnored @AppStorage("recordingGuideMode") private var guideModeStore: RecordingGuideMode = .teleprompter
     var guideMode: RecordingGuideMode {
         get { access(keyPath: \.guideMode); return guideModeStore }

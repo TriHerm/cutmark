@@ -338,6 +338,8 @@ final class SessionDoc {
     }
     var variants: [Variant] = []
     var activeDraft = "main"
+    /// Shared by Script and Storyboard; navigation only, never written into the script.
+    var focusedSceneID: String?
     private(set) var recordingNotes = ""
     private(set) var recordingNotesError: String?
     private(set) var recordingNotesUnsaved = false

@@ -63,6 +63,27 @@ struct StoryShot: Decodable, Equatable, Identifiable {
         variants = (try? c.decodeIfPresent([String].self, forKey: .variants)) ?? []
     }
 
+    static let noSketchKeyMessage = "No sketch: Cutmark has no image key."
+    var sketchNeedsSetup: Bool { image == nil && video == nil && error == Self.noSketchKeyMessage }
+    var kindTitle: String {
+        switch kind {
+        case "DESK", "WALK": return "On camera"
+        case "SCREEN": return "Screen recording"
+        case "B-ROLL": return "Supporting footage"
+        case "MG": return "On-screen visual"
+        case "END": return "Closing"
+        default: return "Scene"
+        }
+    }
+    var kindIcon: String {
+        switch kind {
+        case "SCREEN": return "display"
+        case "B-ROLL": return "film"
+        case "MG": return "square.3.layers.3d"
+        default: return "video"
+        }
+    }
+
     /// The variants to choose from, the one in the video among them: empty for a shot with one.
     var options: [String] {
         guard let video, !variants.isEmpty else { return [] }
@@ -136,6 +157,7 @@ struct Storyboard: Decodable, Equatable {
         + "never create a duplicate session. "
         + "then call set_storyboard with "
         + "the full ordered shots (hook, main, end), each with say, do, sketch and stable ids. "
+        + "For new scripts, keep spoken words in script.md and filming directions in each shot's do field. "
         + "Use cutmark-storyboard skill instructions if available, but do not require a Skill tool. "
         + "An image generation API key is optional: always save the text storyboard even when sketches "
         + "cannot be drawn. Report shot count and invite me to review the Storyboard tab."
@@ -189,7 +211,7 @@ struct Storyboard: Decodable, Equatable {
         // No image key: a shot with no sketch says so, instead of "Drawing…" forever.
         if b.nokey == true {
             for i in b.shots.indices where b.shots[i].image == nil && b.shots[i].video == nil && b.shots[i].error == nil {
-                b.shots[i].error = "No sketch: Cutmark has no image key."
+                b.shots[i].error = StoryShot.noSketchKeyMessage
             }
         }
         // Hook, main, end, each in the order written.
@@ -243,10 +265,10 @@ struct NoSketchKeyCard: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: "key").font(.system(size: 14)).foregroundStyle(Theme.warn).padding(.top, 2)
+            Image(systemName: "pencil.and.outline").font(.system(size: 14)).foregroundStyle(Theme.accent).padding(.top, 2)
             VStack(alignment: .leading, spacing: 4) {
-                Text("No sketches yet").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
-                Text("Your shots and script are saved. To draw optional sketches, add a Gemini, OpenAI or Replicate image key, then click Draw.")
+                Text("Sketches are optional").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
+                Text("You can record from your script now. Add an image key only if you want preview sketches.")
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 12)
@@ -294,7 +316,11 @@ struct StoryboardPane: View {
     @State private var board: Storyboard?
     @State private var stamp: Date?
     @State private var images: [String: NSImage] = [:]
-    @State private var picked: String?
+    @State private var showSketchOptions = false
+    private var picked: String? {
+        get { doc.focusedSceneID }
+        nonmutating set { doc.focusedSceneID = newValue }
+    }
     /// The variant shown per shot while the user tries it, by shot id. The video keeps its own until he picks.
     @State private var trying: [String: String] = [:]
     @StateObject private var comments = CommentStore()
@@ -324,9 +350,6 @@ struct StoryboardPane: View {
                 let shot = current(board)
                 VStack(alignment: .leading, spacing: 0) {
                     header(board)
-                    if board.nokey == true {
-                        NoSketchKeyCard(session: doc.url).transition(.blurReplace)
-                    }
                     strip(board, shot: shot)
                     if let shot {
                         let i = board.shots.firstIndex(of: shot) ?? 0
@@ -350,7 +373,7 @@ struct StoryboardPane: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: doc.url) {
             guard !still else { return }
-            stamp = nil; board = nil; images = [:]; picked = nil; trying = [:]
+            stamp = nil; board = nil; images = [:]; trying = [:]
             if shown { await reload(); comments.load(doc.url) }
         }
         // Sketches land one by one: a stat every 1.5 s while some are still drawing. The loop
@@ -403,7 +426,7 @@ struct StoryboardPane: View {
         let drawing = b.shots.filter { $0.image == nil && $0.video == nil && $0.error == nil }.count
         let done = b.shots.filter { takes[$0.id] != nil }.count
         return HStack(spacing: 10) {
-            Text("\(b.shots.count) shots").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
+            Text("\(b.shots.count) scenes").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.ink)
             Text("·").foregroundStyle(Theme.faint)
             Text("about \(Storyboard.clock(b.total))").font(Theme.sans(13)).foregroundStyle(Theme.muted)
             if done > 0 {
@@ -416,6 +439,15 @@ struct StoryboardPane: View {
                     .font(Theme.sans(12)).foregroundStyle(Theme.muted)
             }
             Spacer()
+            Button("Edit script") { SessionMode.set(.write) }
+                .buttonStyle(.plain).font(Theme.sans(11.5)).foregroundStyle(Theme.accent)
+            if b.nokey == true {
+                Button("Sketches (optional)") { showSketchOptions = true }
+                    .buttonStyle(.plain).font(Theme.sans(11.5)).foregroundStyle(Theme.muted)
+                    .cutmarkPopover(isPresented: $showSketchOptions) {
+                        NoSketchKeyCard(session: doc.url).frame(width: 520).padding(.top, 12)
+                    }
+            }
             Button { NSWorkspace.shared.openSoon(Storyboard.folder(doc.url)) } label: {
                 Image(systemName: "folder").font(.system(size: 13))
             }
@@ -482,14 +514,14 @@ struct StoryboardPane: View {
         VStack(spacing: 12) {
             Image(systemName: "rectangle.split.3x1").font(.system(size: 30)).foregroundStyle(Theme.faint)
             Text("No storyboard yet").font(Theme.sans(15, .semibold)).foregroundStyle(Theme.ink)
-            Text("Cutmark writes the script and sketches each shot,\nso you see how to film it before you start.")
+            Text("You can record your idea now.\nAdd scenes when you want a plan for what to say and film.")
                 .font(Theme.sans(12.5)).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
             Button("Storyboard this video") {
                 app.chats.chat(doc.url).send(Storyboard.request,
                                              title: doc.meta.title, onStage: nil)
                 app.chats.open = true
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(AccentButtonStyle(kind: .solid))
             .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -511,6 +543,9 @@ struct StoryboardPane: View {
             return (b, new)
         }.value
         board = b
+        if let b, !b.shots.contains(where: { $0.id == doc.focusedSceneID }) {
+            doc.focusedSceneID = current(b)?.id
+        }
         images.merge(new) { $1 }
     }
 
@@ -632,6 +667,11 @@ private struct ShotThumb: View {
             shape.fill(Theme.paper)
             if let img = image ?? poster ?? shot.video.flatMap({ StoryShot.cachedPoster(doc.url.appending(path: $0)) }) {
                 Image(nsImage: img).resizable().scaledToFill()
+            } else if shot.sketchNeedsSetup {
+                VStack(spacing: 5) {
+                    Image(systemName: shot.kindIcon).font(.system(size: 15)).foregroundStyle(Theme.muted)
+                    Text(shot.section.title).font(Theme.sans(9.5, .medium)).foregroundStyle(Theme.faint)
+                }
             } else if shot.error != nil {
                 Image(systemName: "exclamationmark.triangle").font(.system(size: 11)).foregroundStyle(Theme.warn)
             } else {
@@ -746,7 +786,6 @@ private struct ShotDetail: View {
     var step: (Int) -> Void
     @State private var draft = ""
     @State private var showResolved = false
-    @State private var showHow = false
     @State private var poster: NSImage?
     /// Clips play with sound: The user turns it on once and it stays on (2026-10-04).
     @AppStorage("storyboardSound") private var sound = false
@@ -838,7 +877,7 @@ private struct ShotDetail: View {
             Text("\(shot.section.title) · \(number) of \(count)")
                 .font(Theme.sans(12, .medium)).foregroundStyle(Theme.muted)
                 .lineLimit(1).fixedSize()
-            KindChip(kind: shot.kind).fixedSize()
+            Text(shot.kindTitle).font(Theme.sans(11, .medium)).foregroundStyle(Theme.muted).fixedSize()
             Text("\(Storyboard.clock(start)) · \(Int(shot.length.rounded())) s")
                 .font(Theme.mono(11)).foregroundStyle(Theme.faint)
                 .lineLimit(1).fixedSize()
@@ -873,22 +912,10 @@ private struct ShotDetail: View {
     }
 
     private var how: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button { withAnimation(Theme.spring) { showHow.toggle() } } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
-                        .rotationEffect(.degrees(showHow ? 90 : 0))
-                    Text(StoryboardPane.howTitle(shot.kind)).font(Theme.sans(12, .medium))
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain).foregroundStyle(Theme.muted)
-            if showHow {
-                Text(shot.how).font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
-                    .lineSpacing(2).fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                    .transition(.opacity.combined(with: .offset(y: -4)))
-            }
+        VStack(alignment: .leading, spacing: 6) {
+            Text(StoryboardPane.howTitle(shot.kind)).font(Theme.sans(12, .semibold)).foregroundStyle(Theme.muted)
+            Text(shot.how).font(Theme.sans(13)).foregroundStyle(Theme.ink)
+                .lineSpacing(2).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
         }
     }
 
@@ -913,6 +940,14 @@ private struct ShotDetail: View {
                         Image(nsImage: image).resizable().scaledToFill()
                             .onTapGesture(count: 2) { if let n = shot.image { NSWorkspace.shared.openSoon(Storyboard.folder(doc.url).appending(path: n)) } }
                             .help(shot.sketch)
+                    } else if shot.sketchNeedsSetup {
+                        VStack(spacing: 14) {
+                            Image(systemName: shot.kindIcon).font(.system(size: 32)).foregroundStyle(Theme.accent)
+                            Text("Scene \(number)").font(Theme.sans(22, .semibold)).foregroundStyle(Theme.ink)
+                            Text(shot.kindTitle).font(Theme.sans(14)).foregroundStyle(Theme.muted)
+                            Text("Ready to record with your script.\nA sketch is optional.")
+                                .font(Theme.sans(12)).foregroundStyle(Theme.faint).multilineTextAlignment(.center)
+                        }.padding(20)
                     } else if let err = shot.error {
                         VStack(spacing: 8) {
                             Image(systemName: "exclamationmark.triangle").foregroundStyle(Theme.warn)
@@ -1073,16 +1108,12 @@ private struct ShotDetail: View {
     /// One red record dot next to the arrows (2026-10-04): the script column shows only this shot's lines.
     private var record: some View {
         Button { app.record(shot: shot) } label: {
-            Circle().fill(.white).frame(width: 10, height: 10)
-                .frame(width: 28, height: 28)
-                .background(Theme.danger, in: Circle())
-                .contentShape(Circle())
+            Label("Record scene", systemImage: "record.circle")
+                .font(Theme.sans(12, .semibold))
         }
-        .buttonStyle(PressStyle())
+        .buttonStyle(AccentButtonStyle(kind: .solid))
         .disabled(app.isRecording)
-        .opacity(app.isRecording ? 0.45 : 1)
-        .padding(.trailing, 6)
-        .help(takes.isEmpty ? "Record this shot" : "Record this shot again")
+        .help("Open Record for this scene. Start the take when you are ready.")
     }
 
     private var takeStrip: some View {

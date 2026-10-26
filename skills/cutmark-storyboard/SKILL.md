@@ -38,8 +38,9 @@ Done, Now and Next, including in the near-camera panel.
    session that already has takes, unless the user asks.
 2. **Script first.** Write `script.md` with `create_session` or `update_session` (give a short
    `note`). Short spoken sentences. The hook is the first paragraph. Aim for about 45–75 s unless
-   the user says otherwise. After each paragraph, add one direction line in brackets, for example
-   `[DESK, to lens. A stack of papers next to the laptop.]`.
+   the user says otherwise. For new scripts, keep only the words to say in `script.md`; put filming
+   directions in each shot's `do` field. Script shows those directions beside the scene, so the
+   teleprompter stays easy to read. Do not rewrite an existing script just to remove its directions.
    For several opening options, call `set_hooks` with `[{text, note}]`. Keep your best hook as the
    first paragraph of `script.md`.
 3. **Shots.** One shot per paragraph, sometimes two. Usually 6–12 shots in three sections. The
@@ -50,7 +51,8 @@ Done, Now and Next, including in the near-camera panel.
 4. **`set_storyboard`** with `session` and the full `shots` list. It returns at once. The sketches
    draw in the background (about 30 s each, a few at a time) and the tab fills in.
 5. **Reply** in two or three lines: the idea in one sentence, the shot count and the length, and
-   "Open the Storyboard tab". Do not list the shots in chat. The tab shows them.
+   "Open Script to review the scenes with your script, or Storyboard for the visual plan". Do not
+   list the shots in chat. Both tabs keep the same scene selection.
 
 ## A shot
 
