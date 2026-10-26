@@ -13590,6 +13590,38 @@ def t_render_timeline_request(a):
     return t_render_edit(render)
 
 
+def t_save_timeline_request(a):
+    """Native review's Save version button. The normal check and no-clobber gates still apply."""
+    if (not isinstance(a, dict) or set(a) != {"session", "render"} or
+            not isinstance(a.get("session"), str) or not a["session"] or
+            not isinstance(a.get("render"), str) or not re.fullmatch(r"[A-Za-z0-9_-]+", a["render"])):
+        raise ValueError("Give only a session and a finished render id.")
+    s = resolve_session(a["session"])
+    # Saving twice (or retrying after a lost response) selects the same immutable version.
+    def saved():
+        for versions in edit_versions(s).values():
+            for entry in versions.values():
+                if entry["recipe"] and entry["video"]:
+                    try:
+                        recipe = load_recipe(s, entry["recipe"]) or {}
+                    except ValueError:
+                        continue  # Unreadable unrelated metadata stays untouched.
+                    if recipe.get("render_id") == a["render"]:
+                        return {"edit": entry["video"]}
+    existing = saved()
+    if existing:
+        return existing
+    try:
+        return t_publish_edit({"session": s, "render": a["render"],
+                               "note": "Saved from the visual editor after review."})
+    except ValueError:
+        # A second review window may have saved while this call waited for the publish lock.
+        existing = saved()
+        if existing:
+            return existing
+        raise
+
+
 def recipe_short(r):
     """get_session's form: only the fields the agent sets, the cut as a count."""
     out = {k: r.get(k) for k in ("name", "edit", "note", "frame", "over", "music", "sfx", "steps", "cover", "loudness")}
@@ -15639,12 +15671,12 @@ if __name__ == "__main__":
         except (ValueError, KeyError) as e:
             res = {"error": str(e)}
         print(json.dumps(res))
-    elif sys.argv[1:2] == ["--timeline-render"]:  # Native editor: one checked, unpublished job.
+    elif sys.argv[1:2] in (["--timeline-render"], ["--timeline-save"]):  # Native editor, JSON over stdin.
         try:
             request = sys.stdin.read(1024 * 1024 + 1)
             if len(request) > 1024 * 1024:
                 raise ValueError("The timeline render request is too large.")
-            res = t_render_timeline_request(json.loads(request))
+            res = (t_save_timeline_request if sys.argv[1] == "--timeline-save" else t_render_timeline_request)(json.loads(request))
             print(json.dumps(res, allow_nan=False))
         except (ValueError, TypeError, KeyError, OSError) as e:
             print(json.dumps({"error": str(e)}))

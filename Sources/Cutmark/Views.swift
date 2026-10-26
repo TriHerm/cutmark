@@ -1197,6 +1197,7 @@ struct DetailView: View {
             if let doc = library.current {
                 SessionHeader(doc: doc)
                     .sheet(isPresented: Bindable(app).cleaningUp) { CleanupSheet(doc: doc) }
+                if app.phase == .idle { SessionJourneyBar(doc: doc).environment(app) }
             } else {
                 Color.clear.frame(height: Chrome.bar)
             }
@@ -2459,7 +2460,12 @@ struct TakeRow: View {
                 .cutmarkContextMenu { [trashRow] in
                     MenuButton("Open in QuickTime", icon: "play.rectangle") { NSWorkspace.shared.openSoon(url) }
                     MenuButton("Reveal in Finder", icon: "folder") { NSWorkspace.shared.revealSoon([url]) }
-                    MenuButton("Plan from this take…", icon: "text.bubble", enabled: !app.isRecording) { showPlan = true }
+                    MenuButton("Edit this take…", icon: "scissors", enabled: !app.isRecording) {
+                if let video = SessionJourney.load(session: doc.url, takes: takes).take {
+                    TimelineEditorWindow.shared.open(video: video, doc: doc, app: app)
+                }
+            }
+            MenuButton("Plan from this take…", icon: "text.bubble", enabled: !app.isRecording) { showPlan = true }
                     MenuDivider()
                     trashRow
                 }
@@ -2488,6 +2494,11 @@ struct TakeRow: View {
         .padding(.horizontal, 10).padding(.vertical, 6)
         .contentShape(Rectangle())
         .cutmarkContextMenu { [trashRow] in
+            MenuButton("Edit this take…", icon: "scissors", enabled: !app.isRecording) {
+                if let video = SessionJourney.load(session: doc.url, takes: takes).take {
+                    TimelineEditorWindow.shared.open(video: video, doc: doc, app: app)
+                }
+            }
             MenuButton("Plan from this take…", icon: "text.bubble", enabled: !app.isRecording) { showPlan = true }
             MenuDivider()
             trashRow

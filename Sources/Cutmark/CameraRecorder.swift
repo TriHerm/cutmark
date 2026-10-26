@@ -4,6 +4,9 @@ import Combine
 /// Mic level in its own object: views that watch the camera do not redraw 12 times a second.
 final class MicMeter: ObservableObject {
     @Published var level: Float = 0  // 0...1
+    @Published var lastSampleAt: Date?
+    @Published var lastSignalAt: Date?
+    @Published var sampleDeviceID: String?
 }
 
 enum Orientation: String, CaseIterable, Identifiable {
@@ -381,7 +384,12 @@ final class CameraRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecor
     private func pollLevel() {
         if !live { return }
         // averagePowerLevel is dB (-160...0). Map roughly -50dB...0dB to 0...1.
-        let db = output.connection(with: .audio)?.audioChannels.first?.averagePowerLevel ?? -160
+        guard let channel = output.connection(with: .audio)?.audioChannels.first else { return }
+        let db = channel.averagePowerLevel
+        meter.lastSampleAt = Date()
+        let device = audioInput?.device.uniqueID
+        if meter.sampleDeviceID != device { meter.lastSignalAt = nil; meter.sampleDeviceID = device }
+        if db > -45 { meter.lastSignalAt = meter.lastSampleAt }
         let v = max(0, min(1, (db + 50) / 50))
         let next = meter.level * 0.5 + v * 0.5
         if abs(next - meter.level) > 0.005 { meter.level = next }

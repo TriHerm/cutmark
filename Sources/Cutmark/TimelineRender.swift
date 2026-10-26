@@ -53,8 +53,25 @@ enum TimelineRender {
         return try await run(request: payload, script: script)
     }
 
+    /// The user has reviewed the finished movie. Save through the existing check/version gate;
+    /// never accept failed checks, replace an edit, or silently publish an unfinished render.
+    static func save(job: Job) async throws -> URL {
+        guard job.status == .done else { throw Failure.unavailable("The video is still being prepared.") }
+        guard let script = Bundle.main.url(forResource: "cutmark_mcp", withExtension: "py") else {
+            throw Failure.missingServer
+        }
+        let data = try JSONSerialization.data(withJSONObject: ["session": job.session.path, "render": job.id])
+        let relative = try await run(request: data, script: script, command: "--timeline-save", responseKey: "edit")
+        guard let url = SessionJourney.containedVideo(relative, session: job.session),
+              relative.hasPrefix("edits/") else {
+            throw Failure.unavailable("The saved video could not be found. Your recording is still safe.")
+        }
+        return url
+    }
+
     /// Separate for testing broken pipes, nonzero exits and stalled helpers without a render.
-    static func run(request payload: Data, script: URL, timeoutSeconds: Double = 30) async throws -> String {
+    static func run(request payload: Data, script: URL, timeoutSeconds: Double = 30,
+                    command: String = "--timeline-render", responseKey: String = "job") async throws -> String {
         return try await Task.detached(priority: .userInitiated) {
             // Passing a read-only file as stdin avoids SIGPIPE if Python exits before consuming
             // the request. A private temporary folder prevents other users reading the recipe.
@@ -87,7 +104,7 @@ enum TimelineRender {
             defer { try? output.close() }
             let process = Process()
             process.executableURL = URL(filePath: "/usr/bin/python3")
-            process.arguments = [script.path, "--timeline-render"]
+            process.arguments = [script.path, command]
             var env = ProcessInfo.processInfo.environment
             env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:\(Setup.localBin):" +
                 (env["PATH"] ?? "/usr/bin:/bin")
@@ -130,7 +147,7 @@ enum TimelineRender {
                 throw Failure.unavailable(error)
             }
             guard process.terminationStatus == 0,
-                  let job = response["job"] as? String, !job.isEmpty else {
+                  let job = response[responseKey] as? String, !job.isEmpty else {
                 throw Failure.unavailable("Cutmark could not start the render.")
             }
             return job

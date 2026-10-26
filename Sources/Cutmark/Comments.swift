@@ -817,9 +817,10 @@ struct PressScale: ButtonStyle {
 
 struct PlayerLayerView: NSViewRepresentable {
     let player: AVPlayer
+    var showsControls = false
     func makeNSView(context: Context) -> AVPlayerView {
         let v = AVPlayerView()
-        v.controlsStyle = .none
+        v.controlsStyle = showsControls ? .floating : .none
         v.player = player
         return v
     }

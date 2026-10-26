@@ -941,6 +941,46 @@ class Publish(Base):
         super().setUp()
         self.add_take()
 
+    def test_native_save_keeps_checked_version_and_is_idempotent(self):
+        rid = self.fake_render()
+        request = {"session": self.s, "render": rid}
+        result = t.t_save_timeline_request(request)
+        again = t.t_save_timeline_request(request)
+        self.assertEqual(result["edit"], again["edit"])
+        self.assertEqual(result["edit"], "edits/hook-v1.mp4")
+        self.assertTrue(os.path.isfile(os.path.join(self.s, result["edit"])))
+        self.assertTrue(os.path.isfile(os.path.join(self.s, "take-01-camera.mov")))
+        self.assertFalse(os.path.exists(os.path.join(self.s, "edits/hook-v2.mp4")))
+
+    def test_two_native_save_windows_keep_one_version(self):
+        rid = self.fake_render()
+        results, errors = [], []
+        def save():
+            try:
+                results.append(t.t_save_timeline_request({"session": self.s, "render": rid})["edit"])
+            except Exception as error:
+                errors.append(error)
+        threads = [threading.Thread(target=save) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertEqual(errors, [])
+        self.assertEqual(results, ["edits/hook-v1.mp4"] * 2)
+        self.assertFalse(os.path.exists(os.path.join(self.s, "edits/hook-v2.mp4")))
+
+    def test_native_save_cannot_accept_failed_checks_or_unfinished_renders(self):
+        rid = self.fake_render(passed=False)
+        with self.assertRaises(ValueError):
+            t.t_save_timeline_request({"session": self.s, "render": rid})
+        self.assertTrue(os.path.isfile(os.path.join(self.s, t.RENDERS, rid + ".mp4")))
+        for request in ({"session": self.s, "render": rid, "accept": [{"rule": "av_sync", "why": "skip"}]},
+                        {"session": self.s, "render": "../escape"},
+                        {"session": self.s, "render": "missing"}):
+            with self.assertRaises(ValueError):
+                t.t_save_timeline_request(request)
+        self.assertFalse(os.path.isdir(os.path.join(self.s, "edits")))
+
     def test_publish_writes_version_recipe_words_and_moves_the_check(self):
         rid = self.fake_render()
         t.save_check(self.s, os.path.join(t.RENDERS, rid + ".mp4"), {"v": 2, "mtime": 0, "results": []})

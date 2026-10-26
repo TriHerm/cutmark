@@ -69,6 +69,18 @@ struct TimelineRenderTests {
         }
     }
 
+    @Test func saveHelperUsesItsOwnCommandAndReadsTheSavedEditResponse() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "cutmark-save-helper-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = root.appending(path: "save.py")
+        let code = "import json,sys\nassert sys.argv[1] == '--timeline-save'\na=json.load(sys.stdin)\nassert set(a) == {'session','render'}\nprint(json.dumps({'edit':'edits/idea-v1.mp4'}))\n"
+        try Data(code.utf8).write(to: script)
+        let request = try JSONSerialization.data(withJSONObject: ["session": root.path, "render": "job-123"])
+        let result = try await TimelineRender.run(request: request, script: script, command: "--timeline-save", responseKey: "edit")
+        #expect(result == "edits/idea-v1.mp4")
+    }
+
     @Test func helperFailureReturnsErrorInsteadOfCrashing() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "cutmark-render-helper-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

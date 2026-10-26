@@ -198,7 +198,7 @@ final class TimelineEditorPlayback: ObservableObject {
 
 /// No false editing preview: the player is an AVMutableComposition built from the current draft,
 /// and its time ruler, selection and cuts use the exact same output timeline clock.
-private struct TimelineEditorWorkspace: View {
+struct TimelineEditorWorkspace: View {
     @Environment(AppModel.self) private var app
     let video: URL
     let doc: SessionDoc
@@ -213,11 +213,20 @@ private struct TimelineEditorWorkspace: View {
     @State private var zoomToFit = true
     @State private var problem: String?
     @State private var renderJob: String?
+    @State private var renderedRevision: Int?
     @State private var rendering = false
+    @State private var history = TimelineUndoHistory()
+    @State private var more = false
+    @State private var changes = false
+    @State private var review: Job?
     @State private var playheadDragStart: Double?
     @FocusState private var keyboardFocus: Bool
 
     private var duration: Double { draft?.duration ?? 0 }
+    private var currentRenderIsLive: Bool {
+        guard let renderJob else { return false }
+        return app.jobs.bySession[doc.url.standardizedFileURL]?.contains { $0.id == renderJob && $0.status.live } == true
+    }
 
     var body: some View {
         GeometryReader { window in
@@ -226,6 +235,7 @@ private struct TimelineEditorWorkspace: View {
                 Divider()
                 preview
                 clipContext
+                renderStatus
                 Divider()
                 editor.frame(height: TimelineCanvasLayout.editorHeight(windowHeight: window.size.height))
             }
@@ -283,7 +293,7 @@ private struct TimelineEditorWorkspace: View {
             switch press.characters {
             case "=": adjustZoom(1.18)
             case "-": adjustZoom(1 / 1.18)
-            case "z": undo()
+            case "z": if press.modifiers.contains(.shift) { redo() } else { undo() }
             case "e": render()
             default: return .ignored
             }
@@ -305,6 +315,7 @@ private struct TimelineEditorWorkspace: View {
         }
         .onChange(of: duration) { _, _ in if zoomToFit { fitTimeline() } }
         .onDisappear { playback.close(); media.cancel(); markers.clear() }
+        .sheet(item: $review) { job in TimelineResultReview(job: job).environment(app) }
     }
 
     private var header: some View {
@@ -322,13 +333,16 @@ private struct TimelineEditorWorkspace: View {
             }
             Spacer()
             if let draft {
-                Text("\(draft.segments.count) clips · \(SessionDoc.clock(draft.duration))")
+                Text("\(draft.segments.count) section\(draft.segments.count == 1 ? "" : "s") · \(SessionDoc.clock(draft.duration))")
                     .font(Theme.mono(11)).foregroundStyle(Theme.muted)
             }
-            Button("Reset") { reset() }.disabled(draft?.actions.isEmpty ?? true)
-                .buttonStyle(AccentButtonStyle(kind: .quiet))
-            Button(rendering ? "Starting render…" : "Render edit") { render() }
-                .disabled(rendering || draft == nil || (!((draft?.isRawTake) ?? false) && (draft?.actions.isEmpty ?? true)))
+            Button { changes = true } label: {
+                Label("Changes", systemImage: "clock.arrow.circlepath")
+            }
+            .buttonStyle(AccentButtonStyle(kind: .quiet))
+            .cutmarkPopover(isPresented: $changes) { changeList }
+            Button(rendering ? "Preparing…" : "Create video") { render() }
+                .disabled(rendering || currentRenderIsLive || draft == nil || (!((draft?.isRawTake) ?? false) && (draft?.actions.isEmpty ?? true)))
                 .buttonStyle(AccentButtonStyle(kind: .solid))
         }
         .padding(.horizontal, 14).frame(height: 50)
@@ -336,6 +350,10 @@ private struct TimelineEditorWorkspace: View {
 
     private var preview: some View {
         VStack(spacing: 0) {
+            if let draft, TimelinePlayback.limitation(draft: draft, session: doc.url) != nil {
+                Text("This preview shows your cuts. Effects and framing appear in the created video.")
+                    .font(Theme.sans(11)).foregroundStyle(Theme.muted).padding(.top, 8)
+            }
             GeometryReader { region in
                 ZStack {
                     Color.black
@@ -389,7 +407,7 @@ private struct TimelineEditorWorkspace: View {
         HStack(spacing: 12) {
             if let draft, draft.segments.indices.contains(selected) {
                 let segment = draft.segments[selected]
-                Label("Clip \(selected + 1)", systemImage: segment.kind == "screen" ? "display" : "video")
+                Label("Section \(selected + 1)", systemImage: segment.kind == "screen" ? "display" : "video")
                     .font(Theme.sans(11, .semibold))
                 Text("Take \(segment.take)").font(Theme.sans(11)).foregroundStyle(Theme.muted)
                 Text("\(formatTime(segment.start))–\(formatTime(segment.end))")
@@ -409,7 +427,7 @@ private struct TimelineEditorWorkspace: View {
                     .help("Inspect possible zooms; do not apply or publish them")
                 }
                 if !draft.actions.isEmpty {
-                    Label("Draft", systemImage: "checkmark.circle")
+                    Label("Saved", systemImage: "checkmark.circle")
                         .font(Theme.sans(10.5)).foregroundStyle(Theme.muted)
                         .help("Draft saved automatically. Source files are untouched.")
                 }
@@ -420,10 +438,6 @@ private struct TimelineEditorWorkspace: View {
             if let problem {
                 Text(problem).font(Theme.sans(10.5)).foregroundStyle(Theme.danger).lineLimit(1)
                     .help(problem)
-            } else if let renderJob {
-                Label("Render started · \(renderJob) · Review in Jobs", systemImage: "film.stack")
-                    .font(Theme.sans(10.5)).foregroundStyle(Theme.muted).lineLimit(1)
-                    .help("The render is unpublished. Review it from the session's Jobs row.")
             }
         }
         .padding(.horizontal, 14)
@@ -433,17 +447,30 @@ private struct TimelineEditorWorkspace: View {
 
     private var editor: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                editorTool("scissors", "Split · S") { Task { await split() } }
-                editorTool("arrow.left", "Move earlier") { move(-1) }
-                editorTool("arrow.right", "Move later") { move(1) }
-                editorTool("plus.square.on.square", "Duplicate") { apply(.init(op: "duplicate", index: selected)) }
-                editorTool("trash", "Remove") { apply(.init(op: "remove", index: selected)) }
+            HStack(spacing: 8) {
+                editorTool("scissors", "Split") { Task { await split() } }
+                    .help("Split at the red playhead · S")
+                editorTool("minus.circle", "Remove") { apply(.init(op: "remove", index: selected)) }
+                    .disabled((draft?.segments.count ?? 0) < 2)
+                    .help("Remove the selected section. Undo brings it back.")
                 Divider().frame(height: 18)
-                editorTool("arrow.uturn.backward", "Undo · ⌘Z") { undo() }
-                Spacer(minLength: 0)
-                Text("Space play · J/K/L · ←/→ frame")
-                    .font(Theme.sans(9.5)).foregroundStyle(Theme.faint).lineLimit(1)
+                editorTool("arrow.uturn.backward", "Undo") { undo() }
+                    .disabled(draft?.actions.isEmpty ?? true)
+                editorTool("arrow.uturn.forward", "Redo") { redo() }
+                    .disabled(history.redoActions.isEmpty)
+                Button { more = true } label: { Label("More", systemImage: "ellipsis") }
+                    .buttonStyle(.plain).font(Theme.sans(11))
+                    .cutmarkPopover(isPresented: $more) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Button("Move section earlier") { move(-1); more = false }.disabled(selected == 0)
+                            Button("Move section later") { move(1); more = false }
+                                .disabled(selected >= (draft?.segments.count ?? 0) - 1)
+                            Button("Duplicate section") { apply(.init(op: "duplicate", index: selected)); more = false }
+                            Text("Space to play · S to split · ⌘Z to undo")
+                                .font(Theme.sans(10)).foregroundStyle(Theme.muted)
+                        }.buttonStyle(.plain).font(Theme.sans(12)).padding(16)
+                    }
+                Spacer(minLength: 4)
                 Button("Fit") { fitTimeline() }
                     .buttonStyle(.plain)
                     .font(Theme.sans(10.5, .semibold))
@@ -462,6 +489,9 @@ private struct TimelineEditorWorkspace: View {
             }
             .padding(.horizontal, 12).frame(height: 40)
             .background(Theme.paper)
+            Text("Drag the ends to trim. Move the red line to Split, then select a section to Remove.")
+                .font(Theme.sans(11)).foregroundStyle(Theme.muted)
+                .padding(.horizontal, 14).padding(.vertical, 7)
             Divider()
             if let draft {
                 GeometryReader { viewport in
@@ -663,7 +693,7 @@ private struct TimelineEditorWorkspace: View {
 
     private func editorTool(_ symbol: String, _ title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 11, weight: .medium)).frame(width: 26, height: 26)
+            Label(title, systemImage: symbol).font(Theme.sans(11, .medium)).frame(height: 28)
         }
         .buttonStyle(.plain)
         .foregroundStyle(Theme.ink)
@@ -701,16 +731,17 @@ private struct TimelineEditorWorkspace: View {
     }
 
     private func apply(_ action: EditTimelineDraft.Action) {
-        guard var next = draft, next.apply(action) else {
+        var nextHistory = history
+        guard var next = draft, nextHistory.apply(action, to: &next) else {
             problem = "Invalid edit. Each clip must keep at least two frames."
             return
         }
         do {
             try next.save(video: video, session: doc.url)
             draft = next
+            history = nextHistory
             selected = min(selected, next.segments.count - 1)
             problem = nil
-            renderJob = nil
             revision += 1
         } catch { problem = "Could not save the draft: \(error.localizedDescription)" }
     }
@@ -774,40 +805,71 @@ private struct TimelineEditorWorkspace: View {
                               max(TimelineCanvasLayout.minimumScale, pixelsPerSecond * factor))
     }
 
-    private func undo() {
-        guard var previous = draft, previous.undoLast() else { return }
+    private func undo() { changeHistory(redo: false) }
+    private func redo() { changeHistory(redo: true) }
+
+    private func changeHistory(redo: Bool) {
+        guard var next = draft else { return }
+        var nextHistory = history
+        guard redo ? nextHistory.redo(&next) : nextHistory.undo(&next) else { return }
         do {
-            try previous.save(video: video, session: doc.url)
-            draft = previous
-            selected = min(selected, previous.segments.count - 1)
+            try next.save(video: video, session: doc.url)
+            draft = next; history = nextHistory
+            selected = min(selected, next.segments.count - 1)
             problem = nil
-            renderJob = nil
             revision += 1
-        } catch { problem = "Could not save undo: \(error.localizedDescription)" }
+        } catch { problem = "Could not save this change: \(error.localizedDescription)" }
     }
 
-    private func reset() {
-        guard let draft else { return }
-        let fresh = EditTimelineDraft(base: draft.base, fps: draft.fps, source: draft.source,
-                                      segments: draft.source)
-        EditTimelineDraft.clear(video: video, session: doc.url)
-        self.draft = fresh
-        selected = 0
-        playback.seek(0, duration: fresh.duration)
-        problem = nil
-        renderJob = nil
-        revision += 1
+    private var changeList: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Your changes").font(Theme.sans(14, .semibold))
+            Text("The original recording stays saved. Undo restores the last change, including removed sections.")
+                .font(Theme.sans(12)).foregroundStyle(Theme.muted).fixedSize(horizontal: false, vertical: true)
+            if let draft, !draft.actions.isEmpty {
+                ForEach(Array(draft.actions.suffix(6).enumerated()), id: \.offset) { _, action in
+                    Label(TimelineUndoHistory.title(action), systemImage: "checkmark").font(Theme.sans(12))
+                }
+                Button("Undo last change") { undo() }.buttonStyle(AccentButtonStyle(kind: .quiet))
+            } else {
+                Text("Drag a section’s ends to trim. Move the red line and choose Split, then Remove a section you don’t need.")
+                    .font(Theme.sans(12)).fixedSize(horizontal: false, vertical: true)
+            }
+        }.padding(18).frame(width: 300)
+    }
+
+    @ViewBuilder private var renderStatus: some View {
+        if let renderJob {
+            if let job = app.jobs.bySession[doc.url.standardizedFileURL]?.first(where: { $0.id == renderJob }) {
+                HStack(spacing: 10) {
+                    if job.status.live { ProgressView().controlSize(.small) }
+                    Text((renderedRevision == revision ? "" : "Earlier cut · ") + SessionJourney.jobTitle(job)).font(Theme.sans(12, .medium)).lineLimit(1)
+                    Spacer()
+                    if job.status == .done {
+                        Button("Review video") { playback.stop(); review = job }
+                            .buttonStyle(AccentButtonStyle(kind: .solid))
+                    } else if !job.status.live {
+                        Button("Try again") { render() }.buttonStyle(AccentButtonStyle(kind: .quiet))
+                    }
+                }.padding(.horizontal, 14).padding(.vertical, 8).background(Theme.paper)
+            } else {
+                Text("Preparing your video… You can keep editing while it runs.")
+                    .font(Theme.sans(12)).padding(10)
+            }
+        }
     }
 
     private func render() {
         guard let draft, !rendering else { return }
         rendering = true
+        renderedRevision = revision
         renderJob = nil
         problem = nil
         Task {
             defer { rendering = false }
             do {
                 renderJob = try await TimelineRender.start(draft: draft, session: doc.url)
+                app.jobs.reload(doc.url)
             } catch {
                 problem = error.localizedDescription
             }
