@@ -149,7 +149,7 @@ enum StyleLib {
 
     /// Compatibility hook for builds that carry styles in Resources/styles. Each is copied into the
     /// library once. A style of the same name that is already there stays as it is, and one you delete
-    /// does not come back: "seededStyles" remembers, per library folder. Current builds ship none.
+    /// does not come back: "seededStyles" remembers, per library folder. Starter styles ship with the app.
     /// Returns the names it copied.
     static let seededKey = "seededStyles"
 
@@ -504,7 +504,7 @@ struct StylesBoard: View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Styles").font(Theme.display(28)).foregroundStyle(Theme.ink)
-                Text("Each video picks its style on its Assets tab.")
+                Text("Choose a guide for your next edit. Set it from Edit → Style.")
                     .font(Theme.sans(12.5)).foregroundStyle(Theme.muted)
             }
             Spacer()
@@ -642,6 +642,7 @@ struct StylesBoard: View {
                     }
                     Spacer(minLength: 0)
                 }
+                Text(c.description).font(Theme.sans(12)).foregroundStyle(Theme.muted).lineLimit(3)
                 HStack(spacing: 8) {
                     if c.usedBy.isEmpty {
                         Text("Not used yet").font(Theme.sans(11.5)).foregroundStyle(Theme.faint)

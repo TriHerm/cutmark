@@ -25,7 +25,7 @@ struct QuickPlanTests {
     }
 
     @Test func planHasOneHeaderTabAndLegacyRoutesStillWork() {
-        #expect(SessionMode.tabs == [.write, .record, .assets, .post])
+        #expect(SessionMode.tabs == [.write, .record, .edit, .export])
         #expect(SessionMode.write.title == "Plan")
         #expect(SessionMode.storyboard.tab == .write)
         #expect(SessionMode(rawValue: "write") == .write && SessionMode(rawValue: "storyboard") == .storyboard)

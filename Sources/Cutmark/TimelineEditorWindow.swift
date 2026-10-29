@@ -207,6 +207,9 @@ struct TimelineEditorWorkspace: View {
     @StateObject private var markers = TimelineMarkerCache()
     @State private var draft: EditTimelineDraft?
     @State private var selected = 0
+    @State private var showInspector = true
+    @State private var compactInspector = false
+    @State private var phrases: [TimelineTranscript.Phrase] = []
     @State private var revision = 0
     @State private var pixelsPerSecond: Double = TimelineCanvasLayout.defaultScale
     @State private var timelineViewportWidth: CGFloat = 900
@@ -231,9 +234,15 @@ struct TimelineEditorWorkspace: View {
     var body: some View {
         GeometryReader { window in
             VStack(spacing: 0) {
-                header
+                header(width: window.size.width)
                 Divider()
-                preview
+                HStack(spacing: 0) {
+                    preview
+                    if showInspector && window.size.width >= 940 {
+                        Divider()
+                        inspector.frame(width: 280)
+                    }
+                }
                 clipContext
                 renderStatus
                 Divider()
@@ -311,6 +320,21 @@ struct TimelineEditorWorkspace: View {
         }
         .task(id: revision) {
             guard let draft else { return }
+            let session = doc.url
+            let lines = await Task.detached(priority: .utility) {
+                var words: [String: [Word]] = [:]
+                for segment in draft.segments {
+                    let key = "\(segment.take):\(segment.kind)"
+                    if words[key] == nil, let source = TimelineMedia.sourceURL(for: segment, session: session) {
+                        words[key] = Transcript.words(for: source) ?? []
+                    }
+                }
+                return TimelineTranscript.phrases(draft: draft, words: words)
+            }.value
+            guard !Task.isCancelled else { return }; phrases = lines
+        }
+        .task(id: revision) {
+            guard let draft else { return }
             await markers.load(draft: draft, session: doc.url)
         }
         .onChange(of: duration) { _, _ in if zoomToFit { fitTimeline() } }
@@ -318,7 +342,7 @@ struct TimelineEditorWorkspace: View {
         .sheet(item: $review) { job in TimelineResultReview(job: job).environment(app) }
     }
 
-    private var header: some View {
+    private func header(width: CGFloat) -> some View {
         HStack(spacing: 10) {
             Image(systemName: "film.stack").foregroundStyle(Theme.accent)
             Text(video.deletingPathExtension().lastPathComponent)
@@ -336,6 +360,11 @@ struct TimelineEditorWorkspace: View {
                 Text("\(draft.segments.count) section\(draft.segments.count == 1 ? "" : "s") · \(SessionDoc.clock(draft.duration))")
                     .font(Theme.mono(11)).foregroundStyle(Theme.muted)
             }
+            Button { if width < 940 { compactInspector.toggle() } else { showInspector.toggle() } } label: {
+                Label("Sections", systemImage: "sidebar.right")
+            }.buttonStyle(AccentButtonStyle(kind: .quiet))
+            .accessibilityLabel(width < 940 ? "Show sections" : showInspector ? "Hide sections" : "Show sections")
+            .cutmarkPopover(isPresented: $compactInspector) { inspector.frame(width: 300, height: 420) }
             Button { changes = true } label: {
                 Label("Changes", systemImage: "clock.arrow.circlepath")
             }
@@ -346,6 +375,72 @@ struct TimelineEditorWorkspace: View {
                 .buttonStyle(AccentButtonStyle(kind: .solid))
         }
         .padding(.horizontal, 14).frame(height: 50)
+    }
+
+    private var inspector: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Shape your story").font(Theme.sans(16, .semibold))
+                Text("Click a line to listen. Split around a mistake, then remove that section.")
+                    .font(Theme.sans(12)).foregroundStyle(Theme.muted)
+            }.padding(16)
+            Divider()
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    if let draft {
+                        ForEach(Array(draft.segments.enumerated()), id: \.offset) { index, segment in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Button {
+                                    selected = index
+                                    playback.seek(draft.segments.prefix(index).reduce(0) { $0 + $1.duration }, duration: duration)
+                                } label: {
+                                    HStack {
+                                        Text("Section \(index + 1)").font(Theme.sans(12, .semibold))
+                                        Spacer()
+                                        Text(SessionDoc.clock(segment.duration)).font(Theme.mono(10))
+                                    }.contentShape(Rectangle())
+                                }.buttonStyle(.plain)
+                                let lines = phrases.filter { $0.section == index }
+                                if lines.isEmpty {
+                                    Text("Take \(segment.take) · \(segment.kind == "screen" ? "Screen recording" : "Camera")")
+                                        .font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                                    Text("No transcript available for this section.")
+                                        .font(Theme.sans(11)).foregroundStyle(Theme.faint)
+                                } else {
+                                    ForEach(lines) { line in
+                                        Button {
+                                            selected = index; playback.seek(line.time, duration: duration)
+                                        } label: {
+                                            Text(line.text).font(Theme.sans(13)).lineSpacing(3)
+                                                .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                                        }.buttonStyle(.plain).foregroundStyle(Theme.ink)
+                                        .help("Listen from this line")
+                                    }
+                                }
+                            }.padding(12)
+                                .background(selected == index ? Theme.accentSoft : Theme.canvas, in: RoundedRectangle(cornerRadius: 10))
+                                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(selected == index ? Theme.accent : .clear, lineWidth: 1))
+                        }
+                    }
+                }.padding(12)
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Trim selected section").font(Theme.sans(11, .semibold)).foregroundStyle(Theme.muted)
+                HStack {
+                    Button("Start here") { Task { await trimAtPlayhead(start: true) } }
+                        .help("Remove the beginning of this section up to the playhead")
+                    Button("End here") { Task { await trimAtPlayhead(start: false) } }
+                        .help("Remove the end of this section after the playhead")
+                }.buttonStyle(AccentButtonStyle(kind: .quiet))
+            }.padding(12)
+            HStack {
+                Button { Task { await split() } } label: { Label("Split", systemImage: "scissors") }
+                Spacer()
+                Button { apply(.init(op: "remove", index: selected)) } label: { Label("Remove", systemImage: "minus.circle") }
+                    .disabled((draft?.segments.count ?? 0) < 2)
+            }.buttonStyle(AccentButtonStyle(kind: .quiet)).padding(12)
+        }.background(Theme.paper)
     }
 
     private var preview: some View {
@@ -436,7 +531,7 @@ struct TimelineEditorWorkspace: View {
                 Spacer()
             }
             if let problem {
-                Text(problem).font(Theme.sans(10.5)).foregroundStyle(Theme.danger).lineLimit(1)
+                Text(problem).font(Theme.sans(10.5)).foregroundStyle(Theme.danger).lineLimit(2)
                     .help(problem)
             }
         }
@@ -762,6 +857,21 @@ struct TimelineEditorWorkspace: View {
         }
         selected = source.index
         apply(.init(op: "split", index: source.index, at: source.source))
+    }
+
+    private func trimAtPlayhead(start: Bool) async {
+        guard let draft else { return }
+        let capturedRevision = revision, capturedSelection = selected
+        guard let time = await playback.commandTime(duration: duration, pause: true),
+              revision == capturedRevision, selected == capturedSelection,
+              let point = draft.sourcePoint(atOutput: time), point.index == selected else {
+            problem = "Move the playhead inside the selected section first."
+            return
+        }
+        let segment = draft.segments[selected]
+        apply(.init(op: "trim", index: selected,
+                    in: start ? point.source : segment.start,
+                    out: start ? segment.end : point.source))
     }
 
     private func move(_ direction: Int) {

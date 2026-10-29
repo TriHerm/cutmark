@@ -1189,7 +1189,7 @@ struct DetailView: View {
     }
 
     nonisolated static func covers(_ tab: String, previewing: Bool) -> Bool {
-        ["post", "storyboard", "broll", "write"].contains(tab) || (["assets", "sounds"].contains(tab) && !previewing)
+        ["post", "storyboard", "broll", "write", "edit", "export"].contains(tab) || (["assets", "sounds"].contains(tab) && !previewing)
     }
 
     private var recorder: some View {
@@ -1271,6 +1271,8 @@ struct DetailView: View {
     private func pane(_ k: String, _ doc: SessionDoc) -> some View {
         Group {
             switch k {
+            case "edit": SessionStudio(doc: doc, exporting: false).id("edit-" + doc.url.path)
+            case "export": SessionStudio(doc: doc, exporting: true).id("export-" + doc.url.path)
             case "post": PostPane(doc: doc)
             case "write": ScriptPage(doc: doc)
             case "assets": AssetsPane(doc: doc, wide: true)
@@ -3023,7 +3025,7 @@ struct ScriptPage: View {
         // The whole width, one page: a column of 860 left dark strips beside it (2026-10-12).
         VStack(spacing: 0) {
             PlanActions(doc: doc)
-            ScriptPane(doc: doc, onRecord: { app.shot = nil; doc.quickTake = false; SessionMode.set(.record) })
+            PlanGuideWorkspace(doc: doc)
         }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

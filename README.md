@@ -10,7 +10,9 @@ Record talking-head video, keep the source files on your Mac, and work with the 
 - **Provider choice.** Choose Claude Code, Codex, pi, or opencode during first-run setup.
 - **Multi-provider chat.** Provider-specific command construction stays inside dedicated adapters while the product works against a shared agent interface.
 - **MCP access.** The local Cutmark MCP server supports stdio and Streamable HTTP transports.
-- **Video workflow.** Record takes, build storyboards, edit with ffmpeg/Whisper-based tools, review versions, and prepare publishing assets.
+- **Video workflow.** Plan → Record → Edit → Export. Prepare a script or talking points, record takes, resume a saved cut, review the finished video, and export a copy. Media, sound, and post drafts remain available inside the editing and export stages.
+- **Editing workspace.** A cut preview, filmstrip, waveform, and transcript sections share the same timeline. Click a phrase to listen, split around a mistake, or trim a selected section at the playhead. Effects appear in rendered versions.
+- **Starter styles.** Studio, Paper, and Focus include visual samples, colour/type tokens, and guides for assisted edits. They are not live preview filters.
 - **Private by default.** The release configures no usage analytics endpoint, and the MCP HTTP listener binds to loopback by default.
 
 ## Requirements

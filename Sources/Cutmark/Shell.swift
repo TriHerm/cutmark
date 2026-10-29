@@ -6,11 +6,13 @@ import SwiftUI
 
 /// Stored routes stay compatible; Script and Storyboard share one Plan workspace (2026-10-25).
 enum SessionMode: String, CaseIterable, Identifiable {
-    case storyboard, write, record = "script", assets, sounds, broll, post
+    case storyboard, write, record = "script", assets, sounds, broll, post, edit, export
     var id: String { rawValue }
 
     var title: String {
         switch self {
+        case .edit: return "Edit"
+        case .export: return "Export"
         case .storyboard: return "Visual previews"
         case .write: return "Plan"
         case .record: return "Record"
@@ -23,6 +25,8 @@ enum SessionMode: String, CaseIterable, Identifiable {
 
     var help: String {
         switch self {
+        case .edit: return "Cut your takes and continue your draft (⌘8)"
+        case .export: return "Review a finished version and export a copy (⌘9)"
         case .storyboard: return "Open visual previews inside Plan (⌘5)"
         case .write: return "Your full script, scenes and filming directions together (⌘7)"
         case .record: return "Camera, prompter and takes (⌘1)"
@@ -36,6 +40,8 @@ enum SessionMode: String, CaseIterable, Identifiable {
     /// ⌘1–⌘4 stay where they were before the Storyboard tab came first (2026-10-03).
     var shortcut: Character {
         switch self {
+        case .edit: return "8"
+        case .export: return "9"
         case .record: return "1"
         case .assets: return "2"
         case .sounds: return "3"
@@ -48,12 +54,13 @@ enum SessionMode: String, CaseIterable, Identifiable {
 
     /// The tabs in the header. B-roll (2026-10-03) and Sound (2026-10-04) live inside Assets,
     /// switched at its top.
-    static let tabs: [SessionMode] = [.write, .record, .assets, .post]
+    static let tabs: [SessionMode] = [.write, .record, .edit, .export]
 
     /// The header tab a mode shows under.
     var tab: SessionMode {
         if self == .storyboard { return .write }
-        return self == .broll || self == .sounds ? .assets : self
+        if self == .post { return .export }
+        return self == .broll || self == .sounds || self == .assets ? .edit : self
     }
 
     @MainActor static func set(_ m: SessionMode) {
@@ -393,8 +400,10 @@ struct SessionHeader: View {
             .frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
             ModeSwitcher(tab: $tab)
             HStack(spacing: 6) {
-                HeaderSchedule(doc: doc, platform: PostPlatform(rawValue: platformRaw) ?? .linkedin)
-                    .id("\(doc.url.path)#\(platformRaw)")
+                if tab == "post" {
+                    HeaderSchedule(doc: doc, platform: PostPlatform(rawValue: platformRaw) ?? .linkedin)
+                        .id("\(doc.url.path)#\(platformRaw)")
+                }
                 MoreMenu(doc: doc)
             }
         }
@@ -411,7 +420,7 @@ struct SessionHeader: View {
                     .position(x: max(260, (g.size.width - minX) / 2), y: g.size.height / 2)
             }
         }
-        .gesture(WindowDragGesture())
+        .background(WindowTitlebarArea())
         .onAppear { title = doc.meta.title }
         .onChange(of: doc.meta.title) { _, t in title = t }
     }
@@ -461,7 +470,11 @@ struct ModeSwitcher: View {
                 let on = current == m
                 // No withAnimation: it animated every view the new tab builds. Only the tab springs.
                 Button { Perf.mark("tab \(m.rawValue)"); tab = m.rawValue } label: {
-                    Text(m.title)
+                    HStack(spacing: 6) {
+                        Text("\((SessionMode.tabs.firstIndex(of: m) ?? 0) + 1)")
+                            .font(Theme.mono(10)).foregroundStyle(on ? Theme.accent : Theme.faint)
+                        Text(m.title)
+                    }
                         .font(Theme.sans(13, .medium))
                         .foregroundStyle(on ? Theme.ink : Theme.muted)
                         .padding(.horizontal, 12).frame(height: 24)

@@ -1,8 +1,13 @@
 #!/bin/bash
 # Build Cutmark.app from the internal Cutmark Swift target. `./build.sh install` copies it to
-# ~/Applications and opens it, or stages it so Cutmark shows Update in its sidebar.
+# "$CUTMARK_INSTALL_ROOT" and opens it, or stages it so Cutmark shows Update in its sidebar.
 set -euo pipefail
 cd "$(dirname "$0")"
+# Stage next to the installed app so its Update button can find the build.
+CUTMARK_INSTALL_ROOT="$HOME/Applications"
+if [[ -d /Applications/Cutmark.app && ! -d "$CUTMARK_INSTALL_ROOT/Cutmark.app" ]]; then
+  CUTMARK_INSTALL_ROOT=/Applications
+fi
 if [[ "${CUTMARK_DEVELOPER_SIGN:-}" == 1 ]]; then
   : "${CUTMARK_SIGN_IDENTITY:?Production signing requires CUTMARK_SIGN_IDENTITY}"
   : "${CUTMARK_SIGN_KEYCHAIN:?Production signing requires CUTMARK_SIGN_KEYCHAIN}"
@@ -15,7 +20,7 @@ fi
 if [[ "${1:-}" == "install" && "${ANY_BRANCH:-}" != 1 ]]; then
   git fetch -q origin main
   # The same commit as the Cutmark that runs or waits: an Update with nothing in it (2026-10-11).
-  for have in ~/Applications/Cutmark.app ~/Applications/.cutmark-update.noindex/Cutmark.app; do
+  for have in "$CUTMARK_INSTALL_ROOT"/Cutmark.app "$CUTMARK_INSTALL_ROOT"/.cutmark-update.noindex/Cutmark.app; do
     was="$(/usr/libexec/PlistBuddy -c 'Print :BuildStamp' "$have/Contents/Info.plist" 2>/dev/null | cut -d' ' -f1)" || was=""
     if [[ -n "$was" && "$was" == "$(git rev-parse --short HEAD)" && "${FRESH_INSTALL:-}" != 1 ]]; then
       echo "Nothing new to stage: Cutmark already has $was (installed or waiting as the update)."
@@ -40,7 +45,7 @@ fi
 if [[ "${1:-}" == "install" && "${SKIP_TESTS:-}" == 1 && -f scripts/public/check-public-build.sh ]]; then
   scripts/public/check-public-build.sh || exit 1
 fi
-# Tests first, so a regression never reaches ~/Applications. SKIP_TESTS=1 skips them. A full
+# Tests first, so a regression never reaches "$CUTMARK_INSTALL_ROOT". SKIP_TESTS=1 skips them. A full
 # ./test.sh that passed on this exact tree (here or in another worktree) counts: the same run
 # twice took 10 more minutes (2026-10-11).
 source scripts/test-queue.sh
@@ -50,7 +55,7 @@ else ./test.sh --quiet
 fi
 swift build -c release
 # A .noindex folder: Spotlight skips it, so macOS never registers this copy and never opens it
-# in place of ~/Applications/Cutmark.app (old copies kept opening, 2026-10-01).
+# in place of "$CUTMARK_INSTALL_ROOT"/Cutmark.app (old copies kept opening, 2026-10-01).
 APP=build.noindex/Cutmark.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -59,6 +64,7 @@ cp .build/release/cutmark-faces "$APP/Contents/MacOS/cutmark-faces"
 cp mcp/cutmark_mcp.py "$APP/Contents/Resources/cutmark_mcp.py"
 cp mcp/clean_voice.py "$APP/Contents/Resources/clean_voice.py"
 cp mcp/prepare_take.py "$APP/Contents/Resources/prepare_take.py"
+cp -R assets/styles "$APP/Contents/Resources/styles"
 cp assets/Cutmark.icns "$APP/Contents/Resources/Cutmark.icns"
 mkdir -p "$APP/Contents/Resources/Fonts" && cp assets/fonts/*.ttf "$APP/Contents/Resources/Fonts/"
 # The fonts' licenses (SIL OFL) must go with every copy of the fonts.
@@ -101,7 +107,7 @@ if [[ -d plugins/skills ]]; then
   for d in scripts/public/skills/*/ plugins/skills/*/; do [[ -f "$d/SKILL.md" ]] && cp -R "${d%/}" "$APP/Contents/Resources/plugin-skills/"; done
 fi
 # The stamp tells a running Cutmark that a staged build is new; the changes go in the Update tooltip.
-INSTALLED="$HOME/Applications/Cutmark.app"
+INSTALLED="$CUTMARK_INSTALL_ROOT/Cutmark.app"
 STAMP="$(git rev-parse --short HEAD)$(git diff --quiet HEAD -- Sources Package.swift 2>/dev/null || echo +) $(date '+%b %-d %H:%M')"
 WAS="$(/usr/libexec/PlistBuddy -c 'Print :BuildStamp' "$INSTALLED/Contents/Info.plist" 2>/dev/null | cut -d' ' -f1 | tr -d +)" || WAS=""
 if [[ -n "$WAS" ]] && git cat-file -e "$WAS^{commit}" 2>/dev/null; then
@@ -187,10 +193,10 @@ if [[ "${1:-}" == "install" ]]; then
   # silently twice (pgrep sees nothing from agent shells; pipefail broke ps | grep -q) and the
   # install overwrote the running app with no Update row (2026-10-06). A staged build waits for
   # the Update click whether Cutmark is open now or opens later. FRESH_INSTALL=1 copies directly.
-  if [[ -d ~/Applications/Cutmark.app && "${FRESH_INSTALL:-}" != 1 ]]; then
+  if [[ -d "$CUTMARK_INSTALL_ROOT"/Cutmark.app && "${FRESH_INSTALL:-}" != 1 ]]; then
     # Never quit Cutmark for the user: stage the build, and Cutmark shows Update in its sidebar.
     # Copy beside the slot, then rename, so Cutmark never reads a half-copied build.
-    STAGE="$HOME/Applications/.cutmark-update.noindex"
+    STAGE="$CUTMARK_INSTALL_ROOT/.cutmark-update.noindex"
     # A slower agent's older main must not replace a newer staged build.
     STAGED="$(/usr/libexec/PlistBuddy -c 'Print :BuildStamp' "$STAGE/Cutmark.app/Contents/Info.plist" 2>/dev/null | cut -d' ' -f1 | tr -d +)" || STAGED=""
     if [[ -n "$STAGED" && "${ANY_BRANCH:-}" != 1 ]] && git cat-file -e "$STAGED^{commit}" 2>/dev/null \
@@ -205,12 +211,12 @@ if [[ "${1:-}" == "install" ]]; then
     echo "Staged $STAMP: Cutmark shows Update in its sidebar; the user clicks it when ready."
     exit 0
   fi
-  mkdir -p ~/Applications
-  rm -rf ~/Applications/Cutmark.app ~/Applications/.cutmark-update.noindex/Cutmark.app
-  cp -R "$APP" ~/Applications/Cutmark.app
-  open -g ~/Applications/Cutmark.app
-  echo "Installed ~/Applications/Cutmark.app"
+  mkdir -p "$CUTMARK_INSTALL_ROOT"
+  rm -rf "$CUTMARK_INSTALL_ROOT"/Cutmark.app "$CUTMARK_INSTALL_ROOT"/.cutmark-update.noindex/Cutmark.app
+  cp -R "$APP" "$CUTMARK_INSTALL_ROOT"/Cutmark.app
+  open -g "$CUTMARK_INSTALL_ROOT"/Cutmark.app
+  echo "Installed $CUTMARK_INSTALL_ROOT/Cutmark.app"
   # The Cutmark MCP server in each agent on this Mac (Claude Code, Codex, Cursor, …), pointing at the
   # installed copy (stable path). Once per agent: one the user removed stays removed.
-  /usr/bin/python3 "$HOME/Applications/Cutmark.app/Contents/Resources/cutmark_mcp.py" --setup --once
+  /usr/bin/python3 "$CUTMARK_INSTALL_ROOT/Cutmark.app/Contents/Resources/cutmark_mcp.py" --setup --once
 fi

@@ -54,8 +54,7 @@ struct BoardTitleBar: View {
         }
         .padding(.leading, 20 + inset)
         .frame(height: Chrome.bar)
-        .contentShape(Rectangle())
-        .gesture(WindowDragGesture())
+        .background(WindowTitlebarArea())
     }
 }
 

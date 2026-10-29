@@ -3,6 +3,13 @@ import SwiftUI
 enum RecordingGuideMode: String, CaseIterable, Identifiable {
     case teleprompter, notes, board
     var id: String { rawValue }
+    var detail: String {
+        switch self {
+        case .teleprompter: return "Read your script with scrolling text."
+        case .notes: return "Speak naturally with your talking points in view."
+        case .board: return "Follow one point at a time, from start to finish."
+        }
+    }
     var title: String {
         switch self {
         case .teleprompter: return "Teleprompter"
@@ -36,9 +43,11 @@ enum RecordingGuide {
 struct RecordingGuidePicker: View {
     @Environment(AppModel.self) private var app
     var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
         CutmarkSwitch(selection: Binding(get: { app.guideMode }, set: { app.guideMode = $0 }),
                       title: { $0.title }, fill: true)
-            .padding(12)
+        Text(app.guideMode.detail).font(Theme.sans(12)).foregroundStyle(Theme.muted)
+        }.padding(12)
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Recording guide")
     }
@@ -57,7 +66,7 @@ struct RecordingGuidePane: View {
                     .font(Theme.sans(15, .semibold))
                 Spacer()
                 if !app.isRecording {
-                    Button(editing ? "Done editing" : "Edit notes") { editing.toggle() }
+                    Button(editing ? "Preview points" : "Edit notes") { editing.toggle() }
                         .buttonStyle(PillGhostStyle())
                 }
                 Button { NotchPanel.shared.toggle(app) } label: {
@@ -80,8 +89,13 @@ struct RecordingGuidePane: View {
             }
             if !app.isRecording && (editing || cards.isEmpty) {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Add one talking point per paragraph. Put supporting notes on the lines below it. Leave a blank line before the next point.")
+                    Text("Give each point a short title, with reminders below it. Leave a blank line between points.")
                         .font(Theme.sans(13)).foregroundStyle(Theme.muted)
+                    if cards.isEmpty {
+                        Button("Start with an outline") {
+                            doc.setRecordingNotes("Opening\nWhy this matters\n\nShow the idea\nOne example to make it clear\n\nWrap up\nOne next step")
+                        }.buttonStyle(AccentButtonStyle(kind: .quiet))
+                    }
                     TextEditor(text: Binding(get: { doc.recordingNotes }, set: { doc.setRecordingNotes($0) }))
                         .font(Theme.sans(18)).scrollContentBackground(.hidden)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -145,6 +159,8 @@ struct RecordingGuideBoard: View {
                     Button("Restart") { index = 0 }.buttonStyle(.plain).font(Theme.sans(12)).foregroundStyle(Theme.accent)
                 }
             }
+            ProgressView(value: Double(position), total: Double(max(1, cards.count))).tint(Theme.accent)
+                .accessibilityLabel("Talking points completed")
             if cards.isEmpty {
                 Text("Add talking points in Record → Notes.").font(Theme.sans(16)).foregroundStyle(Theme.muted)
             } else if compact {
@@ -202,7 +218,9 @@ struct RecordingGuideBoard: View {
                     .font(Theme.sans(14)).foregroundStyle(Theme.muted)
             }
             ForEach(Array(range), id: \.self) { i in
-                card(cards[i], prominent: current)
+                Button { index = i } label: {
+                    card(cards[i], prominent: current).frame(maxWidth: .infinity, alignment: .leading)
+                }.buttonStyle(.plain).help("Go to this talking point")
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(current ? Theme.accent.opacity(0.12) : Theme.surface, in: RoundedRectangle(cornerRadius: 12))
