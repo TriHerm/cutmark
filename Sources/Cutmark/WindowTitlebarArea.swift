@@ -8,16 +8,17 @@ struct WindowTitlebarArea: NSViewRepresentable {
 
     final class TitlebarView: NSView {
         override var mouseDownCanMoveWindow: Bool { false }
-        private var restoredFrame: NSRect?
+        // Headers are replaced when switching boards; frame history belongs to the window.
+        private static let restoredFrames = NSMapTable<NSWindow, NSValue>(keyOptions: .weakMemory, valueOptions: .strongMemory)
         override func mouseDown(with event: NSEvent) {
             guard let window, !window.styleMask.contains(.fullScreen) else { return }
             if event.clickCount == 2 {
                 guard let screen = window.screen else { return }
-                if let previous = restoredFrame, window.frame == screen.visibleFrame {
+                if let previous = Self.restoredFrames.object(forKey: window)?.rectValue, window.frame == screen.visibleFrame {
                     window.setFrame(previous, display: true, animate: !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
-                    restoredFrame = nil
+                    Self.restoredFrames.removeObject(forKey: window)
                 } else {
-                    restoredFrame = window.frame
+                    Self.restoredFrames.setObject(NSValue(rect: window.frame), forKey: window)
                     window.setFrame(screen.visibleFrame, display: true, animate: !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
                 }
             } else {

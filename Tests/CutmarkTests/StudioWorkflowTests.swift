@@ -72,7 +72,10 @@ struct StudioWorkflowTests {
         let deadline = Date().addingTimeInterval(3)
         while window.frame != window.screen?.visibleFrame && Date() < deadline { try? await Task.sleep(for: .milliseconds(20)) }
         #expect(window.frame == window.screen?.visibleFrame)
-        area.mouseDown(with: event)
+        // Changing boards replaces the header, but restoring belongs to the same window.
+        let replacement = WindowTitlebarArea.TitlebarView()
+        window.contentView = replacement
+        replacement.mouseDown(with: event)
         let restored = Date().addingTimeInterval(3)
         while window.frame != old && Date() < restored { try? await Task.sleep(for: .milliseconds(20)) }
         #expect(window.frame == old)
