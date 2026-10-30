@@ -232,11 +232,19 @@ struct MediaEditorTests {
         writer.startSession(atSourceTime: .zero)
         guard let pool = adaptor.pixelBufferPool else { throw TestFailure.writer }
 
+        let deadline = Date().addingTimeInterval(30)
+        func ready(_ input: AVAssetWriterInput) async throws {
+            while !input.isReadyForMoreMediaData {
+                guard writer.status == .writing, Date() < deadline else { throw writer.error ?? TestFailure.writer }
+                try await Task.sleep(for: .milliseconds(2))
+            }
+        }
+        defer { if writer.status == .writing { writer.cancelWriting() } }
         for frame in 0..<(seconds * fps) {
-            while !audio.isReadyForMoreMediaData { await Task.yield() }
+            try await ready(audio)
             let sample = try audioSample(startFrame: Int64(frame * 48000 / fps), frames: Int32(48000 / fps))
             guard audio.append(sample) else { throw writer.error ?? TestFailure.writer }
-            while !input.isReadyForMoreMediaData { await Task.yield() }
+            try await ready(input)
             var pixel: CVPixelBuffer?
             guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pixel) == kCVReturnSuccess, let pixel else {
                 throw TestFailure.writer
