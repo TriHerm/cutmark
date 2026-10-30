@@ -1271,7 +1271,7 @@ struct DetailView: View {
     private func pane(_ k: String, _ doc: SessionDoc) -> some View {
         Group {
             switch k {
-            case "edit": SessionStudio(doc: doc, exporting: false).id("edit-" + doc.url.path)
+            case "edit": MediaEditorWorkspace(doc: doc).id("edit-" + doc.url.path)
             case "export": SessionStudio(doc: doc, exporting: true).id("export-" + doc.url.path)
             case "post": PostPane(doc: doc)
             case "write": ScriptPage(doc: doc)

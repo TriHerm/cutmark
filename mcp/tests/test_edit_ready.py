@@ -1323,6 +1323,8 @@ class Docs(unittest.TestCase):
         self.assertLess(i, text.index("clean_voice"))
         self.assertNotRegex(text, r"(?i)never[^.]*own ffmpeg")
         self.assertIn("by hand is fine too: its path comes from next_path", text)
+        self.assertIn("_edit/studio/project.json; it is not a render_edit recipe", text)
+        self.assertIn("Do not rewrite that project with recipe tools", text)
         self.assertNotIn("Whisper word times", text)
         self.assertIn("cut_take", t.CORE_TOOLS)
 

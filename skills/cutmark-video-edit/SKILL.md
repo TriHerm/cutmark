@@ -80,9 +80,11 @@ inspect its returned source-to-output spans and warnings before calling `render_
 `render_edit` arguments. A render is a candidate, not a published version: inspect the video,
 audio and checks, then call `publish_edit` only when the user accepts it.
 
-The app's timeline is also an unpublished, recoverable draft. Its player still displays the
-**last published render** until a new candidate has been rendered; do not claim that moving a
-segment immediately changes that preview. Never overwrite the user's source takes or edit recipes.
+The Edit tab has a native media assembly: preview sources before adding them, assemble video and
+images, layer audio and camera overlays, then export a new MP4. It saves `_edit/studio/project.json`,
+a separate format that recipe tools must not rewrite. Preview and export use the same native
+composition, including speed, framing, volume and fades. Earlier recipe cuts remain accessible
+through Previous cuts in the source preview. Never overwrite source takes, native projects or edit recipes.
 For a screen edit, `suggest_auto_zooms` is read-only; new zooms must be explicitly accepted and
 applied through `apply_auto_zooms`. `suggest_smart_speed` is planner-only: it does not render speed
 changes yet.

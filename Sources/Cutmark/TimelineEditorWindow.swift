@@ -10,7 +10,17 @@ final class TimelineEditorWindow: NSObject, NSWindowDelegate {
     static let shared = TimelineEditorWindow()
     private var windows: [URL: NSWindow] = [:]
 
+    static let mediaRequested = Notification.Name("CutmarkMediaRequested")
+    static var requested: [URL: URL] = [:]
     func open(video: URL, doc: SessionDoc, app: AppModel) {
+        app.player?.pause()
+        Self.requested[doc.url] = video
+        SessionMode.set(.edit)
+        NotificationCenter.default.post(name: Self.mediaRequested, object: doc.url)
+    }
+
+    // Keep earlier recipe cuts available without translating away their effects or saved history.
+    func openLegacy(video: URL, doc: SessionDoc, app: AppModel) {
         // Never leave the ReviewPlayer playing the original soundtrack behind the cut preview.
         app.player?.pause()
         let key = video.standardizedFileURL
@@ -1131,7 +1141,7 @@ private struct TimelineFilmstripBar: View {
     }
 }
 
-private struct TimelineWaveformBar: View {
+struct TimelineWaveformBar: View {
     let amplitudes: [CGFloat]
     let tint: Color
 

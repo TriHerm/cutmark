@@ -15189,6 +15189,8 @@ def dispatch(msg):
                                     "edits/<name>-vN.mp4 with its recipe beside it. The next version starts from that "
                                     "recipe (render_edit base + changes), never from a script in /tmp or from memory. An edit "
                                     "you make by hand is fine too: its path comes from next_path kind=edit. "
+                                    "The native Media editor saves _edit/studio/project.json; it is not a render_edit recipe. "
+                                    "Do not rewrite that project with recipe tools. Its Export button writes a new studio-edit MP4 in edits/. "
                                     "A finished edit is never an input. Never overwrite a version or a take file. "
                                     "stills/ (frames the user "
                                     "saved) and assets/ (files the user dropped) are read only. "
