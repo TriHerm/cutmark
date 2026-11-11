@@ -11,7 +11,7 @@ struct MediaEditorTimeline: View {
     @FocusState private var focused: Bool
     private let labelWidth: CGFloat = 90
     private var audio: [MediaEditProject.Clip] { store.project.clips.filter { $0.lane == .audio } }
-    private var overlays: [MediaEditProject.Clip] { store.project.clips.filter { $0.lane == .overlay } }
+    private var overlays: [MediaEditProject.Clip] { store.project.visibleClips.filter { $0.lane == .overlay } }
     private var width: CGFloat { max(viewport, CGFloat(max(store.project.duration, 5) * scale) + 90) }
     static func clock(_ time: Double) -> String {
         let t = max(0, time.isFinite ? time : 0)
@@ -62,7 +62,7 @@ struct MediaEditorTimeline: View {
                 Text("Drag clips to move · Drag edges to trim · S to split · Delete to remove")
                     .font(Theme.sans(10)).foregroundStyle(Theme.muted).lineLimit(1)
                 Spacer()
-                Text("\(store.project.clips.count) clips · \(Self.clock(store.project.duration))").font(Theme.mono(10)).foregroundStyle(Theme.muted)
+                Text("\(store.project.visibleClips.count) clips · \(Self.clock(store.project.duration))").font(Theme.mono(10)).foregroundStyle(Theme.muted)
             }.padding(.horizontal, 12).frame(height: 24).background(Theme.paper)
         }
         .background(Theme.canvas)
@@ -81,7 +81,7 @@ struct MediaEditorTimeline: View {
     }
     private var toolbar: some View {
         HStack(spacing: 14) {
-            Button { store.split() } label: { Label("Split", systemImage: "scissors") }.disabled(store.selected == nil || !store.editable || store.building)
+            Button { store.split() } label: { Label("Split", systemImage: "scissors") }.disabled(store.selected == nil || store.selectedClip?.cameraLink != nil || !store.editable || store.building)
             Button { store.remove() } label: { Label("Delete", systemImage: "trash") }.disabled(store.selected == nil || !store.editable)
             Divider().frame(height: 18)
             Button { store.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(store.history.isEmpty || !store.editable).help("Undo · ⌘Z")
@@ -154,7 +154,7 @@ struct MediaEditorTimeline: View {
         return targets.min(by: { abs($0 - frame) < abs($1 - frame) }).flatMap { abs($0 - frame) * scale < 9 ? $0 : nil } ?? frame
     }
     private func move(_ clip: MediaEditProject.Clip, delta: Double) {
-        guard store.editable else { return }
+        guard store.editable, clip.cameraLink == nil else { return }
         store.selected = clip.id
         let desired = snap(store.project.position(clip.id) + delta, excluding: clip.id)
         if clip.lane == .video {
@@ -163,6 +163,7 @@ struct MediaEditorTimeline: View {
         } else { store.update(clip.id) { $0.offset = desired } }
     }
     private func trim(_ clip: MediaEditProject.Clip, start: Bool, delta: Double) {
+        guard clip.cameraLink == nil else { return }
         store.selected = clip.id
         let boundary = snap(store.project.position(clip.id) + (start ? 0 : clip.duration) + delta, excluding: clip.id)
         let source = clip.start + (boundary - store.project.position(clip.id)) * clip.speed
@@ -206,7 +207,10 @@ private struct MediaTimelineClip: View {
                     .frame(maxHeight: .infinity, alignment: .bottom).background(clip.kind == .audio ? Color.clear : Color.black.opacity(0.1))
             }
             if width > 36 {
-                Text(clip.name).font(Theme.sans(10, .medium)).foregroundStyle(clip.kind == .audio ? Theme.ink : .white)
+                HStack(spacing: 4) {
+                    if clip.cameraLink != nil { Image(systemName: "link") }
+                    Text(clip.name)
+                }.font(Theme.sans(10, .medium)).foregroundStyle(clip.kind == .audio ? Theme.ink : .white)
                     .lineLimit(1).padding(.horizontal, 8).padding(.vertical, 3)
                     .frame(maxWidth: .infinity, alignment: .leading).background(clip.kind == .audio ? color.opacity(0.12) : Color.black.opacity(0.65))
             }
@@ -214,12 +218,12 @@ private struct MediaTimelineClip: View {
         .frame(width: width, height: height).clipShape(RoundedRectangle(cornerRadius: 5))
         .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(selected ? color : color.opacity(0.4), lineWidth: selected ? 2 : 1))
         .contentShape(Rectangle()).onTapGesture(perform: select)
-        .gesture(DragGesture(minimumDistance: 6).updating($dragging) { value, state, _ in state = value.translation.width }
+        .gesture(DragGesture(minimumDistance: 6).updating($dragging) { value, state, _ in if clip.cameraLink == nil { state = value.translation.width } }
             .onEnded { move(Double($0.translation.width) / scale) })
-        .overlay(alignment: .leading) { if selected && width > 32 { handle(start: true) } }
-        .overlay(alignment: .trailing) { if selected && width > 32 { handle(start: false) } }
+        .overlay(alignment: .leading) { if selected && clip.cameraLink == nil && width > 32 { handle(start: true) } }
+        .overlay(alignment: .trailing) { if selected && clip.cameraLink == nil && width > 32 { handle(start: false) } }
         .offset(x: dragging + edge.width).zIndex(dragging == 0 ? 0 : 10)
-        .help("\(clip.name) · \(MediaEditorTimeline.clock(clip.duration))")
+        .help(clip.cameraLink == nil ? "\(clip.name) · \(MediaEditorTimeline.clock(clip.duration))" : "Synced to screen. Edit the screen clip to change timing.")
         .accessibilityLabel("\(clip.name), \(MediaEditorTimeline.clock(clip.duration)), \(clip.lane.rawValue) track")
         .accessibilityAddTraits(selected ? .isSelected : [])
     }

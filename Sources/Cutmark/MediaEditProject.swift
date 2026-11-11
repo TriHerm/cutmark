@@ -2,12 +2,16 @@ import Foundation
 
 /// Native assembly lives under _edit/studio; existing take files and published recipes are immutable.
 struct MediaEditProject: Codable, Equatable {
-    enum Kind: String, Codable { case video, image, audio }
+    enum Kind: String, Codable { case video, image, gif, audio }
     enum Lane: String, Codable, CaseIterable { case video, overlay, audio }
     enum Format: String, Codable, CaseIterable, Identifiable {
         case landscape, portrait, square
         var id: String { rawValue }
         var title: String { switch self { case .landscape: "16:9"; case .portrait: "9:16"; case .square: "1:1" } }
+    }
+    struct CameraLink: Codable, Equatable {
+        var screen: UUID
+        let screenMinusCamera: Double
     }
     struct Clip: Codable, Equatable, Identifiable {
         var id = UUID()
@@ -31,11 +35,13 @@ struct MediaEditProject: Codable, Equatable {
         var overlaySize: Double = 0.30
         var overlayLeft = false
         var overlayBottom = false
+        var cameraLink: CameraLink? = nil
         var duration: Double { (end - start) / speed }
     }
     var version = 1
     var format: Format = .landscape
     var clips: [Clip] = []
+    var visibleClips: [Clip] { clips.filter { $0.duration > 0 } }
     var duration: Double { clips.filter { $0.lane == .video }.reduce(0) { $0 + $1.duration } }
     func position(_ id: UUID) -> Double {
         var at = 0.0
@@ -47,10 +53,18 @@ struct MediaEditProject: Codable, Equatable {
     }
     func validate() throws {
         guard version == 1, clips.count <= 200, Set(clips.map(\.id)).count == clips.count else { throw Failure.invalid("This edit format is not supported.") }
+        let screens = Set(clips.filter { $0.lane == .video && $0.kind == .video }.map(\.id))
+        var linkedScreens = Set<UUID>()
         for c in clips {
+            if let link = c.cameraLink {
+                guard c.lane == .overlay, c.kind == .video, abs(link.screenMinusCamera) <= 15,
+                      screens.contains(link.screen), linkedScreens.insert(link.screen).inserted else {
+                    throw Failure.invalid("A camera clip has an invalid screen recording link.")
+                }
+            }
             guard !c.file.isEmpty, !c.file.hasPrefix("/"), !c.file.split(separator: "/").contains(".."),
                   [c.start, c.end, c.sourceDuration, c.offset, c.speed, c.volume, c.fadeIn, c.fadeOut, c.zoom, c.focusX, c.focusY, c.overlaySize].allSatisfy(\.isFinite),
-                  c.start >= 0, c.end <= c.sourceDuration + 0.001, c.duration >= 1 / 30,
+                  c.start >= 0, c.end <= c.sourceDuration + 0.001, (c.duration >= 1 / 30 || c.cameraLink != nil && c.duration == 0),
                   c.speed >= 0.25, c.speed <= 4, c.volume >= 0, c.volume <= 1,
                   c.offset >= 0, c.offset <= 86400, c.sourceDuration <= 86400,
                   c.fadeIn >= 0, c.fadeOut >= 0, c.fadeIn + c.fadeOut <= c.duration + 0.001,
@@ -104,7 +118,7 @@ struct MediaEditProject: Codable, Equatable {
         return project
     }
     mutating func split(_ id: UUID, at time: Double) -> Bool {
-        guard let i = clips.firstIndex(where: { $0.id == id }) else { return false }
+        guard let i = clips.firstIndex(where: { $0.id == id && $0.cameraLink == nil }) else { return false }
         let c = clips[i], local = time - position(id)
         guard local >= 1 / 30, c.duration - local >= 1 / 30 else { return false }
         var right = c; right.id = UUID(); right.start = c.start + local * c.speed
@@ -112,20 +126,54 @@ struct MediaEditProject: Codable, Equatable {
         right.fadeIn = 0; right.fadeOut = min(c.fadeOut, right.duration)
         clips[i].end = right.start; clips[i].fadeOut = 0; clips[i].fadeIn = min(c.fadeIn, local)
         clips.insert(right, at: i + 1)
+        copyCamera(from: id, to: right.id)
+        alignLinkedCameras()
         return true
     }
     mutating func move(_ id: UUID, before target: UUID?) {
-        guard let index = clips.firstIndex(where: { $0.id == id }), target != id else { return }
+        guard let index = clips.firstIndex(where: { $0.id == id && $0.cameraLink == nil }), target != id else { return }
         let item = clips.remove(at: index)
         if let target, let destination = clips.firstIndex(where: { $0.id == target }) { clips.insert(item, at: destination) }
         else { clips.append(item) }
+        alignLinkedCameras()
     }
     mutating func trim(_ id: UUID, start: Double, end: Double) {
-        guard let i = clips.firstIndex(where: { $0.id == id }) else { return }
+        guard let i = clips.firstIndex(where: { $0.id == id && $0.cameraLink == nil }) else { return }
         if clips[i].lane != .video { clips[i].offset += (start - clips[i].start) / clips[i].speed }
         clips[i].start = start; clips[i].end = end
         let duration = clips[i].duration
         clips[i].fadeIn = min(clips[i].fadeIn, max(0, duration / 2))
         clips[i].fadeOut = min(clips[i].fadeOut, max(0, duration / 2))
+        alignLinkedCameras()
+    }
+
+    mutating func copyCamera(from screen: UUID, to copy: UUID) {
+        guard var camera = clips.first(where: { $0.cameraLink?.screen == screen }) else { return }
+        camera.id = UUID()
+        camera.cameraLink?.screen = copy
+        clips.append(camera)
+    }
+
+    /// Each camera remains a separate source. Its trim, speed and position come from
+    /// the corresponding screen occurrence and the measured offset between the files.
+    mutating func alignLinkedCameras() {
+        let parents = Dictionary(clips.filter { $0.lane == .video }.map { ($0.id, $0) },
+                                 uniquingKeysWith: { first, _ in first })
+        clips.removeAll { $0.cameraLink.map { parents[$0.screen] == nil } ?? false }
+        for index in clips.indices {
+            guard let link = clips[index].cameraLink, let screen = parents[link.screen] else { continue }
+            let delta = link.screenMinusCamera
+            let start = max(0, min(clips[index].sourceDuration, screen.start + delta))
+            let end = min(clips[index].sourceDuration, screen.end + delta)
+            let overlaps = (end - start) / screen.speed >= 1 / 30
+            // Keep the link if a trim temporarily excludes all of the camera footage.
+            clips[index].start = start
+            clips[index].end = overlaps ? end : start
+            clips[index].speed = screen.speed
+            clips[index].offset = position(screen.id) + max(0, -(screen.start + delta)) / screen.speed
+            let duration = clips[index].duration
+            clips[index].fadeIn = min(clips[index].fadeIn, duration / 2)
+            clips[index].fadeOut = min(clips[index].fadeOut, duration / 2)
+        }
     }
 }

@@ -14,7 +14,7 @@ struct MediaEditorWorkspace: View {
     @State private var filter = MediaFilter.all
     @State private var inspectorOpen = false
     @State private var mediaOpen = false
-    @State private var showMediaSidebar = false
+    @State private var showMediaSidebar: Bool
     @State private var showInspector = true
     @State private var panel: StudioEditTools.Panel
     @State private var reviewRange: StudioCut?
@@ -24,9 +24,10 @@ struct MediaEditorWorkspace: View {
     @State private var timelineHeight: CGFloat = 310
     @State private var resizeStart: CGFloat?
     @State private var exportReview: Job?
-    init(doc: SessionDoc, initial: URL? = nil, store: MediaEditorStore? = nil, panel: StudioEditTools.Panel = .clip) {
+    init(doc: SessionDoc, initial: URL? = nil, store: MediaEditorStore? = nil, panel: StudioEditTools.Panel = .clip, showsMedia: Bool = false) {
         self.doc = doc; self.initial = initial
         _panel = State(initialValue: panel)
+        _showMediaSidebar = State(initialValue: showsMedia)
         _store = StateObject(wrappedValue: store ?? MediaEditorStore(doc: doc))
     }
     enum MediaFilter: String, CaseIterable, Identifiable {
@@ -171,14 +172,20 @@ struct MediaEditorWorkspace: View {
                     VStack(spacing: 10) {
                         Image(systemName: "photo.on.rectangle.angled").font(.system(size: 28)).foregroundStyle(Theme.muted)
                         Text(query.isEmpty ? "Bring your media here" : "No matching media").font(Theme.sans(13, .medium))
-                        Text("Preview videos, images and audio before adding them to your edit.").font(Theme.sans(12)).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
+                        Text("Preview videos, GIFs, images and audio before adding them to your edit.").font(Theme.sans(12)).foregroundStyle(Theme.muted).multilineTextAlignment(.center)
                         Button("Import media…") { store.chooseFiles() }.buttonStyle(AccentButtonStyle(kind: .quiet)).disabled(!store.editable)
                     }.padding(20)
                 }
             }
             Divider()
-            Text("Select to preview · Add when ready")
-                .font(Theme.sans(10)).foregroundStyle(Theme.muted).padding(12)
+            HStack {
+                Link(destination: URL(string: "https://giphy.com/")!) {
+                    Label("Browse GIPHY", systemImage: "arrow.up.right")
+                }.help("Browse in your browser. Import a GIF from your Mac to use it in an edit.")
+                Spacer(minLength: 4)
+                Button("Import GIF…") { store.chooseFiles(allowed: [.gif]) }
+                    .buttonStyle(.plain).disabled(!store.editable)
+            }.font(Theme.sans(11, .medium)).foregroundStyle(Theme.accent).padding(12)
         }.background(Theme.paper)
     }
     private func assetTile(_ asset: Asset) -> some View {
@@ -196,7 +203,7 @@ struct MediaEditorWorkspace: View {
                     }
                 }.frame(height: 70).clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(store.source?.id == asset.id ? Theme.accent : Theme.border, lineWidth: store.source?.id == asset.id ? 2 : 1))
-                Text(asset.url.deletingPathExtension().lastPathComponent).font(Theme.sans(11, .medium)).lineLimit(2).frame(height: 28, alignment: .topLeading)
+                Text(asset.isGIF ? "GIF · " + asset.url.deletingPathExtension().lastPathComponent : asset.url.deletingPathExtension().lastPathComponent).font(Theme.sans(11, .medium)).lineLimit(2).frame(height: 28, alignment: .topLeading)
             }.contentShape(Rectangle())
         }.buttonStyle(.plain).help(asset.name)
             .draggable("asset:" + asset.url.path)
@@ -213,7 +220,7 @@ struct MediaEditorWorkspace: View {
                 ZStack {
                     Color.black
                     if let asset = store.source {
-                        if asset.kind == .image, let image = store.thumbnails[asset.url] ?? NSImage(contentsOf: asset.url) {
+                        if asset.kind == .image, !asset.isGIF, let image = store.thumbnails[asset.url] ?? NSImage(contentsOf: asset.url) {
                             Image(nsImage: image).resizable().scaledToFit()
                         } else if asset.kind == .audio {
                             VStack(spacing: 16) {
@@ -299,21 +306,26 @@ struct MediaEditorWorkspace: View {
                     if clip.lane != .video && clip.offset + clip.duration > store.project.duration {
                         Text("Only the part before the end of the video is exported.").font(Theme.sans(11)).foregroundStyle(Theme.warn)
                     }
-                    inspectorSection("Timing") {
-                        number("Start", value: clip.start, range: (clip.lane == .video ? 0 : max(0, clip.start - clip.offset * clip.speed))...max(0, clip.end - clip.speed / 30)) { value in
-                            store.edit { $0.trim(clip.id, start: value, end: clip.end) }
-                        }
-                        number("End", value: clip.end, range: (clip.start + clip.speed / 30)...clip.sourceDuration) { value in
-                            store.edit { $0.trim(clip.id, start: clip.start, end: value) }
-                        }
-                        if clip.lane != .video { number("Position", value: clip.offset, range: 0...max(1, store.project.duration)) { v in store.update(clip.id) { $0.offset = v } } }
-                        if clip.kind != .image {
-                            HStack {
-                                Text("Speed").font(Theme.sans(12)); Spacer()
-                                CutmarkMenuButton(help: "Playback speed") { Text(String(format: "%.2g×", clip.speed)).font(Theme.sans(12, .semibold)) } content: {
-                                    for speed in [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0] {
-                                        MenuButton(String(format: "%.2g×", speed), checked: clip.speed == speed) {
-                                            store.update(clip.id) { c in c.speed = speed; c.fadeIn = min(c.fadeIn, c.duration / 2); c.fadeOut = min(c.fadeOut, c.duration / 2) }
+                    if clip.cameraLink != nil {
+                        Label("Synced to screen", systemImage: "link")
+                            .font(Theme.sans(12)).foregroundStyle(Theme.muted)
+                    } else {
+                        inspectorSection("Timing") {
+                            number("Start", value: clip.start, range: (clip.lane == .video ? 0 : max(0, clip.start - clip.offset * clip.speed))...max(0, clip.end - clip.speed / 30)) { value in
+                                store.edit { $0.trim(clip.id, start: value, end: clip.end) }
+                            }
+                            number("End", value: clip.end, range: (clip.start + clip.speed / 30)...clip.sourceDuration) { value in
+                                store.edit { $0.trim(clip.id, start: clip.start, end: value) }
+                            }
+                            if clip.lane != .video { number("Position", value: clip.offset, range: 0...max(1, store.project.duration)) { v in store.update(clip.id) { $0.offset = v } } }
+                            if clip.kind != .image {
+                                HStack {
+                                    Text("Speed").font(Theme.sans(12)); Spacer()
+                                    CutmarkMenuButton(help: "Playback speed") { Text(String(format: "%.2g×", clip.speed)).font(Theme.sans(12, .semibold)) } content: {
+                                        for speed in [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0] {
+                                            MenuButton(String(format: "%.2g×", speed), checked: clip.speed == speed) {
+                                                store.update(clip.id) { c in c.speed = speed; c.fadeIn = min(c.fadeIn, c.duration / 2); c.fadeOut = min(c.fadeOut, c.duration / 2) }
+                                            }
                                         }
                                     }
                                 }
@@ -333,7 +345,7 @@ struct MediaEditorWorkspace: View {
                                 setting("Vertical focus", value: clip.focusY, range: 0...1, format: "%.2f") { v in store.update(clip.id) { $0.focusY = v } }
                             }
                             if store.canAddPairedCamera {
-                                Button("Add synced camera") { Task { await store.addPairedCamera() } }
+                                Button(store.hasUnlinkedCamera ? "Sync existing camera" : "Add synced camera") { Task { await store.addPairedCamera() } }
                                     .buttonStyle(AccentButtonStyle(kind: .quiet))
                             }
                             if store.hasCaptureEvents {
@@ -351,7 +363,7 @@ struct MediaEditorWorkspace: View {
                             }
                         }
                     }
-                    if clip.kind != .image {
+                    if clip.kind == .video || clip.kind == .audio {
                         inspectorSection("Sound") {
                             setting("Volume", value: clip.volume, range: 0...1, format: "%.2f×") { v in store.update(clip.id) { $0.volume = v } }
                             Button { store.update(clip.id) { $0.volume = clip.volume == 0 ? 1 : 0 } } label: { Label(clip.volume == 0 ? "Unmute" : "Mute", systemImage: clip.volume == 0 ? "speaker.wave.2" : "speaker.slash") }.buttonStyle(AccentButtonStyle(kind: .quiet))
@@ -360,7 +372,7 @@ struct MediaEditorWorkspace: View {
                         }
                     }
                     HStack {
-                        Button("Duplicate") { store.duplicate() }
+                        Button("Duplicate") { store.duplicate() }.disabled(clip.cameraLink != nil)
                         Spacer()
                         Button("Remove") { store.remove() }.foregroundStyle(Theme.danger)
                     }.buttonStyle(.plain).font(Theme.sans(12, .medium))

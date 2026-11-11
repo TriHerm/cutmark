@@ -72,7 +72,8 @@ extension MediaEditProject {
         }
         // Keep the unexported tail of audio and overlays so it can still be used later.
         retained.append((cursor..<Double.infinity, removed))
-        result.clips = try clips.flatMap { clip -> [Clip] in
+        var screenPieces: [UUID: [UUID]] = [:]
+        result.clips = try clips.filter { $0.cameraLink == nil }.flatMap { clip -> [Clip] in
             let position = position(clip.id)
             return try retained.compactMap { span in
                 let start = max(position, span.range.lowerBound)
@@ -98,9 +99,20 @@ extension MediaEditProject {
                 if clip.lane != .video { piece.offset = max(0, start - span.removed) }
                 piece.fadeIn = min(piece.fadeIn, piece.duration)
                 piece.fadeOut = min(piece.fadeOut, piece.duration - piece.fadeIn)
+                if clip.lane == .video { screenPieces[clip.id, default: []].append(piece.id) }
                 return piece
             }
         }
+        for camera in clips {
+            guard let link = camera.cameraLink else { continue }
+            for (index, screen) in (screenPieces[link.screen] ?? []).enumerated() {
+                var piece = camera
+                if index > 0 { piece.id = UUID() }
+                piece.cameraLink?.screen = screen
+                result.clips.append(piece)
+            }
+        }
+        result.alignLinkedCameras()
         try result.validate()
         return result
     }

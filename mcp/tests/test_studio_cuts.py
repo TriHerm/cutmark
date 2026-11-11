@@ -40,6 +40,14 @@ class StudioCuts(unittest.TestCase):
         self.assertEqual(json.loads(self.proposal.read_text()), {"revision": self.args["revision"], "cuts": cuts})
         self.assertEqual(self.project.read_bytes(), before)
 
+    def test_omits_linked_camera_outside_its_screen_trim(self):
+        project = json.loads(self.project.read_text())
+        project["clips"][1].update(end=0, cameraLink={"screen": "fixture", "screenMinusCamera": -3})
+        self.project.write_text(json.dumps(project))
+        snapshot = t.t_get_studio_timeline(self.args)
+        self.assertEqual(snapshot["duration"], 5)
+        self.assertEqual([clip["file"] for clip in snapshot["timeline"]], ["a.mov", "c.mov"])
+
     def test_invalid_and_stale_cuts_do_not_replace_existing_proposal(self):
         cuts = [{"start": 1, "end": 2, "reason": "Pause"}]
         t.t_propose_studio_cuts({**self.args, "cuts": cuts})

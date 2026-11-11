@@ -30,6 +30,7 @@ struct Asset: Identifiable, Hashable {
     /// Path inside the session folder (the key comments use).
     var rel: String { take || group.isEmpty ? name : "\(group)/\(name)" }
 
+    var isGIF: Bool { url.pathExtension.lowercased() == "gif" }
     var kind: AssetKind { Self.kind(of: url) }
 
     static func kind(of url: URL) -> AssetKind {

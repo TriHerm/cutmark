@@ -13575,8 +13575,11 @@ def studio_snapshot(session):
         if (lane not in ("video", "overlay", "audio") or not isinstance(file, str) or not file or
                 os.path.isabs(file) or ".." in file.split("/") or
                 any(type(n) not in (int, float) or not 0 <= n <= 86400 for n in (start, end, speed, offset)) or
-                not 0.25 <= speed <= 4 or end <= start):
+                not 0.25 <= speed <= 4 or end < start or
+                (end == start and (lane != "overlay" or not isinstance(clip.get("cameraLink"), dict)))):
             raise ValueError("The native timeline has an invalid clip.")
+        if end == start:
+            continue  # Linked camera with no overlap in the current screen trim.
         length = (end - start) / speed
         output = at if lane == "video" else offset
         span = {"file": file, "lane": lane, "source_start": start, "source_end": end,

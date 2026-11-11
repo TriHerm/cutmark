@@ -34,6 +34,7 @@ final class MediaEditorStore: ObservableObject {
     private var thumbnailsTask: Task<Void, Never>?
     private var samplesTask: Task<Void, Never>?
     private var frameTask: Task<Void, Never>?
+    private var gifPreviewTask: Task<Void, Never>?
     private var frameGenerator: AVAssetImageGenerator?
     private var render: AVAssetExportSession?
     private var revision = 0
@@ -50,7 +51,7 @@ final class MediaEditorStore: ObservableObject {
     init(doc: SessionDoc) { self.doc = doc; session = doc.url }
     func open(initial: URL? = nil) async {
         guard !opened else { return }; opened = true
-        do { project = try MediaEditProject.load(in: session); selected = project.clips.first?.id; loadFailed = false }
+        do { project = try MediaEditProject.load(in: session); selected = project.visibleClips.first?.id; loadFailed = false }
         catch { loadFailed = true; problem = "Couldn’t open your saved edit. \(error.localizedDescription)" }
         observer = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.05, preferredTimescale: 600), queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -109,10 +110,29 @@ final class MediaEditorStore: ObservableObject {
         }
     }
     func preview(_ asset: Asset) {
-        pause(); sourcePlayer.pause(); source = asset
-        sourcePlayer.replaceCurrentItem(with: asset.kind == .image ? nil : AVPlayerItem(url: asset.url))
+        pause(); showTimeline(); source = asset
+        if asset.isGIF {
+            gifPreviewTask = Task {
+                do {
+                    let original = try MediaEditProject.source(asset.rel, session: session)
+                    let movie = try await MediaEditComposition.imageMovie(original, session: session, animated: true)
+                    guard !Task.isCancelled, source?.url == asset.url else { return }
+                    sourcePlayer.replaceCurrentItem(with: AVPlayerItem(url: movie))
+                    sourcePlayer.play()
+                } catch {
+                    if !Task.isCancelled { problem = error.localizedDescription }
+                }
+            }
+        } else if asset.kind != .image {
+            sourcePlayer.replaceCurrentItem(with: AVPlayerItem(url: asset.url))
+        }
     }
-    func showTimeline() { sourcePlayer.pause(); sourcePlayer.replaceCurrentItem(with: nil); source = nil }
+    func showTimeline() {
+        gifPreviewTask?.cancel()
+        sourcePlayer.pause()
+        sourcePlayer.replaceCurrentItem(with: nil)
+        source = nil
+    }
     func select(_ id: UUID) {
         selected = id; showTimeline()
         let start = project.position(id), end = start + (selectedClip?.duration ?? 0)
@@ -155,12 +175,13 @@ final class MediaEditorStore: ObservableObject {
     func edit(_ change: (inout MediaEditProject) -> Void) {
         guard editable else { return }
         var next = project; change(&next)
+        next.alignLinkedCameras()
         guard next != project else { return }
         do {
             try next.save(in: session)
             history.append(project); if history.count > 80 { history.removeFirst() }; future = []
             project = next; problem = nil; exported = nil
-            if !project.clips.contains(where: { $0.id == selected }) { selected = project.clips.first?.id }
+            if !project.visibleClips.contains(where: { $0.id == selected }) { selected = project.visibleClips.first?.id }
             refreshPreview()
         } catch { problem = "Couldn’t save this change. \(error.localizedDescription)" }
     }
@@ -172,7 +193,7 @@ final class MediaEditorStore: ObservableObject {
         do {
             try next.save(in: session)
             if redo { future.removeLast(); history.append(project) } else { history.removeLast(); future.append(project) }
-            project = next; selected = project.clips.first?.id; problem = nil; exported = nil; refreshPreview()
+            project = next; selected = project.visibleClips.first?.id; problem = nil; exported = nil; refreshPreview()
         } catch { problem = error.localizedDescription }
     }
     func split() {
@@ -185,13 +206,16 @@ final class MediaEditorStore: ObservableObject {
     }
     func remove() { guard let selected else { return }; edit { $0.clips.removeAll { $0.id == selected } } }
     func duplicate() {
-        guard var clip = selectedClip else { return }
+        guard var clip = selectedClip, clip.cameraLink == nil else { return }
+        let source = clip.id
         clip.id = UUID()
         if clip.lane != .video { clip.offset += clip.duration }
         edit { project in
             let index = project.clips.firstIndex { $0.id == selected } ?? (project.clips.count - 1)
             project.clips.insert(clip, at: index + 1)
-        }; selected = clip.id
+            project.copyCamera(from: source, to: clip.id)
+        }
+        if project.clips.contains(where: { $0.id == clip.id }) { selected = clip.id }
     }
     func add(_ asset: Asset, overlay: Bool = false, at insertion: Double? = nil, startDraft: Bool = false) async {
         guard editable else { return }; busy = true; defer { busy = false }
@@ -199,8 +223,18 @@ final class MediaEditorStore: ObservableObject {
             let root = session.standardizedFileURL.resolvingSymlinksInPath().path + "/"
             let url = asset.url.standardizedFileURL.resolvingSymlinksInPath()
             guard url.path.hasPrefix(root) else { throw MediaEditProject.Failure.invalid("Import this file into the session first.") }
-            let kind: MediaEditProject.Kind = asset.kind == .image ? .image : asset.kind == .audio ? .audio : .video
-            let seconds = kind == .image ? 3600 : try await AVURLAsset(url: url).load(.duration).seconds
+            let kind: MediaEditProject.Kind
+            let seconds: Double
+            if asset.isGIF {
+                kind = .gif
+                seconds = try GIFTiming(url: url).duration
+            } else if asset.kind == .image {
+                kind = .image
+                seconds = 3600
+            } else {
+                kind = asset.kind == .audio ? .audio : .video
+                seconds = try await AVURLAsset(url: url).load(.duration).seconds
+            }
             guard seconds.isFinite, seconds >= 1 / 30 else { throw MediaEditProject.Failure.invalid("This file has no usable duration.") }
             var clip = MediaEditProject.Clip(file: String(url.path.dropFirst(root.count)), name: url.deletingPathExtension().lastPathComponent,
                 kind: kind, lane: kind == .audio ? .audio : overlay ? .overlay : .video, sourceDuration: seconds, end: kind == .image ? 5 : seconds)
@@ -209,7 +243,7 @@ final class MediaEditorStore: ObservableObject {
             if overlay { clip.volume = 0 }
             var cameraOverlay: MediaEditProject.Clip?
             var cameraProblem: String?
-            if startDraft, let pair = pairedSources(for: clip) {
+            if let pair = pairedSources(for: clip) {
                 do { cameraOverlay = try await syncedOverlay(for: clip, camera: pair.camera, screen: pair.screen, position: 0) }
                 catch { cameraProblem = error.localizedDescription }
             }
@@ -234,10 +268,20 @@ final class MediaEditorStore: ObservableObject {
     }
     var canAddPairedCamera: Bool {
         guard let clip = selectedClip, let pair = pairedSources(for: clip) else { return false }
+        return !project.clips.contains { $0.file == pair.camera.file && $0.cameraLink?.screen == clip.id }
+    }
+
+    private func existingCamera(for clip: MediaEditProject.Clip, file: String) -> MediaEditProject.Clip? {
         let start = project.position(clip.id), end = start + clip.duration
-        return !project.clips.contains {
-            $0.lane == .overlay && $0.file == pair.camera.file && $0.offset < end && $0.offset + $0.duration > start
+        return project.clips.first {
+            $0.cameraLink == nil && $0.lane == .overlay && $0.kind == .video && $0.file == file &&
+            $0.offset < end && $0.offset + $0.duration > start
         }
+    }
+
+    var hasUnlinkedCamera: Bool {
+        guard let clip = selectedClip, let pair = pairedSources(for: clip) else { return false }
+        return existingCamera(for: clip, file: pair.camera.file) != nil
     }
 
     private func pairedSources(for clip: MediaEditProject.Clip) -> (camera: Take, screen: Take)? {
@@ -259,6 +303,7 @@ final class MediaEditorStore: ObservableObject {
         var overlay = MediaEditProject.Clip(file: camera.file, name: "Camera · " + clip.name, kind: .video, lane: .overlay,
             sourceDuration: duration, start: start, end: end,
             offset: position + max(0, -(clip.start + delta)) / clip.speed, speed: clip.speed, volume: 0)
+        overlay.cameraLink = .init(screen: clip.id, screenMinusCamera: delta)
         overlay.overlayBottom = true
         return overlay
     }
@@ -270,8 +315,13 @@ final class MediaEditorStore: ObservableObject {
             let overlay = try await syncedOverlay(for: clip, camera: pair.camera, screen: pair.screen, position: project.position(clip.id))
             guard opened, !Task.isCancelled else { return }
             busy = false
-            edit { $0.clips.append(overlay) }
-            if project.clips.contains(where: { $0.id == overlay.id }) { selected = overlay.id }
+            if let existing = existingCamera(for: clip, file: pair.camera.file) {
+                update(existing.id) { $0.cameraLink = overlay.cameraLink }
+                selected = existing.id
+            } else {
+                edit { $0.clips.append(overlay) }
+                if project.clips.contains(where: { $0.id == overlay.id }) { selected = overlay.id }
+            }
         } catch { problem = error.localizedDescription }
     }
 
@@ -311,8 +361,10 @@ final class MediaEditorStore: ObservableObject {
             await scan()
         } catch { problem = "Some files could not be imported. \(error.localizedDescription)"; await scan() }
     }
-    func chooseFiles() {
-        let panel = NSOpenPanel(); panel.allowedContentTypes = [.movie, .image, .audio]; panel.allowsMultipleSelection = true
+    func chooseFiles(allowed: [UTType] = [.movie, .image, .audio]) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = allowed
+        panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.begin { [weak self] response in
             guard response == .OK else { return }
@@ -348,14 +400,14 @@ final class MediaEditorStore: ObservableObject {
         samplesTask?.cancel()
         samplesTask = Task { [weak self] in
             guard let self else { return }
-            for clip in project.clips {
+            for clip in project.visibleClips {
                 guard !Task.isCancelled else { return }
                 guard let url = try? MediaEditProject.source(clip.file, session: self.session) else { continue }
                 if clip.kind == .video {
                     let frames = try? await TimelineMedia.thumbnails(url: url, start: clip.start, end: clip.end, imageCount: min(8, max(2, 96 / max(1, project.clips.count))))
                     guard !Task.isCancelled else { return }; self.strips[clip.id] = frames ?? []
                 }
-                if clip.kind != .image {
+                if clip.kind == .video || clip.kind == .audio {
                     let samples = try? await TimelineMedia.waveform(url: url, start: clip.start, end: clip.end, sampleCount: 192)
                     guard !Task.isCancelled else { return }; self.waveforms[clip.id] = samples ?? []
                 }
@@ -398,6 +450,7 @@ final class MediaEditorStore: ObservableObject {
     }
     func cancelExport() { exportTask?.cancel(); render?.cancelExport() }
     func close() {
+        gifPreviewTask?.cancel()
         rebuild?.cancel(); thumbnailsTask?.cancel(); samplesTask?.cancel(); player.pause(); playing = false; sourcePlayer.pause()
         frameTask?.cancel(); frameGenerator?.cancelAllCGImageGeneration(); previewFrame = nil
         if let observer { player.removeTimeObserver(observer) }; observer = nil

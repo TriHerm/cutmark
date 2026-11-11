@@ -16,8 +16,8 @@ struct TimelinePlaybackTests {
 
         let camera = "take-01-renamed-camera.mov"
         let screen = "take-02-screen.mov"
-        try await makeVideo(root.appending(path: camera), size: CGSize(width: 64, height: 48), seconds: 2)
-        try await makeVideo(root.appending(path: screen), size: CGSize(width: 80, height: 60), seconds: 2)
+        try await VideoFixture.makeVideo(root.appending(path: camera), size: CGSize(width: 64, height: 48), seconds: 2)
+        try await VideoFixture.makeVideo(root.appending(path: screen), size: CGSize(width: 80, height: 60), seconds: 2)
         let meta = SessionMeta(title: "Playback", createdAt: Date(timeIntervalSince1970: 0), takes: [
             Take(number: 1, kind: .camera, file: camera, startedAt: Date(timeIntervalSince1970: 0), duration: 2),
             Take(number: 2, kind: .screen, file: screen, startedAt: Date(timeIntervalSince1970: 0), duration: 2),
@@ -97,9 +97,9 @@ struct TimelinePlaybackTests {
         let root = FileManager.default.temporaryDirectory.appending(path: "cutmark-playback-frame-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root.appending(path: "edits"), withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        try await makeVideo(root.appending(path: "take-01-camera.mov"),
+        try await VideoFixture.makeVideo(root.appending(path: "take-01-camera.mov"),
                             size: CGSize(width: 64, height: 48), seconds: 2)
-        try await makeVideo(root.appending(path: "take-02-screen.mov"),
+        try await VideoFixture.makeVideo(root.appending(path: "take-02-screen.mov"),
                             size: CGSize(width: 80, height: 60), seconds: 2)
         let takes = [
             Take(number: 1, kind: .camera, file: "take-01-camera.mov", startedAt: .distantPast, duration: 2),
@@ -129,9 +129,9 @@ struct TimelinePlaybackTests {
 
         let cameraFile = "take-01-camera.mov"
         let screenFile = "take-02-screen.mov"
-        try await makeVideo(root.appending(path: cameraFile), size: CGSize(width: 64, height: 48),
+        try await VideoFixture.makeVideo(root.appending(path: cameraFile), size: CGSize(width: 64, height: 48),
                             seconds: 2, fps: 30)
-        try await makeVideo(root.appending(path: screenFile), size: CGSize(width: 80, height: 60),
+        try await VideoFixture.makeVideo(root.appending(path: screenFile), size: CGSize(width: 80, height: 60),
                             seconds: 2, fps: 60)
         let meta = SessionMeta(title: "Mixed clock", createdAt: .distantPast, takes: [
             Take(number: 1, kind: .camera, file: cameraFile, startedAt: .distantPast, duration: 2),
@@ -230,7 +230,7 @@ struct TimelinePlaybackTests {
         try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: parent) }
-        try await makeVideo(session.appending(path: "take-01-camera.mov"),
+        try await VideoFixture.makeVideo(session.appending(path: "take-01-camera.mov"),
                             size: CGSize(width: 64, height: 48), seconds: 2)
         let take = Take(number: 1, kind: .camera, file: "take-01-camera.mov",
                         startedAt: .distantPast, duration: 2)
@@ -250,65 +250,6 @@ struct TimelinePlaybackTests {
 
     private func directorySnapshot(_ root: URL) throws -> Set<String> {
         Set(try FileManager.default.contentsOfDirectory(atPath: root.path))
-    }
-
-    private func makeVideo(_ url: URL, size: CGSize, seconds: Int, fps: Int = 30) async throws {
-        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
-        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: Int(size.width),
-            AVVideoHeightKey: Int(size.height),
-        ])
-        let audio = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 48_000,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderBitRateKey: 64_000,
-        ])
-        input.expectsMediaDataInRealTime = false
-        audio.expectsMediaDataInRealTime = false
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
-            kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
-            kCVPixelBufferWidthKey as String: Int(size.width),
-            kCVPixelBufferHeightKey as String: Int(size.height),
-        ])
-        guard writer.canAdd(input), writer.canAdd(audio) else { throw TestFailure.writer }
-        writer.add(input)
-        writer.add(audio)
-        guard writer.startWriting() else { throw writer.error ?? TestFailure.writer }
-        writer.startSession(atSourceTime: .zero)
-        guard let pool = adaptor.pixelBufferPool else { throw TestFailure.writer }
-
-        for frame in 0..<(seconds * fps) {
-            while !input.isReadyForMoreMediaData { await Task.yield() }
-            var pixel: CVPixelBuffer?
-            guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pixel) == kCVReturnSuccess, let pixel else {
-                throw TestFailure.writer
-            }
-            CVPixelBufferLockBaseAddress(pixel, [])
-            if let base = CVPixelBufferGetBaseAddress(pixel) {
-                base.assumingMemoryBound(to: UInt8.self)
-                    .initialize(repeating: UInt8((frame * 7) % 255), count: CVPixelBufferGetDataSize(pixel))
-            }
-            CVPixelBufferUnlockBaseAddress(pixel, [])
-            guard adaptor.append(pixel, withPresentationTime: CMTime(value: CMTimeValue(frame),
-                                                                      timescale: CMTimeScale(fps))) else {
-                throw writer.error ?? TestFailure.writer
-            }
-        }
-        input.markAsFinished()
-        let audioFrames: Int32 = 4_800
-        let chunks = seconds * 10
-        for chunk in 0..<chunks {
-            while !audio.isReadyForMoreMediaData { await Task.yield() }
-            let sample = try audioSample(startFrame: Int64(chunk) * Int64(audioFrames), frames: audioFrames)
-            guard audio.append(sample) else { throw writer.error ?? TestFailure.writer }
-        }
-        audio.markAsFinished()
-        await withCheckedContinuation { continuation in
-            writer.finishWriting { continuation.resume() }
-        }
-        guard writer.status == .completed else { throw writer.error ?? TestFailure.writer }
     }
 
     /// Alternating 1/60 and 1/30 presentation gaps produces a true VFR track. AVFoundation reports
@@ -333,9 +274,14 @@ struct TimelinePlaybackTests {
         writer.startSession(atSourceTime: .zero)
         guard let pool = adaptor.pixelBufferPool else { throw TestFailure.writer }
 
+        defer { if writer.status == .writing { writer.cancelWriting() } }
+        let deadline = ContinuousClock.now + .seconds(15)
         var pts: CMTimeValue = 0
         for frame in 0..<80 {
-            while !input.isReadyForMoreMediaData { await Task.yield() }
+            while !input.isReadyForMoreMediaData {
+                guard writer.status == .writing, ContinuousClock.now < deadline else { throw writer.error ?? TestFailure.writer }
+                try await Task.sleep(for: .milliseconds(5))
+            }
             var pixel: CVPixelBuffer?
             guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pixel) == kCVReturnSuccess, let pixel else {
                 throw TestFailure.writer
@@ -356,47 +302,6 @@ struct TimelinePlaybackTests {
             writer.finishWriting { continuation.resume() }
         }
         guard writer.status == .completed else { throw writer.error ?? TestFailure.writer }
-    }
-
-    private func audioSample(startFrame: Int64, frames: Int32) throws -> CMSampleBuffer {
-        var format = AudioStreamBasicDescription(
-            mSampleRate: 48_000,
-            mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kLinearPCMFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
-            mBytesPerPacket: 2,
-            mFramesPerPacket: 1,
-            mBytesPerFrame: 2,
-            mChannelsPerFrame: 1,
-            mBitsPerChannel: 16,
-            mReserved: 0)
-        var formatDescription: CMAudioFormatDescription?
-        guard CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault, asbd: &format,
-                                             layoutSize: 0, layout: nil, magicCookieSize: 0,
-                                             magicCookie: nil, extensions: nil,
-                                             formatDescriptionOut: &formatDescription) == noErr,
-              let formatDescription else { throw TestFailure.writer }
-
-        let byteCount = Int(frames) * 2
-        var block: CMBlockBuffer?
-        guard CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault, memoryBlock: nil,
-                                                 blockLength: byteCount, blockAllocator: kCFAllocatorDefault,
-                                                 customBlockSource: nil, offsetToData: 0, dataLength: byteCount,
-                                                 flags: 0, blockBufferOut: &block) == kCMBlockBufferNoErr,
-              let block else { throw TestFailure.writer }
-        CMBlockBufferFillDataBytes(with: 0, blockBuffer: block, offsetIntoDestination: 0, dataLength: byteCount)
-
-        var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 48_000),
-                                        presentationTimeStamp: CMTime(value: startFrame, timescale: 48_000),
-                                        decodeTimeStamp: .invalid)
-        var sampleSize = 2
-        var sample: CMSampleBuffer?
-        guard CMSampleBufferCreateReady(allocator: kCFAllocatorDefault, dataBuffer: block,
-                                        formatDescription: formatDescription, sampleCount: CMItemCount(frames),
-                                        sampleTimingEntryCount: 1, sampleTimingArray: &timing,
-                                        sampleSizeEntryCount: 1, sampleSizeArray: &sampleSize,
-                                        sampleBufferOut: &sample) == noErr,
-              let sample else { throw TestFailure.writer }
-        return sample
     }
 
     private enum TestFailure: Error { case writer }
