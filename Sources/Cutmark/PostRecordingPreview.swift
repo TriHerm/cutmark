@@ -232,10 +232,11 @@ struct PostRecordingPreviewCard: View {
                     .buttonStyle(.plain)
                     .help("Open the saved take in Cutmark for full review")
 
-                Button("Edit") {
+                Button("Open editor") {
                     guard let url = sourceURL else { dismiss(); return }
                     player.pause(); playing = false
-                    TimelineEditorWindow.shared.open(video: url, doc: doc, app: app)
+                    TimelineEditorWindow.shared.open(video: url, doc: doc, app: app, startEdit: true)
+                    NSApp.activate(ignoringOtherApps: true)
                     dismissSoon()
                 }
                 .buttonStyle(.plain)

@@ -13546,6 +13546,101 @@ def t_get_edit_recipe(a):
     return {"recipe": r, "lineage": lineage, "missing": missing, "newer": newer}
 
 
+STUDIO_PROJECT = "_edit/studio/project.json"
+STUDIO_CUTS = "_edit/studio/cuts.json"
+
+
+def studio_snapshot(session):
+    path = os.path.join(session, STUDIO_PROJECT)
+    if os.path.realpath(path) != os.path.join(os.path.realpath(session), STUDIO_PROJECT):
+        raise ValueError("The native timeline path must stay inside the session.")
+    try:
+        with open(path, "rb") as file:
+            raw = file.read(4_194_305)
+    except FileNotFoundError:
+        raise ValueError("Add a recording to the Edit timeline first.") from None
+    if len(raw) > 4_194_304:
+        raise ValueError("The native timeline file is too large.")
+    project = json.loads(raw)
+    clips = project.get("clips") if isinstance(project, dict) and project.get("version") == 1 else None
+    if not isinstance(clips, list) or len(clips) > 200:
+        raise ValueError("The native timeline format is invalid.")
+    timeline, at = [], 0.0
+    for clip in clips:
+        if not isinstance(clip, dict):
+            raise ValueError("The native timeline has an invalid clip.")
+        lane = clip.get("lane")
+        file = clip.get("file")
+        start, end, speed, offset = (clip.get(key) for key in ("start", "end", "speed", "offset"))
+        if (lane not in ("video", "overlay", "audio") or not isinstance(file, str) or not file or
+                os.path.isabs(file) or ".." in file.split("/") or
+                any(type(n) not in (int, float) or not 0 <= n <= 86400 for n in (start, end, speed, offset)) or
+                not 0.25 <= speed <= 4 or end < start or
+                (end == start and (lane != "overlay" or not isinstance(clip.get("cameraLink"), dict)))):
+            raise ValueError("The native timeline has an invalid clip.")
+        if end == start:
+            continue  # Linked camera with no overlap in the current screen trim.
+        length = (end - start) / speed
+        output = at if lane == "video" else offset
+        span = {"file": file, "lane": lane, "source_start": start, "source_end": end,
+                "output_start": output, "output_end": output + length, "speed": speed}
+        words = os.path.splitext(file)[0] + ".words.json"
+        candidate = os.path.realpath(os.path.join(session, words))
+        if os.path.commonpath([os.path.realpath(session), candidate]) == os.path.realpath(session) and os.path.isfile(candidate):
+            span["words_file"] = words
+        timeline.append(span)
+        if lane == "video":
+            at += length
+    if not 0 < at <= 86400:
+        raise ValueError("Add a video clip to the Edit timeline first.")
+    return {"revision": hashlib.sha256(raw).hexdigest(), "duration": at, "timeline": timeline}
+
+
+def t_get_studio_timeline(a):
+    session = resolve_session(a["session"])
+    return {"session": session, **studio_snapshot(session)}
+
+
+def t_propose_studio_cuts(a):
+    session = resolve_session(a["session"])
+    snapshot = studio_snapshot(session)
+    if a.get("revision") != snapshot["revision"]:
+        raise ValueError("The timeline changed. Call get_studio_timeline again and recheck the cuts.")
+    cuts = a.get("cuts")
+    if not isinstance(cuts, list) or not 1 <= len(cuts) <= 30:
+        raise ValueError("Suggest between 1 and 30 cuts.")
+    clean = []
+    for cut in cuts:
+        if not isinstance(cut, dict):
+            raise ValueError("Each cut needs start, end and reason.")
+        start, end, reason = cut.get("start"), cut.get("end"), cut.get("reason")
+        if (type(start) not in (int, float) or type(end) not in (int, float) or
+                not 0 <= start < end <= snapshot["duration"] or end - start < 1 / 30 or
+                not isinstance(reason, str) or not reason.strip() or len(reason.encode()) > 600):
+            raise ValueError("Each cut needs a valid timeline range of at least one frame and a short reason.")
+        clean.append({"start": start, "end": end, "reason": reason.strip()})
+    clean.sort(key=lambda cut: cut["start"])
+    if any(left["end"] > right["start"] for left, right in zip(clean, clean[1:])):
+        raise ValueError("Suggested cuts must not overlap.")
+    removed = sum(cut["end"] - cut["start"] for cut in clean)
+    if snapshot["duration"] - removed < 1 / 30:
+        raise ValueError("Keep at least one frame of video.")
+    proposal = os.path.join(session, STUDIO_CUTS)
+    # Each caller gets its own temporary file. A manual save during this write makes
+    # the proposal stale, and the app checks the revision again before applying.
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=os.path.dirname(proposal), delete=False) as file:
+        temp = file.name
+        try:
+            json.dump({"revision": snapshot["revision"], "cuts": clean}, file, ensure_ascii=False)
+            file.close()
+            os.replace(temp, proposal)
+        finally:
+            if os.path.exists(temp):
+                os.unlink(temp)
+    return {"proposal": STUDIO_CUTS, "cuts": clean, "seconds_removed": removed,
+            "next": "Review the suggested cuts in Cutmark > Edit > Assist. The timeline is unchanged."}
+
+
 def t_plan_timeline_edit(a):
     """Inspect or change occurrences on a published edit's cut timeline, without writes."""
     s = resolve_session(a["session"])
@@ -14876,6 +14971,21 @@ TOOLS = [
       "edit": {"type": "string", "description": "'hook-v4', 'edits/hook-v4.mp4' or 'hook' for its newest. Default: "
                "the newest edit."}},
      ["session"], t_get_edit_recipe),
+    ("get_studio_timeline", "Read the editable native timeline, its revision and source-to-output times. "
+     "Read available words_file paths in the returned session to ground cut suggestions. "
+     "Convert source seconds to output seconds as output_start + (source_seconds - source_start) / speed.",
+     {"session": SESSION}, ["session"], t_get_studio_timeline),
+    ("propose_studio_cuts", "Send reviewable removals to Edit > Assist for the current native timeline. "
+     "Call get_studio_timeline first. The user chooses which cuts to apply. Does not modify the timeline or render media.",
+     {"session": SESSION,
+      "revision": {"type": "string", "description": "Exact revision returned by get_studio_timeline."},
+      "cuts": {"type": "array", "description": "Non-overlapping ranges in the current output timeline.",
+               "minItems": 1, "maxItems": 30, "items": {"type": "object", "properties": {
+          "start": {"type": "number", "description": "Start in output seconds."},
+          "end": {"type": "number", "description": "End in output seconds."},
+          "reason": {"type": "string", "description": "What the viewer gains by removing this range."}},
+          "required": ["start", "end", "reason"]}}},
+     ["session", "revision", "cuts"], t_propose_studio_cuts),
     ("plan_timeline_edit", "Inspect a published edit's ordered cut timeline or propose non-destructive segment operations. "
      "actions=[{op:'split',index:0,at:4.2},{op:'trim',index:1,in:4.5,out:6.5},{op:'extend',index:1,in:4.2,out:7.0},{op:'move',index:1,to:0},"
      "{op:'duplicate',index:0},{op:'remove',index:2}] uses zero-based CURRENT segment indices, in source seconds. "
@@ -15067,7 +15177,8 @@ READ_ONLY = {"get_comment_context", "list_comment_suggestions", "list_projects",
              "post_history", "get_post_queue", "get_plan", "get_comments", "get_rules", "script_history",
              "get_script_version", "get_performance", "list_broll", "search_media", "list_music", "get_library",
              "phone_videos", "higgsfield_status", "replicate_status", "replicate_model",
-             "list_ideas", "get_idea", "get_job", "get_edit_recipe", "plan_timeline_edit", "suggest_auto_zooms", "suggest_smart_speed"}
+             "list_ideas", "get_idea", "get_job", "get_edit_recipe", "plan_timeline_edit", "suggest_auto_zooms", "suggest_smart_speed",
+             "get_studio_timeline"}
 DESTRUCTIVE = {"trash_takes", "trash_sessions", "delete_variants", "delete_post_variants", "copy_library",
                "set_rule", "set_hooks", "set_post_hooks", "set_storyboard",
                # run_job runs any shell command: clients that gate on destructiveHint must ask first.

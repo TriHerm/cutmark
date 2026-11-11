@@ -10,10 +10,11 @@ enum SessionJourney {
         var latestTakeDate: Date?
         var edit: URL?
         var draft: URL?
+        var studioDraft = false
         var missingTakes = false
     }
     enum Step {
-        case empty, missing, take(URL, Int), edit(URL), draft(URL), processing(Job), attention(Job), result(Job)
+        case empty, missing, take(URL, Int), edit(URL), draft(URL), studioDraft, processing(Job), attention(Job), result(Job)
     }
 
     static func containedVideo(_ relative: String, session: URL) -> URL? {
@@ -79,6 +80,13 @@ enum SessionJourney {
             guard replay.segments == draft.segments else { return nil }
             return (video, modified(file))
         }.sorted { $0.1 > $1.1 }.first?.0
+        let studio = MediaEditProject.file(in: session)
+        if modified(studio) >= (files.latestTakeDate ?? .distantPast),
+           modified(studio) > (files.edit.map(modified) ?? .distantPast),
+           let project = try? MediaEditProject.load(in: session), project.duration > 0,
+           project.clips.allSatisfy({ (try? MediaEditProject.source($0.file, session: session)) != nil }) {
+            files.studioDraft = true
+        }
         return files
     }
 
@@ -95,6 +103,7 @@ enum SessionJourney {
                 $0.hasPrefix("_edit/renders/") && containedVideo($0, session: latest.session) != nil
             }) { return .result(latest) }
         }
+        if files.studioDraft { return .studioDraft }
         if let draft = files.draft { return .draft(draft) }
         if let edit = files.edit { return .edit(edit) }
         if let take = files.take { return .take(take, files.takeNumber ?? 1) }
@@ -161,7 +170,7 @@ private struct SessionJourneyContent: View {
             let loaded = await Task.detached(priority: .utility) { SessionJourney.load(session: session, takes: takes) }.value
             guard !Task.isCancelled, doc.url == session else { return }; files = loaded; self.loaded = true
         }
-        .onReceive(NotificationCenter.default.publisher(for: .cutmarkFilesChanged)) { _ in fileVersion += 1 }
+        .onFilesChanged(in: doc.url) { fileVersion += 1 }
         .onReceive(NotificationCenter.default.publisher(for: .cutmarkJobsChanged)) { note in
             if note.object as? URL == doc.url, !jobs.contains(where: { $0.status.live }) { fileVersion += 1 }
         }
@@ -189,7 +198,7 @@ private struct SessionJourneyContent: View {
         case .missing: return "A recording file is missing. Check the session folder."
         case .take(_, let n): return "Take \(n) saved · ready for a first cut"
         case .edit: return "Saved video · ready to review or edit"
-        case .draft: return "Your editing draft is saved"
+        case .draft, .studioDraft: return "Your editing draft is saved"
         case .processing(let job), .attention(let job), .result(let job): return SessionJourney.jobTitle(job)
         }
     }
@@ -203,8 +212,17 @@ private struct SessionJourneyContent: View {
     }
     @ViewBuilder private var action: some View {
         switch step {
-        case .take(let url, _): Button("Edit take") { open(url) }.buttonStyle(AccentButtonStyle(kind: .solid))
-        case .draft(let url): Button("Continue editing") { open(url) }.buttonStyle(AccentButtonStyle(kind: .solid))
+        case .take(let url, _):
+            Button("Edit take") { TimelineEditorWindow.shared.open(video: url, doc: doc, app: app, startEdit: true) }
+                .buttonStyle(AccentButtonStyle(kind: .solid))
+        case .studioDraft:
+            if SessionMode(rawValue: tab) != .edit {
+                Button("Continue editing") { app.preview = nil; SessionMode.set(.edit) }
+                    .buttonStyle(AccentButtonStyle(kind: .solid))
+            }
+        case .draft(let url):
+            Button("Continue editing") { TimelineEditorWindow.shared.openLegacy(video: url, doc: doc, app: app) }
+                .buttonStyle(AccentButtonStyle(kind: .solid))
         case .edit(let url): Button("Review video") { review = TimelineResultReview.savedJob(video: url, session: doc.url) }
                 .buttonStyle(AccentButtonStyle(kind: .solid))
         case .result(let job): Button("Review video") { review = job }.buttonStyle(AccentButtonStyle(kind: .solid))

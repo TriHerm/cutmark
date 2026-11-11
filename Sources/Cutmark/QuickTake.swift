@@ -97,7 +97,7 @@ struct QuickTakePane: View {
     private var latest: Int? { doc.meta.takes.map(\.number).max() }
     private var recordTitle: String {
         switch app.phase {
-        case .idle: return "Record idea"
+        case .idle: return "Start recording"
         case .warming, .countdown: return "Cancel"
         case .recording: return "Finish take"
         case .starting: return "Preparing…"
@@ -107,12 +107,12 @@ struct QuickTakePane: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                Label("QUICK TAKE", systemImage: "record.circle").font(Theme.sans(11, .bold)).tracking(1).foregroundStyle(Theme.accent)
-                Text(app.isRecording ? "Let the idea out." : "One idea is enough.")
-                    .font(Theme.display(30)).foregroundStyle(Theme.ink)
-                Text("Say it in your own words. You can turn the transcript into a plan after the take.")
-                    .font(Theme.sans(15)).foregroundStyle(Theme.muted).lineSpacing(4)
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Quick recording")
+                    .font(Theme.display(28)).foregroundStyle(Theme.ink)
+                if app.phase == .idle {
+                    QuickRecordingInputs(camera: app.camera, screen: app.screen)
+                }
                 Button { app.toggleRecord() } label: {
                     Label(recordTitle, systemImage: app.isRecording ? "stop.fill" : "record.circle")
                 }
@@ -121,7 +121,18 @@ struct QuickTakePane: View {
                 if !app.isRecording {
                     Button("Add a script or notes") { doc.quickTake = false }
                         .buttonStyle(.plain).font(Theme.sans(12)).foregroundStyle(Theme.muted)
-                    if let latest { TakePlanCard(doc: doc, number: latest) }
+                    if let latest {
+                        if let take = doc.meta.takes.first(where: { $0.number == latest && $0.kind == .screen })
+                            ?? doc.meta.takes.first(where: { $0.number == latest }),
+                           let url = SessionJourney.containedVideo(take.file, session: doc.url) {
+                            Button {
+                                TimelineEditorWindow.shared.open(video: url, doc: doc, app: app, startEdit: true)
+                            } label: {
+                                Label("Open latest take in editor", systemImage: "scissors")
+                            }.buttonStyle(AccentButtonStyle(kind: .quiet))
+                        }
+                        TakePlanCard(doc: doc, number: latest)
+                    }
                 }
             }.padding(28).frame(maxWidth: 560, alignment: .leading).frame(maxWidth: .infinity)
         }.background(Theme.paper)

@@ -2,6 +2,8 @@ import Testing
 import AppKit
 import SwiftUI
 import AVFoundation
+import ImageIO
+import UniformTypeIdentifiers
 @testable import Cutmark
 
 @Suite(.serialized) @MainActor
@@ -67,7 +69,7 @@ struct MediaEditorTests {
     }
     @Test func compositionExportsStillsSpeedOverlayAndMixedAudio() async throws {
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
-        try await makeVideo(root.appending(path: "source.mov"), size: CGSize(width: 96, height: 64), seconds: 2)
+        try await VideoFixture.makeVideo(root.appending(path: "source.mov"), size: CGSize(width: 96, height: 64), seconds: 2)
         try image(.red, at: root.appending(path: "red.png"))
         try image(.blue, at: root.appending(path: "blue.png"))
         let movie = MediaEditProject.Clip(file: "source.mov", name: "Screen", kind: .video, lane: .video, sourceDuration: 2, end: 2, speed: 2, volume: 0)
@@ -106,7 +108,7 @@ struct MediaEditorTests {
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
         let app = AppModel(); app.library.setRoot(root)
         let doc = try #require(app.library.createSession())
-        try await makeVideo(doc.url.appending(path: "source.mov"), size: CGSize(width: 96, height: 64), seconds: 2)
+        try await VideoFixture.makeVideo(doc.url.appending(path: "source.mov"), size: CGSize(width: 96, height: 64), seconds: 2)
         let store = MediaEditorStore(doc: doc); await store.open(); defer { store.close() }
         await store.add(try #require(store.assets.first))
         let deadline = Date().addingTimeInterval(20)
@@ -123,7 +125,7 @@ struct MediaEditorTests {
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
         let app = AppModel(); app.library.setRoot(root)
         let doc = try #require(app.library.createSession())
-        try await makeVideo(doc.url.appending(path: "camera.mov"), size: CGSize(width: 96, height: 64), seconds: 2)
+        try await VideoFixture.makeVideo(doc.url.appending(path: "camera.mov"), size: CGSize(width: 96, height: 64), seconds: 2)
         let screen = Take(number: 1, kind: .screen, file: "screen.mov", startedAt: .distantPast, duration: 2, captureHostTime: 100.2, timingQuality: .videoFrame)
         let camera = Take(number: 1, kind: .camera, file: "camera.mov", startedAt: .distantPast, duration: 2, captureHostTime: 100, timingQuality: .videoFrame)
         doc.meta.takes = [screen, camera]; doc.save()
@@ -159,28 +161,244 @@ struct MediaEditorTests {
         store.edit { $0.clips = [] }
         #expect(try Data(contentsOf: MediaEditProject.file(in: doc.url)) == damaged)
     }
+    @Test func openingASavedTakeStartsOneSyncedDraftAndPreservesAnExistingTimeline() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let app = AppModel(); app.library.setRoot(root)
+        let doc = try #require(app.library.createSession())
+        let screen = doc.url.appending(path: "take-01-screen.mov")
+        let camera = doc.url.appending(path: "take-01-camera.mov")
+        try await VideoFixture.makeVideo(screen, size: CGSize(width: 96, height: 64), seconds: 2)
+        try FileManager.default.copyItem(at: screen, to: camera)
+        doc.meta.takes = [
+            Take(number: 1, kind: .screen, file: screen.lastPathComponent, startedAt: .distantPast, duration: 2,
+                 captureHostTime: 100.25, timingQuality: .videoFrame),
+            Take(number: 1, kind: .camera, file: camera.lastPathComponent, startedAt: .distantPast, duration: 2,
+                 captureHostTime: 100, timingQuality: .videoFrame),
+        ]
+        let store = MediaEditorStore(doc: doc); defer { store.close() }
+        TimelineEditorWindow.requested[doc.url] = .init(video: screen, startEdit: true)
+        await store.open()
+        #expect(store.project.clips.map(\.file) == [screen.lastPathComponent, camera.lastPathComponent])
+        #expect(store.project.clips.last?.start == 0.25)
+        #expect(store.project.clips.last?.volume == 0)
+        #expect(store.source == nil)
+        let files = SessionJourney.load(session: doc.url, takes: doc.meta.takes)
+        if case .studioDraft = SessionJourney.next(files: files, jobs: []) {} else {
+            Issue.record("Opening a recorded take should create a resumable draft.")
+        }
+        let original = store.project
+        TimelineEditorWindow.requested[doc.url] = .init(video: camera, startEdit: true)
+        await store.openRequestedMedia()
+        #expect(store.project == original)
+        #expect(store.source?.url.standardizedFileURL == camera.standardizedFileURL)
+    }
+
+    @Test func cutsRippleOverlaysAndAudioAndUndoAsOneEdit() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let app = AppModel(); app.library.setRoot(root)
+        let doc = try #require(app.library.createSession())
+        let video = clip()
+        var overlay = clip("overlay.mov", lane: .overlay); overlay.offset = 0.5
+        var audio = clip("audio.mov", lane: .audio); audio.offset = 2.5; audio.fadeIn = 2
+        let project = MediaEditProject(clips: [video, overlay, audio])
+        try project.save(in: doc.url)
+        let store = MediaEditorStore(doc: doc); await store.open(); defer { store.close() }
+        let revision = try StudioCutProposal.revision(of: project, in: doc.url)
+        let cut = StudioCut(start: 1, end: 2, reason: "Cut a repeated line")
+        store.applyCuts([cut], revision: revision)
+        #expect(store.project.duration == 2)
+        #expect(store.project.clips.filter { $0.lane == .video }.map(\.start) == [2, 6])
+        let cameraPieces = store.project.clips.filter { $0.lane == .overlay }
+        #expect(cameraPieces.map(\.offset) == [0.5, 1])
+        #expect(cameraPieces.map(\.start) == [2, 5])
+        #expect(store.project.clips.last?.offset == 1.5)
+        #expect(store.project.clips.last?.fadeIn == 2)
+        let shortened = store.project
+        store.applyCuts([cut], revision: revision)
+        #expect(store.project == shortened)
+        #expect(store.problem?.contains("timeline changed") == true)
+        store.undo()
+        #expect(store.project == project)
+        #expect(try MediaEditProject.load(in: doc.url) == project)
+    }
+
+    @Test func transcriptUsesTrimmedAndRetimedOutputClock() throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let video = clip()
+        let movie = root.appending(path: video.file)
+        try Data([1]).write(to: movie)
+        try Transcript.write([Word(word: "Outside", start: 0.3, end: 0.6),
+                              Word(word: "Hola.", start: 3, end: 3.5),
+                              Word(word: "Seguimos.", start: 7, end: 7.5)], source: "test", for: movie)
+        let project = MediaEditProject(clips: [clip("intro.mov"), video])
+        let phrases = StudioTranscript.phrases(in: project, session: root)
+        #expect(phrases.map(\.reason) == ["Hola.", "Seguimos."])
+        #expect(phrases.map(\.start) == [3.5, 5.5])
+        #expect(phrases.map(\.end) == [3.75, 5.75])
+    }
+
+    @Test func linkedCameraFollowsManualAndAssistedChanges() throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        var screen = clip("screen.mov")
+        screen.start = 0; screen.end = 8; screen.speed = 1
+        let intro = clip("intro.mov")
+        var camera = clip("camera.mov", lane: .overlay)
+        camera.cameraLink = .init(screen: screen.id, screenMinusCamera: -1)
+        var project = MediaEditProject(clips: [intro, screen, camera])
+        project.alignLinkedCameras()
+        #expect(project.clips.last?.offset == 4)
+        #expect(project.clips.last?.start == 0)
+
+        project.trim(screen.id, start: 2, end: 8)
+        project.move(screen.id, before: intro.id)
+        project.clips[0].speed = 2
+        project.alignLinkedCameras()
+        #expect(project.clips.last?.start == 1)
+        #expect(project.clips.last?.offset == 0)
+        #expect(project.clips.last?.speed == 2)
+        let didSplit = project.split(screen.id, at: 1)
+        #expect(didSplit)
+        let secondScreen = project.clips[1]
+        #expect(project.clips.last?.cameraLink?.screen == secondScreen.id)
+        #expect(project.clips.last?.start == 3)
+        #expect(project.clips.last?.offset == 1)
+
+        project = try project.removing([.init(start: 1.25, end: 1.75, reason: "Repeat")])
+        for camera in project.visibleClips.filter({ $0.cameraLink != nil }) {
+            let link = try #require(camera.cameraLink)
+            let parent = try #require(project.clips.first { $0.id == link.screen })
+            #expect(camera.start == parent.start - 1)
+            #expect(camera.end == parent.end - 1)
+            #expect(camera.offset == project.position(parent.id))
+            #expect(camera.speed == parent.speed)
+        }
+        #expect(project.visibleClips.filter { $0.cameraLink != nil }.count == 3)
+        try project.save(in: root)
+        #expect(try MediaEditProject.load(in: root) == project)
+        project.clips.removeAll { $0.id == screen.id }
+        project.alignLinkedCameras()
+        #expect(!project.clips.contains { $0.cameraLink?.screen == screen.id })
+    }
+
+    @Test func linkedCameraReturnsWhenScreenTrimOverlapsAgain() throws {
+        var screen = clip("screen.mov")
+        screen.start = 0; screen.end = 1; screen.speed = 1
+        var camera = clip("camera.mov", lane: .overlay)
+        camera.cameraLink = .init(screen: screen.id, screenMinusCamera: -2)
+        var project = MediaEditProject(clips: [screen, camera])
+        project.alignLinkedCameras()
+        try project.validate()
+        #expect(project.clips.count == 2)
+        #expect(project.visibleClips.count == 1)
+        project.trim(screen.id, start: 0, end: 4)
+        try project.validate()
+        #expect(project.visibleClips.count == 2)
+        #expect(project.clips.last?.offset == 2)
+        #expect(project.clips.last?.duration == 2)
+    }
+
+    @Test func gifAnimatesWithTransparencyInPreviewAndExport() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let gif = root.appending(path: "sticker.gif")
+        let app = AppModel(); app.library.setRoot(root)
+        let doc = try #require(app.library.createSession())
+        try image(.green, at: doc.url.appending(path: "back.png"))
+        try writeTestGIF(to: gif)
+        let original = try Data(contentsOf: gif)
+        let timing = try GIFTiming(url: gif)
+        #expect(timing.frameEnds == [9, 30])
+
+        let back = MediaEditProject.Clip(file: "back.png", name: "Background", kind: .image, lane: .video,
+                                         sourceDuration: 3600, end: 2)
+        try MediaEditProject(clips: [back]).save(in: doc.url)
+        let store = MediaEditorStore(doc: doc); defer { store.close() }
+        await store.open()
+        await store.importFiles([gif])
+        let imported = try #require(store.assets.first { $0.isGIF })
+        await store.add(imported, overlay: true, at: 0.5)
+        #expect(store.project.clips.last?.kind == .gif)
+        #expect(store.project.clips.last?.file == "assets/sticker.gif")
+        #expect(store.project.clips.last?.duration == 1)
+        #expect(store.project.clips.last?.offset == 0.5)
+        // Export and AVPlayer use this same composition.
+        let result = try await MediaEditComposition.build(store.project, session: doc.url)
+        let preview = AVAssetImageGenerator(asset: result.asset)
+        preview.videoComposition = result.video
+        try await checkAnimatedPixels(preview)
+
+        let output = root.appending(path: "export.mp4")
+        let exporter = try #require(AVAssetExportSession(asset: result.asset, presetName: AVAssetExportPresetHighestQuality))
+        exporter.videoComposition = result.video; exporter.audioMix = result.audio
+        try await exporter.export(to: output, as: .mp4)
+        let asset = AVURLAsset(url: output)
+        #expect(abs(try await asset.load(.duration).seconds - 2) < 0.04)
+        try await checkAnimatedPixels(AVAssetImageGenerator(asset: asset))
+        #expect(try Data(contentsOf: gif) == original)
+        #expect(try Data(contentsOf: imported.url) == original)
+    }
+
+    private func checkAnimatedPixels(_ generator: AVAssetImageGenerator) async throws {
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let redFrame = NSBitmapImageRep(cgImage: try await generator.image(at: MediaEditComposition.time(0.65)).image)
+        let blueFrame = NSBitmapImageRep(cgImage: try await generator.image(at: MediaEditComposition.time(1)).image)
+        let red = try #require(redFrame.colorAt(x: 1550, y: 200)?.usingColorSpace(.deviceRGB))
+        let blue = try #require(blueFrame.colorAt(x: 1550, y: 200)?.usingColorSpace(.deviceRGB))
+        let transparent = try #require(blueFrame.colorAt(x: 1460, y: 85)?.usingColorSpace(.deviceRGB))
+        #expect(red.redComponent > 0.7 && red.blueComponent < 0.3)
+        #expect(blue.blueComponent > 0.7 && blue.redComponent < 0.3)
+        #expect(transparent.greenComponent > 0.7)
+    }
+
+    private func writeTestGIF(to url: URL) throws {
+        let target = try #require(CGImageDestinationCreateWithURL(url as CFURL, UTType.gif.identifier as CFString, 2, nil))
+        for (color, delay) in [(NSColor.red, 0.3), (.blue, 0.7)] {
+            let context = try #require(CGContext(data: nil, width: 64, height: 64, bitsPerComponent: 8, bytesPerRow: 0,
+                                                 space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.setFillColor(color.cgColor)
+            context.fill(CGRect(x: 12, y: 12, width: 40, height: 40))
+            let frame = try #require(context.makeImage())
+            CGImageDestinationAddImage(target, frame, [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: delay]] as CFDictionary)
+        }
+        try #require(CGImageDestinationFinalize(target))
+    }
+
     @Test func renderEditorWorkspace() async throws {
         guard let directory = ProcessInfo.processInfo.environment["CUTMARK_SNAPSHOT"] else { return }
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
         let app = AppModel(); app.library.setRoot(root)
         let doc = try #require(app.library.createSession()); doc.meta.title = "A clearer product demo"
-        try await makeVideo(doc.url.appending(path: "Screen demo.mov"), size: CGSize(width: 320, height: 180), seconds: 4)
+        try await VideoFixture.makeVideo(doc.url.appending(path: "Screen demo.mov"), size: CGSize(width: 640, height: 360), seconds: 4)
         try image(.init(calibratedRed: 0.23, green: 0.34, blue: 0.62, alpha: 1), at: doc.url.appending(path: "Opening card.png"))
         try image(.init(calibratedRed: 0.68, green: 0.43, blue: 0.24, alpha: 1), at: doc.url.appending(path: "Closing card.png"))
+        try writeTestGIF(to: doc.url.appending(path: "Reaction.gif"))
         let a = MediaEditProject.Clip(file: "Screen demo.mov", name: "Screen demo", kind: .video, lane: .video, sourceDuration: 4, end: 4)
         let b = MediaEditProject.Clip(file: "Opening card.png", name: "Opening card", kind: .image, lane: .video, sourceDuration: 3600, end: 3)
         let c = MediaEditProject.Clip(file: "Closing card.png", name: "Camera overlay", kind: .image, lane: .overlay, sourceDuration: 3600, end: 2, offset: 1)
         let d = MediaEditProject.Clip(file: "Screen demo.mov", name: "Soundtrack", kind: .audio, lane: .audio, sourceDuration: 4, end: 4, offset: 1)
-        try MediaEditProject(clips: [b, a, c, d]).save(in: doc.url)
+        let draft = MediaEditProject(clips: [b, a, c, d])
+        try draft.save(in: doc.url)
+        try Transcript.write([.init(word: "First", start: 0.1, end: 0.45),
+                              .init(word: "attempt.", start: 0.45, end: 0.8),
+                              .init(word: "Let's", start: 2.1, end: 2.4),
+                              .init(word: "ship.", start: 2.4, end: 2.8)],
+                             source: "test", for: doc.url.appending(path: a.file))
+        let revision = try StudioCutProposal.revision(of: draft, in: doc.url)
+        let proposal = StudioCutProposal(revision: revision, cuts: [
+            .init(start: 3.1, end: 3.9, reason: "Remove the first attempt."),
+            .init(start: 4, end: 5.05, reason: "Shorten the pause before the demo."),
+        ])
+        try JSONEncoder().encode(proposal).write(to: doc.url.appending(path: StudioCutProposal.path))
         let store = MediaEditorStore(doc: doc); await store.open(); defer { store.close() }
         let deadline = Date().addingTimeInterval(20)
         while (store.building || store.strips[a.id] == nil || store.thumbnails.count < 3) && Date() < deadline { await Task.yield() }
         #expect(store.problem == nil)
         store.select(a.id)
-        for (name, width, height) in [("editor-wide", 1360.0, 860.0), ("editor-compact", 860.0, 660.0), ("editor-source", 1360.0, 860.0), ("editor-dark", 1360.0, 860.0)] {
+        for (name, width, height) in [("editor-wide", 1360.0, 860.0), ("editor-compact", 660.0, 660.0), ("editor-source", 1360.0, 860.0), ("editor-dark", 1360.0, 860.0), ("editor-assist", 1120.0, 740.0), ("editor-transcript", 1120.0, 740.0), ("editor-gif", 1120.0, 740.0)] {
             if name == "editor-dark" { store.showTimeline() }
             if name == "editor-source" { store.preview(try #require(store.assets.first(where: { $0.kind == .image }))) }
-            let host = NSHostingView(rootView: MediaEditorWorkspace(doc: doc, store: store).environment(app).environment(\.colorScheme, name == "editor-dark" ? .dark : .light))
+            let panel: StudioEditTools.Panel = name == "editor-assist" ? .assist : name == "editor-transcript" ? .transcript : .clip
+            let host = NSHostingView(rootView: MediaEditorWorkspace(doc: doc, store: store, panel: panel, showsMedia: name == "editor-gif").environment(app).environment(\.colorScheme, name == "editor-dark" ? .dark : .light))
             let window = NSWindow(contentRect: NSRect(x: 60, y: 60, width: width, height: height), styleMask: [.titled], backing: .buffered, defer: false)
             window.title = "Cutmark editor — synthetic test"; window.contentView = host; window.orderFrontRegardless()
             let until = Date().addingTimeInterval(1)
@@ -205,117 +423,4 @@ struct MediaEditorTests {
         let rep = try #require(NSBitmapImageRep(data: tiff))
         try #require(rep.representation(using: .png, properties: [:])).write(to: url)
     }
-    private func makeVideo(_ url: URL, size: CGSize, seconds: Int, fps: Int = 30) async throws {
-        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
-        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: Int(size.width),
-            AVVideoHeightKey: Int(size.height),
-        ])
-        let audio = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 48_000,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderBitRateKey: 64_000,
-        ])
-        input.expectsMediaDataInRealTime = false
-        audio.expectsMediaDataInRealTime = false
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
-            kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
-            kCVPixelBufferWidthKey as String: Int(size.width),
-            kCVPixelBufferHeightKey as String: Int(size.height),
-        ])
-        guard writer.canAdd(input), writer.canAdd(audio) else { throw TestFailure.writer }
-        writer.add(input)
-        writer.add(audio)
-        guard writer.startWriting() else { throw writer.error ?? TestFailure.writer }
-        writer.startSession(atSourceTime: .zero)
-        guard let pool = adaptor.pixelBufferPool else { throw TestFailure.writer }
-
-        let deadline = Date().addingTimeInterval(30)
-        func ready(_ input: AVAssetWriterInput) async throws {
-            while !input.isReadyForMoreMediaData {
-                guard writer.status == .writing, Date() < deadline else { throw writer.error ?? TestFailure.writer }
-                try await Task.sleep(for: .milliseconds(2))
-            }
-        }
-        defer { if writer.status == .writing { writer.cancelWriting() } }
-        for frame in 0..<(seconds * fps) {
-            try await ready(audio)
-            let sample = try audioSample(startFrame: Int64(frame * 48000 / fps), frames: Int32(48000 / fps))
-            guard audio.append(sample) else { throw writer.error ?? TestFailure.writer }
-            try await ready(input)
-            var pixel: CVPixelBuffer?
-            guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pixel) == kCVReturnSuccess, let pixel else {
-                throw TestFailure.writer
-            }
-            CVPixelBufferLockBaseAddress(pixel, [])
-            if let base = CVPixelBufferGetBaseAddress(pixel) {
-                let context = try #require(CGContext(data: base, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8,
-                    bytesPerRow: CVPixelBufferGetBytesPerRow(pixel), space: CGColorSpaceCreateDeviceRGB(),
-                    bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue))
-                context.setFillColor(NSColor(calibratedRed: 0.07, green: 0.13, blue: 0.27, alpha: 1).cgColor)
-                context.fill(CGRect(origin: .zero, size: size))
-                context.setFillColor(NSColor(calibratedRed: 0.25, green: 0.43, blue: 0.76, alpha: 1).cgColor)
-                context.fill(CGRect(x: size.width * 0.08, y: size.height * 0.12, width: size.width * 0.84, height: size.height * 0.76))
-                context.setFillColor(NSColor(calibratedRed: 0.95, green: 0.72, blue: 0.4, alpha: 1).cgColor)
-                context.fill(CGRect(x: size.width * (0.16 + Double(frame % 30) / 180), y: size.height * 0.27, width: size.width * 0.3, height: size.height * 0.46))
-            }
-            CVPixelBufferUnlockBaseAddress(pixel, [])
-            guard adaptor.append(pixel, withPresentationTime: CMTime(value: CMTimeValue(frame),
-                                                                      timescale: CMTimeScale(fps))) else {
-                throw writer.error ?? TestFailure.writer
-            }
-        }
-        input.markAsFinished()
-        audio.markAsFinished()
-        await withCheckedContinuation { continuation in
-            writer.finishWriting { continuation.resume() }
-        }
-        guard writer.status == .completed else { throw writer.error ?? TestFailure.writer }
-    }
-
-    private func audioSample(startFrame: Int64, frames: Int32) throws -> CMSampleBuffer {
-        var format = AudioStreamBasicDescription(
-            mSampleRate: 48_000,
-            mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kLinearPCMFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
-            mBytesPerPacket: 2,
-            mFramesPerPacket: 1,
-            mBytesPerFrame: 2,
-            mChannelsPerFrame: 1,
-            mBitsPerChannel: 16,
-            mReserved: 0)
-        var formatDescription: CMAudioFormatDescription?
-        guard CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault, asbd: &format,
-                                             layoutSize: 0, layout: nil, magicCookieSize: 0,
-                                             magicCookie: nil, extensions: nil,
-                                             formatDescriptionOut: &formatDescription) == noErr,
-              let formatDescription else { throw TestFailure.writer }
-
-        let byteCount = Int(frames) * 2
-        var block: CMBlockBuffer?
-        guard CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault, memoryBlock: nil,
-                                                 blockLength: byteCount, blockAllocator: kCFAllocatorDefault,
-                                                 customBlockSource: nil, offsetToData: 0, dataLength: byteCount,
-                                                 flags: 0, blockBufferOut: &block) == kCMBlockBufferNoErr,
-              let block else { throw TestFailure.writer }
-        let values = (0..<Int(frames)).map { Int16(sin(Double(startFrame + Int64($0)) * 2 * .pi * 440 / 48000) * 6500) }
-        _ = values.withUnsafeBytes { CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: byteCount) }
-
-        var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 48_000),
-                                        presentationTimeStamp: CMTime(value: startFrame, timescale: 48_000),
-                                        decodeTimeStamp: .invalid)
-        var sampleSize = 2
-        var sample: CMSampleBuffer?
-        guard CMSampleBufferCreateReady(allocator: kCFAllocatorDefault, dataBuffer: block,
-                                        formatDescription: formatDescription, sampleCount: CMItemCount(frames),
-                                        sampleTimingEntryCount: 1, sampleTimingArray: &timing,
-                                        sampleSizeEntryCount: 1, sampleSizeArray: &sampleSize,
-                                        sampleBufferOut: &sample) == noErr,
-              let sample else { throw TestFailure.writer }
-        return sample
-    }
-
-    private enum TestFailure: Error { case writer }
 }

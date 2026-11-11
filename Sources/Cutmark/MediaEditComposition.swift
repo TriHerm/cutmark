@@ -33,12 +33,17 @@ enum MediaEditComposition {
         guard project.duration >= 1 / 30 else { throw MediaEditProject.Failure.invalid("Add a video or image to the main video track first.") }
         let composition = AVMutableComposition(), canvas = size(project.format)
         var visuals: [Visual] = [], audioParameters: [AVAudioMixInputParameters] = []
-        for clip in project.clips {
+        for clip in project.visibleClips {
             try Task.checkCancellation()
             let position = project.position(clip.id), length = min(clip.duration, project.duration - position)
             guard length > 0 else { continue }
             let original = try MediaEditProject.source(clip.file, session: session)
-            let url = clip.kind == .image ? try await stillMovie(original, session: session) : original
+            let url: URL
+            switch clip.kind {
+            case .image: url = try await imageMovie(original, session: session, animated: false)
+            case .gif: url = try await imageMovie(original, session: session, animated: true)
+            default: url = original
+            }
             let asset = AVURLAsset(url: url)
             let sourceDuration = try await asset.load(.duration).seconds
             let sourceStart = clip.kind == .image ? 0 : clip.start
@@ -85,7 +90,7 @@ enum MediaEditComposition {
                 }
                 visuals.append(Visual(start: position, end: position + length, overlay: clip.lane == .overlay, layer: layer))
             }
-            if clip.kind != .image, let sourceAudio = try await asset.loadTracks(withMediaType: .audio).first,
+            if clip.kind == .video || clip.kind == .audio, let sourceAudio = try await asset.loadTracks(withMediaType: .audio).first,
                let destination = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
                 let range = try await sourceAudio.load(.timeRange)
                 let overlap = CMTimeRangeGetIntersection(requested, otherRange: range)
@@ -128,47 +133,100 @@ enum MediaEditComposition {
             .concatenating(CGAffineTransform(scaleX: scale, y: scale))
             .concatenating(CGAffineTransform(translationX: dx, y: dy))
     }
-    /// Cache a one-second still source, then scale its timeline duration without making duplicate files per trim.
-    private static func stillMovie(_ image: URL, session: URL) async throws -> URL {
+    /// Convert local images to an alpha-preserving source used by both playback and export.
+    /// The original GIF remains in the session assets. The MOV is a replaceable editor cache.
+    static func imageMovie(_ image: URL, session: URL, animated: Bool) async throws -> URL {
         let attrs = try image.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-        let key = SHA256.hash(data: Data(("alpha-v1|" + image.path + "|\(attrs.fileSize ?? 0)|\(attrs.contentModificationDate?.timeIntervalSince1970 ?? 0)").utf8)).map { String(format: "%02x", $0) }.joined()
-        let directory = session.appending(path: "_edit/studio/stills")
-        guard directory.resolvingSymlinksInPath().path.hasPrefix(session.resolvingSymlinksInPath().path + "/") else { throw MediaEditProject.Failure.invalid("The cache folder is outside this session.") }
-        _ = try MediaEditProject.directory("_edit/studio/stills", in: session)
-        let target = directory.appending(path: String(key) + ".mov")
-        if FileManager.default.fileExists(atPath: target.path) { return target }
-        guard let imageSource = CGImageSourceCreateWithURL(image as CFURL, nil),
-              let cg = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 1920, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary)
-        else { throw MediaEditProject.Failure.invalid("Cannot read \(image.lastPathComponent).") }
-        let width = max(2, cg.width / 2 * 2), height = max(2, cg.height / 2 * 2)
+        let prefix = animated ? "gif-alpha-v1|" : "alpha-v1|"
+        let key = SHA256.hash(data: Data((prefix + image.path + "|\(attrs.fileSize ?? 0)|\(attrs.contentModificationDate?.timeIntervalSince1970 ?? 0)").utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        let directory = try MediaEditProject.directory("_edit/studio/stills", in: session)
+        let target = directory.appending(path: key + ".mov")
+        if FileManager.default.fileExists(atPath: target.path) {
+            return try MediaEditProject.source("_edit/studio/stills/\(key).mov", session: session)
+        }
+        let timing = try animated ? GIFTiming(url: image) : nil
+        guard let source = timing?.source ?? CGImageSourceCreateWithURL(image as CFURL, nil),
+              let first = frameImage(source, index: 0, animated: animated) else {
+            throw MediaEditProject.Failure.invalid("Cannot read \(image.lastPathComponent).")
+        }
+        let width = max(2, first.width / 2 * 2), height = max(2, first.height / 2 * 2)
         let temporary = directory.appending(path: UUID().uuidString + ".mov")
         defer { try? FileManager.default.removeItem(at: temporary) }
         let writer = try AVAssetWriter(outputURL: temporary, fileType: .mov)
-        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.proRes4444, AVVideoWidthKey: width, AVVideoHeightKey: height])
-        let adapter = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB, kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height, kCVPixelBufferCGImageCompatibilityKey as String: true, kCVPixelBufferCGBitmapContextCompatibilityKey as String: true])
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.proRes4444, AVVideoWidthKey: width, AVVideoHeightKey: height,
+        ])
+        let adapter = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
+            kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height,
+            kCVPixelBufferCGImageCompatibilityKey as String: true, kCVPixelBufferCGBitmapContextCompatibilityKey as String: true,
+        ])
+        guard writer.canAdd(input) else { throw MediaEditProject.Failure.invalid("Could not prepare this image.") }
         writer.add(input)
         defer { if writer.status == .writing { writer.cancelWriting() } }
         guard writer.startWriting() else { throw writer.error ?? MediaEditProject.Failure.invalid("Could not prepare this image.") }
         writer.startSession(atSourceTime: .zero)
         guard let pool = adapter.pixelBufferPool else { throw MediaEditProject.Failure.invalid("Could not prepare this image.") }
-        var buffer: CVPixelBuffer?
-        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer)
-        guard let buffer else { throw MediaEditProject.Failure.invalid("Could not allocate the image frame.") }
-        CVPixelBufferLockBaseAddress(buffer, [])
-        guard let context = CGContext(data: CVPixelBufferGetBaseAddress(buffer), width: width, height: height, bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(buffer), space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue) else { CVPixelBufferUnlockBaseAddress(buffer, []); throw MediaEditProject.Failure.invalid("Could not draw this image.") }
-        context.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height)); CVPixelBufferUnlockBaseAddress(buffer, [])
-        for frame in 0..<30 {
-            while !input.isReadyForMoreMediaData {
-                try Task.checkCancellation()
-                guard writer.status == .writing else { throw writer.error ?? MediaEditProject.Failure.invalid("Image preparation stopped.") }
-                try await Task.sleep(for: .milliseconds(5))
+        var frame = 0
+        for (index, end) in (timing?.frameEnds ?? [30]).enumerated() where end > frame {
+            try Task.checkCancellation()
+            guard let cg = index == 0 ? first : frameImage(source, index: index, animated: animated) else {
+                throw MediaEditProject.Failure.invalid("Could not decode an image in \(image.lastPathComponent).")
             }
-            guard adapter.append(buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: 30)) else { throw writer.error ?? MediaEditProject.Failure.invalid("Could not prepare this image.") }
+            let buffer = try pixelBuffer(for: cg, pool: pool, width: width, height: height)
+            for tick in frame..<end {
+                try Task.checkCancellation()
+                let deadline = ContinuousClock.now + .seconds(10)
+                while !input.isReadyForMoreMediaData {
+                    guard writer.status == .writing, ContinuousClock.now < deadline else {
+                        throw writer.error ?? MediaEditProject.Failure.invalid("The image encoder stopped responding.")
+                    }
+                    try await Task.sleep(for: .milliseconds(5))
+                }
+                guard adapter.append(buffer, withPresentationTime: CMTime(value: Int64(tick), timescale: 30)) else {
+                    throw writer.error ?? MediaEditProject.Failure.invalid("Could not encode \(image.lastPathComponent).")
+                }
+            }
+            frame = end
         }
-        input.markAsFinished(); await writer.finishWriting()
+        input.markAsFinished()
+        writer.endSession(atSourceTime: CMTime(value: Int64(frame), timescale: 30))
+        await writer.finishWriting()
         guard writer.status == .completed else { throw writer.error ?? MediaEditProject.Failure.invalid("Could not finish this image.") }
-        // Another preview may have prepared the same source while this task was suspended.
-        if !FileManager.default.fileExists(atPath: target.path) { try FileManager.default.moveItem(at: temporary, to: target) }
-        return target
+        try Task.checkCancellation()
+        do {
+            try FileManager.default.moveItem(at: temporary, to: target)
+        } catch {
+            // Playback and export can both prepare the same source.
+            guard FileManager.default.fileExists(atPath: target.path) else { throw error }
+        }
+        return try MediaEditProject.source("_edit/studio/stills/\(key).mov", session: session)
+    }
+
+    private static func frameImage(_ source: CGImageSource, index: Int, animated: Bool) -> CGImage? {
+        CGImageSourceCreateThumbnailAtIndex(source, index, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: animated ? 720 : 1920,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ] as CFDictionary)
+    }
+
+    private static func pixelBuffer(for image: CGImage, pool: CVPixelBufferPool, width: Int, height: Int) throws -> CVPixelBuffer {
+        var buffer: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer) == kCVReturnSuccess, let buffer else {
+            throw MediaEditProject.Failure.invalid("Could not allocate the image frame.")
+        }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let context = CGContext(data: CVPixelBufferGetBaseAddress(buffer), width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue) else {
+            throw MediaEditProject.Failure.invalid("Could not draw this image.")
+        }
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        context.clear(bounds)
+        context.draw(image, in: bounds)
+        return buffer
     }
 }
