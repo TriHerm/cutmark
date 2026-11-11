@@ -105,6 +105,9 @@ struct CutmarkApp: App {
                     .disabled(Onboarding.shared.shown || app.isRecording)
             }
             CommandMenu("Record") {
+                Button("New Recording") { app.prepareQuickTake() }
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+                    .disabled(app.isRecording)
                 Button("Start / Stop Recording") { app.toggleRecord() }.keyboardShortcut("r")
                     .disabled(Onboarding.shared.shown)
                 Button("Play / Pause Script") { app.scrolling.toggle() }.keyboardShortcut("p")
@@ -1339,7 +1342,7 @@ struct DetailView: View {
                                                     .font(Theme.sans(12, .medium))
                                                 Spacer(minLength: 6)
                                                 Button {
-                                                    TimelineEditorWindow.shared.open(video: url, doc: doc, app: app)
+                                                    TimelineEditorWindow.shared.open(video: url, doc: doc, app: app, startEdit: true)
                                                 } label: {
                                                     Label("Open editor", systemImage: "arrow.up.left.and.arrow.down.right")
                                                 }
@@ -2464,7 +2467,7 @@ struct TakeRow: View {
                     MenuButton("Reveal in Finder", icon: "folder") { NSWorkspace.shared.revealSoon([url]) }
                     MenuButton("Edit this take…", icon: "scissors", enabled: !app.isRecording) {
                 if let video = SessionJourney.load(session: doc.url, takes: takes).take {
-                    TimelineEditorWindow.shared.open(video: video, doc: doc, app: app)
+                    TimelineEditorWindow.shared.open(video: video, doc: doc, app: app, startEdit: true)
                 }
             }
             MenuButton("Plan from this take…", icon: "text.bubble", enabled: !app.isRecording) { showPlan = true }
@@ -2498,7 +2501,7 @@ struct TakeRow: View {
         .cutmarkContextMenu { [trashRow] in
             MenuButton("Edit this take…", icon: "scissors", enabled: !app.isRecording) {
                 if let video = SessionJourney.load(session: doc.url, takes: takes).take {
-                    TimelineEditorWindow.shared.open(video: video, doc: doc, app: app)
+                    TimelineEditorWindow.shared.open(video: video, doc: doc, app: app, startEdit: true)
                 }
             }
             MenuButton("Plan from this take…", icon: "text.bubble", enabled: !app.isRecording) { showPlan = true }
@@ -2542,7 +2545,7 @@ struct EmptySessionView: View {
                     Button { app.prepareQuickTake() } label: {
                         HStack(spacing: 7) {
                             Circle().frame(width: 9, height: 9)
-                            Text("Quick take")
+                            Text("New recording")
                         }
                     }
                     .buttonStyle(AccentButtonStyle(kind: .solid))

@@ -159,28 +159,128 @@ struct MediaEditorTests {
         store.edit { $0.clips = [] }
         #expect(try Data(contentsOf: MediaEditProject.file(in: doc.url)) == damaged)
     }
+    @Test func openingASavedTakeStartsOneSyncedDraftAndPreservesAnExistingTimeline() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let app = AppModel(); app.library.setRoot(root)
+        let doc = try #require(app.library.createSession())
+        let screen = doc.url.appending(path: "take-01-screen.mov")
+        let camera = doc.url.appending(path: "take-01-camera.mov")
+        try await makeVideo(screen, size: CGSize(width: 96, height: 64), seconds: 2)
+        try FileManager.default.copyItem(at: screen, to: camera)
+        doc.meta.takes = [
+            Take(number: 1, kind: .screen, file: screen.lastPathComponent, startedAt: .distantPast, duration: 2,
+                 captureHostTime: 100.25, timingQuality: .videoFrame),
+            Take(number: 1, kind: .camera, file: camera.lastPathComponent, startedAt: .distantPast, duration: 2,
+                 captureHostTime: 100, timingQuality: .videoFrame),
+        ]
+        let store = MediaEditorStore(doc: doc); defer { store.close() }
+        TimelineEditorWindow.requested[doc.url] = .init(video: screen, startEdit: true)
+        await store.open()
+        #expect(store.project.clips.map(\.file) == [screen.lastPathComponent, camera.lastPathComponent])
+        #expect(store.project.clips.last?.start == 0.25)
+        #expect(store.project.clips.last?.volume == 0)
+        #expect(store.source == nil)
+        let files = SessionJourney.load(session: doc.url, takes: doc.meta.takes)
+        if case .studioDraft = SessionJourney.next(files: files, jobs: []) {} else {
+            Issue.record("Opening a recorded take should create a resumable draft.")
+        }
+        let original = store.project
+        TimelineEditorWindow.requested[doc.url] = .init(video: camera, startEdit: true)
+        await store.openRequestedMedia()
+        #expect(store.project == original)
+        #expect(store.source?.url.standardizedFileURL == camera.standardizedFileURL)
+    }
+
+    @Test func cutsRippleOverlaysAndAudioAndUndoAsOneEdit() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let app = AppModel(); app.library.setRoot(root)
+        let doc = try #require(app.library.createSession())
+        let video = clip()
+        var overlay = clip("overlay.mov", lane: .overlay); overlay.offset = 0.5
+        var audio = clip("audio.mov", lane: .audio); audio.offset = 2.5; audio.fadeIn = 2
+        let project = MediaEditProject(clips: [video, overlay, audio])
+        try project.save(in: doc.url)
+        let store = MediaEditorStore(doc: doc); await store.open(); defer { store.close() }
+        let revision = try StudioCutProposal.revision(of: project, in: doc.url)
+        let cut = StudioCut(start: 1, end: 2, reason: "Cut a repeated line")
+        store.applyCuts([cut], revision: revision)
+        #expect(store.project.duration == 2)
+        #expect(store.project.clips.filter { $0.lane == .video }.map(\.start) == [2, 6])
+        let cameraPieces = store.project.clips.filter { $0.lane == .overlay }
+        #expect(cameraPieces.map(\.offset) == [0.5, 1])
+        #expect(cameraPieces.map(\.start) == [2, 5])
+        #expect(store.project.clips.last?.offset == 1.5)
+        #expect(store.project.clips.last?.fadeIn == 2)
+        let shortened = store.project
+        store.applyCuts([cut], revision: revision)
+        #expect(store.project == shortened)
+        #expect(store.problem?.contains("timeline changed") == true)
+        store.undo()
+        #expect(store.project == project)
+        #expect(try MediaEditProject.load(in: doc.url) == project)
+    }
+
+    @Test func transcriptUsesTrimmedAndRetimedOutputClock() throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let video = clip()
+        let movie = root.appending(path: video.file)
+        try Data([1]).write(to: movie)
+        try Transcript.write([Word(word: "Outside", start: 0.3, end: 0.6),
+                              Word(word: "Hola.", start: 3, end: 3.5),
+                              Word(word: "Seguimos.", start: 7, end: 7.5)], source: "test", for: movie)
+        let project = MediaEditProject(clips: [clip("intro.mov"), video])
+        let phrases = StudioTranscript.phrases(in: project, session: root)
+        #expect(phrases.map(\.reason) == ["Hola.", "Seguimos."])
+        #expect(phrases.map(\.start) == [3.5, 5.5])
+        #expect(phrases.map(\.end) == [3.75, 5.75])
+    }
+
     @Test func renderEditorWorkspace() async throws {
         guard let directory = ProcessInfo.processInfo.environment["CUTMARK_SNAPSHOT"] else { return }
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
         let app = AppModel(); app.library.setRoot(root)
         let doc = try #require(app.library.createSession()); doc.meta.title = "A clearer product demo"
-        try await makeVideo(doc.url.appending(path: "Screen demo.mov"), size: CGSize(width: 320, height: 180), seconds: 4)
+        // Use a software encoder for snapshot evidence. The AV writer is exercised by the media tests.
+        let ffmpeg = try #require(["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"].first {
+            FileManager.default.isExecutableFile(atPath: $0)
+        })
+        let fixture = Process()
+        fixture.executableURL = URL(filePath: ffmpeg)
+        fixture.arguments = ["-v", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30:duration=4",
+                             "-f", "lavfi", "-i", "sine=frequency=440:duration=4", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                             "-c:a", "aac", "-shortest", doc.url.appending(path: "Screen demo.mov").path]
+        try fixture.run()
+        fixture.waitUntilExit()
+        try #require(fixture.terminationStatus == 0)
         try image(.init(calibratedRed: 0.23, green: 0.34, blue: 0.62, alpha: 1), at: doc.url.appending(path: "Opening card.png"))
         try image(.init(calibratedRed: 0.68, green: 0.43, blue: 0.24, alpha: 1), at: doc.url.appending(path: "Closing card.png"))
         let a = MediaEditProject.Clip(file: "Screen demo.mov", name: "Screen demo", kind: .video, lane: .video, sourceDuration: 4, end: 4)
         let b = MediaEditProject.Clip(file: "Opening card.png", name: "Opening card", kind: .image, lane: .video, sourceDuration: 3600, end: 3)
         let c = MediaEditProject.Clip(file: "Closing card.png", name: "Camera overlay", kind: .image, lane: .overlay, sourceDuration: 3600, end: 2, offset: 1)
         let d = MediaEditProject.Clip(file: "Screen demo.mov", name: "Soundtrack", kind: .audio, lane: .audio, sourceDuration: 4, end: 4, offset: 1)
-        try MediaEditProject(clips: [b, a, c, d]).save(in: doc.url)
+        let draft = MediaEditProject(clips: [b, a, c, d])
+        try draft.save(in: doc.url)
+        try Transcript.write([.init(word: "First", start: 0.1, end: 0.45),
+                              .init(word: "attempt.", start: 0.45, end: 0.8),
+                              .init(word: "Let's", start: 2.1, end: 2.4),
+                              .init(word: "ship.", start: 2.4, end: 2.8)],
+                             source: "test", for: doc.url.appending(path: a.file))
+        let revision = try StudioCutProposal.revision(of: draft, in: doc.url)
+        let proposal = StudioCutProposal(revision: revision, cuts: [
+            .init(start: 3.1, end: 3.9, reason: "Remove the first attempt."),
+            .init(start: 4, end: 5.05, reason: "Shorten the pause before the demo."),
+        ])
+        try JSONEncoder().encode(proposal).write(to: doc.url.appending(path: StudioCutProposal.path))
         let store = MediaEditorStore(doc: doc); await store.open(); defer { store.close() }
         let deadline = Date().addingTimeInterval(20)
         while (store.building || store.strips[a.id] == nil || store.thumbnails.count < 3) && Date() < deadline { await Task.yield() }
         #expect(store.problem == nil)
         store.select(a.id)
-        for (name, width, height) in [("editor-wide", 1360.0, 860.0), ("editor-compact", 860.0, 660.0), ("editor-source", 1360.0, 860.0), ("editor-dark", 1360.0, 860.0)] {
+        for (name, width, height) in [("editor-wide", 1360.0, 860.0), ("editor-compact", 660.0, 660.0), ("editor-source", 1360.0, 860.0), ("editor-dark", 1360.0, 860.0), ("editor-assist", 1120.0, 740.0), ("editor-transcript", 1120.0, 740.0)] {
             if name == "editor-dark" { store.showTimeline() }
             if name == "editor-source" { store.preview(try #require(store.assets.first(where: { $0.kind == .image }))) }
-            let host = NSHostingView(rootView: MediaEditorWorkspace(doc: doc, store: store).environment(app).environment(\.colorScheme, name == "editor-dark" ? .dark : .light))
+            let panel: StudioEditTools.Panel = name == "editor-assist" ? .assist : name == "editor-transcript" ? .transcript : .clip
+            let host = NSHostingView(rootView: MediaEditorWorkspace(doc: doc, store: store, panel: panel).environment(app).environment(\.colorScheme, name == "editor-dark" ? .dark : .light))
             let window = NSWindow(contentRect: NSRect(x: 60, y: 60, width: width, height: height), styleMask: [.titled], backing: .buffered, defer: false)
             window.title = "Cutmark editor — synthetic test"; window.contentView = host; window.orderFrontRegardless()
             let until = Date().addingTimeInterval(1)

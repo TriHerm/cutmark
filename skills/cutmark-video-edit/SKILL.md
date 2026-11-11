@@ -70,6 +70,15 @@ Times in `over`, `music` and `sfx` are seconds of the cut; a `cover` adds its 0.
 sound effects come from `list_music` (`@library/...` paths). `get_edit_recipe` shows any version's
 recipe and the versions before it.
 
+## Suggest cuts in the native Edit workspace
+
+When the user asks for cuts in their current native timeline, call `get_studio_timeline`. Read its
+available `words_file` sidecars. Convert the words' source times to output seconds using the clip's
+`output_start + (source_seconds - source_start) / speed`. Call `propose_studio_cuts` with the exact
+revision and the ranges you can support. The user reviews and applies selected ranges in Edit ›
+Assist. If the timeline changes, read it again and recompute. The proposal is separate from the
+project, and the original recordings stay intact.
+
 ## Edit segments from the timeline
 
 When the user requests a split, trim, reorder, duplicate, or deletion in an existing published edit,

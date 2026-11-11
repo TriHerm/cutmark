@@ -18,6 +18,109 @@ enum RecordingSoundCheck {
     }
 }
 
+/// The quick recorder uses the same capture settings and permissions as the Record stage.
+struct QuickRecordingInputs: View {
+    @Environment(AppModel.self) private var app
+    @ObservedObject var camera: CameraRecorder
+    @ObservedObject var screen: ScreenRecorder
+    @AppStorage("screenPreviewVisible") private var previewVisible = false
+    @State private var sourcesOpen = false
+
+    private var mode: Mode { app.mode.captureMode(cameraPaused: camera.paused) }
+    private var screenAllowed: Bool { CGPreflightScreenCaptureAccess() }
+    private var micName: String {
+        camera.audioDevices.first { $0.uniqueID == camera.audioID }?.localizedName ?? "Choose microphone"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            CutmarkSwitch(selection: Binding(get: { mode }, set: { value in
+                app.mode = value
+                if value.recordsCamera { camera.setPaused(false) }
+                if !value.recordsScreen { previewVisible = false; screen.setPreviewing(false) }
+            }), options: [(.camera, "Camera"), (.screen, "Screen"), (.cameraScreen, "Both")], fill: true)
+            if mode.recordsScreen {
+                Button {
+                    sourcesOpen = true
+                    Task { await screen.refreshCaptureSources() }
+                } label: {
+                    inputLabel("display", name: screen.selectedSourceName)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Screen source: \(screen.selectedSourceName)")
+                .cutmarkMenu(isPresented: $sourcesOpen, width: 290) {
+                    if !screenAllowed {
+                        MenuButton("Allow screen recording…", icon: "lock") {
+                            Task { await screen.refreshCaptureSources(requestPermission: true) }
+                        }
+                    }
+                    if !screen.displays.isEmpty { MenuLabel("Displays") }
+                    for display in screen.displays {
+                        MenuButton(display.name, icon: "display", checked: screen.selectedSource == .display(display.id)) {
+                            screen.selectSource(.display(display.id))
+                        }
+                    }
+                    if !screen.windows.isEmpty { MenuLabel("Windows") }
+                    for window in screen.windows {
+                        MenuButton(window.name, icon: "macwindow", checked: screen.selectedSource == window.source) {
+                            screen.selectSource(window.source)
+                        }
+                    }
+                    if screenAllowed {
+                        MenuButton("Preview source", icon: "eye", checked: previewVisible) {
+                            previewVisible.toggle()
+                            screen.setPreviewing(previewVisible)
+                        }
+                    }
+                }
+            }
+            if mode.recordsCamera {
+                CutmarkMenuButton(help: "Choose a camera") {
+                    inputLabel("video", name: camera.videoDevices.first { $0.uniqueID == camera.videoID }?.localizedName ?? "Choose camera")
+                } content: {
+                    for device in camera.videoDevices {
+                        MenuButton(device.localizedName, icon: "video", checked: device.uniqueID == camera.videoID) {
+                            camera.chooseVideo(device.uniqueID)
+                        }
+                    }
+                    if camera.videoDevices.isEmpty { MenuLabel("No camera available") }
+                }
+            }
+            CutmarkMenuButton(help: "Choose a microphone") {
+                inputLabel("mic", name: micName)
+            } content: {
+                for device in camera.audioDevices {
+                    MenuButton(device.localizedName, icon: "mic", checked: device.uniqueID == camera.audioID) {
+                        camera.chooseAudio(device.uniqueID)
+                    }
+                }
+                if camera.audioDevices.isEmpty { MenuLabel("No microphone available") }
+            }
+            if mode.recordsCamera && !camera.paused && !camera.held {
+                RecordingSoundStatus(meter: camera.meter,
+                    permission: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+                    deviceID: camera.audioID, monitoring: true)
+            }
+            CutmarkMenuButton(help: "Choose whether to count down before recording") {
+                inputLabel("timer", name: app.countdownOn ? "3-second countdown" : "Start immediately")
+            } content: {
+                MenuButton("3 seconds", checked: app.countdownOn) { app.countdownOn = true }
+                MenuButton("No countdown", checked: !app.countdownOn) { app.countdownOn = false }
+            }
+        }.padding(12)
+            .background(Theme.canvas, in: RoundedRectangle(cornerRadius: 11))
+    }
+
+    private func inputLabel(_ icon: String, name: String) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: icon).foregroundStyle(Theme.accent).frame(width: 17)
+            Text(name).lineLimit(1)
+            Spacer(minLength: 4)
+            Image(systemName: "chevron.up.chevron.down").font(.system(size: 8)).foregroundStyle(Theme.muted)
+        }.font(Theme.sans(12, .medium)).frame(minHeight: 24).contentShape(Rectangle())
+    }
+}
+
 struct RecordingSetupPanel: View {
     @Environment(AppModel.self) private var app
     let doc: SessionDoc

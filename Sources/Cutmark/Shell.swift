@@ -167,7 +167,7 @@ struct Sidebar: View {
             .transition(.opacity.combined(with: .move(edge: .top)))
             }
             SideRow(selected: false) {
-                NavLabel(icon: "record.circle", title: "Quick take", key: "")
+                NavLabel(icon: "record.circle", title: "New recording", key: "⇧⌘R")
             }
             .onTapGesture { app.prepareQuickTake() }
             .help("Open a fresh recording. No script or AI setup needed.")

@@ -11,10 +11,14 @@ final class TimelineEditorWindow: NSObject, NSWindowDelegate {
     private var windows: [URL: NSWindow] = [:]
 
     static let mediaRequested = Notification.Name("CutmarkMediaRequested")
-    static var requested: [URL: URL] = [:]
-    func open(video: URL, doc: SessionDoc, app: AppModel) {
+    struct MediaRequest: Equatable {
+        let video: URL
+        let startEdit: Bool
+    }
+    static var requested: [URL: MediaRequest] = [:]
+    func open(video: URL, doc: SessionDoc, app: AppModel, startEdit: Bool = false) {
         app.player?.pause()
-        Self.requested[doc.url] = video
+        Self.requested[doc.url] = MediaRequest(video: video, startEdit: startEdit)
         SessionMode.set(.edit)
         NotificationCenter.default.post(name: Self.mediaRequested, object: doc.url)
     }

@@ -3,7 +3,7 @@ import AVFoundation
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The editor begins with media, not a preselected recording. Every control changes the saved composition.
+/// One workspace for recording edits, media assembly and cut review.
 struct MediaEditorWorkspace: View {
     @Environment(AppModel.self) private var app
     @Environment(\.paneShown) private var shown
@@ -14,14 +14,19 @@ struct MediaEditorWorkspace: View {
     @State private var filter = MediaFilter.all
     @State private var inspectorOpen = false
     @State private var mediaOpen = false
+    @State private var showMediaSidebar = false
+    @State private var showInspector = true
+    @State private var panel: StudioEditTools.Panel
+    @State private var reviewRange: StudioCut?
     @State private var scale = 45.0
     @State private var fit = true
     @State private var snapping = true
     @State private var timelineHeight: CGFloat = 310
     @State private var resizeStart: CGFloat?
     @State private var exportReview: Job?
-    init(doc: SessionDoc, initial: URL? = nil, store: MediaEditorStore? = nil) {
+    init(doc: SessionDoc, initial: URL? = nil, store: MediaEditorStore? = nil, panel: StudioEditTools.Panel = .clip) {
         self.doc = doc; self.initial = initial
+        _panel = State(initialValue: panel)
         _store = StateObject(wrappedValue: store ?? MediaEditorStore(doc: doc))
     }
     enum MediaFilter: String, CaseIterable, Identifiable {
@@ -36,7 +41,7 @@ struct MediaEditorWorkspace: View {
     }
     var body: some View {
         GeometryReader { geometry in
-            let wide = geometry.size.width >= 1120
+            let wide = geometry.size.width >= 850
             VStack(spacing: 0) {
                 header(wide: wide)
                 if let problem = store.problem {
@@ -49,9 +54,15 @@ struct MediaEditorWorkspace: View {
                     }.buttonStyle(.plain).padding(10).background(Theme.warn.opacity(0.1))
                 }
                 HStack(spacing: 0) {
-                    if wide { mediaBrowser.frame(width: 252); Rectangle().fill(Theme.border).frame(width: 1) }
+                    if wide && showMediaSidebar {
+                        mediaBrowser.frame(width: 212)
+                        Rectangle().fill(Theme.border).frame(width: 1)
+                    }
                     preview.frame(maxWidth: .infinity, maxHeight: .infinity)
-                    if wide { Rectangle().fill(Theme.border).frame(width: 1); inspector.frame(width: 246) }
+                    if wide && showInspector {
+                        Rectangle().fill(Theme.border).frame(width: 1)
+                        tools.frame(width: 268)
+                    }
                 }.frame(maxHeight: .infinity)
                 Rectangle().fill(Theme.border).frame(height: 5).contentShape(Rectangle())
                     .onHover { if $0 { NSCursor.resizeUpDown.push() } else { NSCursor.pop() } }
@@ -60,18 +71,23 @@ struct MediaEditorWorkspace: View {
                         timelineHeight = min(geometry.size.height * 0.55, max(190, (resizeStart ?? timelineHeight) - value.translation.height))
                     }.onEnded { _ in resizeStart = nil })
                     .help("Drag to resize the timeline")
-                MediaEditorTimeline(store: store, scale: $scale, fit: $fit, snapping: $snapping)
+                MediaEditorTimeline(store: store, scale: $scale, fit: $fit, snapping: $snapping, reviewRange: reviewRange)
                     .frame(height: min(timelineHeight, geometry.size.height * 0.48))
             }
         }
         .background(Theme.canvas).foregroundStyle(Theme.ink)
         .task { await store.open(initial: initial) }
         .onDisappear { store.close() }
+        .onChange(of: store.project) { reviewRange = nil }
+        .onChange(of: panel) { reviewRange = nil }
         .onChange(of: shown) { _, on in if !on { store.pause(); store.sourcePlayer.pause() } }
-        .onReceive(NotificationCenter.default.publisher(for: TimelineEditorWindow.mediaRequested)) { _ in store.requestedPreview() }
-        .onReceive(NotificationCenter.default.publisher(for: .cutmarkFilesChanged)) { _ in Task { await store.scan() } }
+        .onReceive(NotificationCenter.default.publisher(for: TimelineEditorWindow.mediaRequested)) { notification in
+            guard notification.object as? URL == doc.url else { return }
+            Task { await store.openRequestedMedia() }
+        }
+        .onFilesChanged(in: doc.url) { Task { await store.scan() } }
         .cutmarkPopover(isPresented: $mediaOpen) { mediaBrowser.frame(width: 360, height: 560) }
-        .cutmarkPopover(isPresented: $inspectorOpen) { inspector.frame(width: 280, height: 540) }
+        .cutmarkPopover(isPresented: $inspectorOpen) { tools.frame(width: 310, height: 495) }
         .sheet(item: $exportReview) { TimelineResultReview(job: $0).environment(app) }
         .onChange(of: store.exported) { _, url in
             if let url { exportReview = TimelineResultReview.savedJob(video: url, session: doc.url) }
@@ -92,16 +108,23 @@ struct MediaEditorWorkspace: View {
     }
     private func header(wide: Bool) -> some View {
         HStack(spacing: 10) {
-            if !wide {
-                Button { mediaOpen = true } label: { Label("Media", systemImage: "square.grid.2x2") }
-                    .buttonStyle(AccentButtonStyle(kind: .quiet))
-                Button { inspectorOpen = true } label: { Label("Clip settings", systemImage: "slider.horizontal.3") }
-                    .buttonStyle(AccentButtonStyle(kind: .quiet))
-            } else {
-                Text("Editor").font(Theme.sans(15, .semibold))
-                Text(store.project.clips.isEmpty ? "Choose media to begin" : "Saved on this Mac")
-                    .font(Theme.sans(11)).foregroundStyle(Theme.muted)
+            Button {
+                if wide { showMediaSidebar.toggle() }
+                else { mediaOpen.toggle() }
+            } label: {
+                Label("Media", systemImage: "square.grid.2x2")
             }
+            .buttonStyle(AccentButtonStyle(kind: .quiet))
+            .help("Show videos, images and audio")
+
+            Button {
+                if wide { showInspector.toggle() }
+                else { inspectorOpen.toggle() }
+            } label: {
+                Label("Tools", systemImage: "slider.horizontal.3")
+            }
+            .buttonStyle(AccentButtonStyle(kind: .quiet))
+            .help("Clip settings, transcript and suggested cuts")
             Spacer(minLength: 4)
             CutmarkMenuButton(help: "Output format") {
                 Label(store.project.format.title, systemImage: "aspectratio").font(Theme.sans(12, .medium))
@@ -208,8 +231,8 @@ struct MediaEditorWorkspace: View {
                     } else {
                         VStack(spacing: 14) {
                             Image(systemName: "play.rectangle").font(.system(size: 42))
-                            Text("Your story starts here").font(Theme.sans(20, .semibold))
-                            Text("Preview a file in the media library, then add it to the timeline.")
+                            Text("Start an edit").font(Theme.sans(20, .semibold))
+                            Text("Browse recordings or import a video.")
                                 .font(Theme.sans(13)).foregroundStyle(.white.opacity(0.7)).multilineTextAlignment(.center)
                             Button("Choose media") { mediaOpen = true }.buttonStyle(AccentButtonStyle(kind: .quiet))
                         }.foregroundStyle(.white).padding(28)
@@ -244,6 +267,16 @@ struct MediaEditorWorkspace: View {
             }
         }
     }
+    private var tools: some View {
+        VStack(spacing: 0) {
+            CutmarkSwitch(selection: $panel, options: StudioEditTools.Panel.allCases.map { ($0, $0.rawValue) }, fill: true)
+                .padding(10)
+            Rule()
+            if panel == .clip { inspector }
+            else { StudioEditTools(store: store, doc: doc, panel: panel, reviewRange: $reviewRange) }
+        }.frame(maxHeight: .infinity).background(Theme.paper)
+    }
+
     private var inspector: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
@@ -299,7 +332,7 @@ struct MediaEditorWorkspace: View {
                                 setting("Horizontal focus", value: clip.focusX, range: 0...1, format: "%.2f") { v in store.update(clip.id) { $0.focusX = v } }
                                 setting("Vertical focus", value: clip.focusY, range: 0...1, format: "%.2f") { v in store.update(clip.id) { $0.focusY = v } }
                             }
-                            if store.pairedCamera != nil {
+                            if store.canAddPairedCamera {
                                 Button("Add synced camera") { Task { await store.addPairedCamera() } }
                                     .buttonStyle(AccentButtonStyle(kind: .quiet))
                             }

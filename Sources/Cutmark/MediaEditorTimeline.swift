@@ -6,6 +6,7 @@ struct MediaEditorTimeline: View {
     @Binding var scale: Double
     @Binding var fit: Bool
     @Binding var snapping: Bool
+    var reviewRange: StudioCut?
     @State private var viewport: CGFloat = 800
     @FocusState private var focused: Bool
     private let labelWidth: CGFloat = 90
@@ -33,6 +34,17 @@ struct MediaEditorTimeline: View {
                                 else { ForEach(audio) { lane(.audio, clips: [$0], height: 58) } }
                             }
                             .frame(width: width, alignment: .leading)
+                            .overlay(alignment: .topLeading) {
+                                if let range = reviewRange {
+                                    Rectangle()
+                                        .fill(Theme.warn.opacity(0.16))
+                                        .overlay(alignment: .leading) { Rectangle().fill(Theme.warn).frame(width: 1) }
+                                        .overlay(alignment: .trailing) { Rectangle().fill(Theme.warn).frame(width: 1) }
+                                        .frame(width: max(1, (range.end - range.start) * scale))
+                                        .offset(x: range.start * scale)
+                                        .allowsHitTesting(false)
+                                }
+                            }
                             .overlay(alignment: .topLeading) {
                                 VStack(spacing: 0) {
                                     Image(systemName: "arrowtriangle.down.fill").font(.system(size: 11)).foregroundStyle(Theme.danger)

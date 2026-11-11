@@ -50,7 +50,7 @@ final class MediaEditorStore: ObservableObject {
     init(doc: SessionDoc) { self.doc = doc; session = doc.url }
     func open(initial: URL? = nil) async {
         guard !opened else { return }; opened = true
-        do { project = try MediaEditProject.load(in: session); loadFailed = false }
+        do { project = try MediaEditProject.load(in: session); selected = project.clips.first?.id; loadFailed = false }
         catch { loadFailed = true; problem = "Couldn’t open your saved edit. \(error.localizedDescription)" }
         observer = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.05, preferredTimescale: 600), queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -61,17 +61,31 @@ final class MediaEditorStore: ObservableObject {
             }
         }
         await scan()
-        if !loadFailed, project.clips.isEmpty, !FileManager.default.fileExists(atPath: MediaEditProject.file(in: session).path), let initial,
-           let asset = assets.first(where: { $0.url.standardizedFileURL == initial.standardizedFileURL }) {
-            preview(asset)
-            await add(asset)
-        } else { refreshPreview() }
-        requestedPreview()
+        refreshPreview()
+        await openRequestedMedia(fallback: initial)
     }
-    func requestedPreview() {
-        guard let url = TimelineEditorWindow.requested.removeValue(forKey: session),
-              let asset = assets.first(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) else { return }
-        preview(asset)
+
+    func openRequestedMedia(fallback: URL? = nil) async {
+        guard opened else { return }
+        let request = TimelineEditorWindow.requested[session]
+        guard let url = request?.video ?? fallback else { return }
+        var asset = assets.first { $0.url.standardizedFileURL == url.standardizedFileURL }
+        if asset == nil {
+            await scan()
+            guard opened, !Task.isCancelled else { return }
+            asset = assets.first { $0.url.standardizedFileURL == url.standardizedFileURL }
+        }
+        if let request {
+            guard TimelineEditorWindow.requested[session] == request else { return }
+            TimelineEditorWindow.requested.removeValue(forKey: session)
+        }
+        guard let asset else { return }
+        guard request?.startEdit != false, asset.kind == .video, editable,
+              project.clips.isEmpty, !FileManager.default.fileExists(atPath: MediaEditProject.file(in: session).path) else {
+            preview(asset)
+            return
+        }
+        await add(asset, startDraft: true)
     }
     func retryLoad() async {
         do { project = try MediaEditProject.load(in: session); loadFailed = false; problem = nil; refreshPreview() }
@@ -179,7 +193,7 @@ final class MediaEditorStore: ObservableObject {
             project.clips.insert(clip, at: index + 1)
         }; selected = clip.id
     }
-    func add(_ asset: Asset, overlay: Bool = false, at insertion: Double? = nil) async {
+    func add(_ asset: Asset, overlay: Bool = false, at insertion: Double? = nil, startDraft: Bool = false) async {
         guard editable else { return }; busy = true; defer { busy = false }
         do {
             let root = session.standardizedFileURL.resolvingSymlinksInPath().path + "/"
@@ -193,39 +207,95 @@ final class MediaEditorStore: ObservableObject {
             if clip.lane != .video { clip.offset = max(0, insertion ?? time) }
             // A camera overlay should not double the main recording's soundtrack.
             if overlay { clip.volume = 0 }
+            var cameraOverlay: MediaEditProject.Clip?
+            var cameraProblem: String?
+            if startDraft, let pair = pairedSources(for: clip) {
+                do { cameraOverlay = try await syncedOverlay(for: clip, camera: pair.camera, screen: pair.screen, position: 0) }
+                catch { cameraProblem = error.localizedDescription }
+            }
+            guard opened, !Task.isCancelled else { return }
+            if startDraft, FileManager.default.fileExists(atPath: MediaEditProject.file(in: session).path) {
+                preview(asset)
+                return
+            }
             busy = false
             edit { project in
                 if clip.lane == .video, let insertion,
                    let index = project.clips.firstIndex(where: { $0.lane == .video && project.position($0.id) + $0.duration / 2 > insertion }) {
                     project.clips.insert(clip, at: index)
                 } else { project.clips.append(clip) }
-            }; selected = clip.id; showTimeline()
+                if let cameraOverlay { project.clips.append(cameraOverlay) }
+            }
+            if project.clips.contains(where: { $0.id == clip.id }) {
+                selected = clip.id; showTimeline()
+                if let cameraProblem { problem = cameraProblem }
+            }
         } catch { problem = error.localizedDescription }
     }
-    var pairedCamera: Take? {
-        guard let clip = selectedClip, clip.lane == .video,
-              let screen = doc.meta.takes.first(where: { $0.kind == .screen && $0.file == clip.file }) else { return nil }
-        return doc.meta.takes.first { $0.kind == .camera && $0.number == screen.number }
-    }
-    func addPairedCamera() async {
-        guard editable, let clip = selectedClip, let camera = pairedCamera,
-              let screen = doc.meta.takes.first(where: { $0.kind == .screen && $0.file == clip.file }) else { return }
-        guard let delta = CaptureSync.screenMinusCameraSeconds(camera: camera, screen: screen) else {
-            problem = "This recording has no frame timing for automatic sync. Preview the camera in Media, add it as an overlay and adjust its Position."; return
+    var canAddPairedCamera: Bool {
+        guard let clip = selectedClip, let pair = pairedSources(for: clip) else { return false }
+        let start = project.position(clip.id), end = start + clip.duration
+        return !project.clips.contains {
+            $0.lane == .overlay && $0.file == pair.camera.file && $0.offset < end && $0.offset + $0.duration > start
         }
+    }
+
+    private func pairedSources(for clip: MediaEditProject.Clip) -> (camera: Take, screen: Take)? {
+        guard clip.lane == .video,
+              let screen = doc.meta.takes.first(where: { $0.kind == .screen && $0.file == clip.file }),
+              let camera = doc.meta.takes.first(where: { $0.kind == .camera && $0.number == screen.number })
+        else { return nil }
+        return (camera, screen)
+    }
+
+    private func syncedOverlay(for clip: MediaEditProject.Clip, camera: Take, screen: Take, position: Double) async throws -> MediaEditProject.Clip {
+        guard let delta = CaptureSync.screenMinusCameraSeconds(camera: camera, screen: screen) else {
+            throw MediaEditProject.Failure.invalid("This take has no frame timing for automatic sync. Add the camera as an overlay and adjust its position.")
+        }
+        let url = try MediaEditProject.source(camera.file, session: session)
+        let duration = try await AVURLAsset(url: url).load(.duration).seconds
+        let start = max(0, clip.start + delta), end = min(duration, clip.end + delta)
+        guard end - start >= clip.speed / 30 else { throw MediaEditProject.Failure.invalid("These trimmed recordings do not overlap.") }
+        var overlay = MediaEditProject.Clip(file: camera.file, name: "Camera · " + clip.name, kind: .video, lane: .overlay,
+            sourceDuration: duration, start: start, end: end,
+            offset: position + max(0, -(clip.start + delta)) / clip.speed, speed: clip.speed, volume: 0)
+        overlay.overlayBottom = true
+        return overlay
+    }
+
+    func addPairedCamera() async {
+        guard editable, let clip = selectedClip, let pair = pairedSources(for: clip) else { return }
         busy = true; defer { busy = false }
         do {
-            let url = try MediaEditProject.source(camera.file, session: session)
-            let duration = try await AVURLAsset(url: url).load(.duration).seconds
-            let sourceStart = max(0, clip.start + delta), end = min(duration, clip.end + delta)
-            guard end - sourceStart >= clip.speed / 30 else { throw MediaEditProject.Failure.invalid("These trimmed recordings do not overlap.") }
-            var overlay = MediaEditProject.Clip(file: camera.file, name: "Camera · " + clip.name, kind: .video, lane: .overlay,
-                sourceDuration: duration, start: sourceStart, end: end,
-                offset: project.position(clip.id) + max(0, -(clip.start + delta)) / clip.speed, speed: clip.speed, volume: 0)
-            overlay.overlayBottom = true
-            busy = false; edit { $0.clips.append(overlay) }; selected = overlay.id
+            let overlay = try await syncedOverlay(for: clip, camera: pair.camera, screen: pair.screen, position: project.position(clip.id))
+            guard opened, !Task.isCancelled else { return }
+            busy = false
+            edit { $0.clips.append(overlay) }
+            if project.clips.contains(where: { $0.id == overlay.id }) { selected = overlay.id }
         } catch { problem = error.localizedDescription }
     }
+
+    func applyCuts(_ cuts: [StudioCut], revision: String) {
+        guard editable else { return }
+        do {
+            guard try StudioCutProposal.revision(of: project, in: session) == revision else {
+                throw MediaEditProject.Failure.invalid("The timeline changed. Review a new proposal.")
+            }
+            let result = try project.removing(cuts)
+            showTimeline()
+            edit { $0 = result }
+        } catch { problem = error.localizedDescription }
+    }
+    func removePhrase(_ phrase: StudioCut, from snapshot: MediaEditProject) {
+        guard project == snapshot, editable else { return }
+        do {
+            let cut = StudioCut(start: phrase.start, end: phrase.end, reason: "Transcript cut")
+            let result = try project.removing([cut])
+            showTimeline()
+            edit { $0 = result }
+        } catch { problem = error.localizedDescription }
+    }
+
     func importFiles(_ urls: [URL]) async {
         guard editable else { return }; busy = true; defer { busy = false }
         let directory = session.appending(path: "assets")
