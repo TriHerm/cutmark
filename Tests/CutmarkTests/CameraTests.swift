@@ -1,6 +1,28 @@
+import AppKit
 import AVFoundation
 import Testing
 @testable import Cutmark
+
+@MainActor
+struct CameraPreviewTests {
+    @Test func mountingPreviewWaitsForTheCameraQueueToAttach() async throws {
+        let session = AVCaptureSession()
+        func mountWhileCameraQueueIsBusy() throws -> (PreviewView, AVCaptureVideoPreviewLayer) {
+            CameraRecorder.queue.suspend()
+            defer { CameraRecorder.queue.resume() }
+            let view = PreviewView(session: session)
+            let layer = try #require(view.layer?.sublayers?.first as? AVCaptureVideoPreviewLayer)
+            #expect(layer.session == nil, "Mounting the view must not modify the capture session on the main thread.")
+            return (view, layer)
+        }
+        let (view, layer) = try mountWhileCameraQueueIsBusy()
+        await withCheckedContinuation { (ready: CheckedContinuation<Void, Never>) in
+            CameraRecorder.queue.async { ready.resume() }
+        }
+        #expect(layer.session === session)
+        withExtendedLifetime(view) {}
+    }
+}
 
 // The camera writes HEVC at a set bitrate (CameraRecorder.swift).
 struct CameraBitrateTests {

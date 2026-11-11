@@ -3771,7 +3771,7 @@ final class PreviewView: NSView {
     }
 
     init(session: AVCaptureSession) {
-        preview = AVCaptureVideoPreviewLayer(session: session)
+        preview = AVCaptureVideoPreviewLayer()
         super.init(frame: .zero)
         wantsLayer = true
         layer = CALayer()
@@ -3780,6 +3780,9 @@ final class PreviewView: NSView {
         preview.videoGravity = .resizeAspect
         preview.setAffineTransform(CGAffineTransform(scaleX: -1, y: 1))  // mirror, like a mirror
         layer?.addSublayer(preview)
+        // Attaching adds a connection. Serialize it with startRunning and stopRunning so
+        // switching modes cannot change the capture graph while AVFoundation is starting it.
+        CameraRecorder.queue.async { [preview] in preview.session = session }
     }
 
     required init?(coder: NSCoder) { fatalError() }
