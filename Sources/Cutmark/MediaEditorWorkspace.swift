@@ -15,7 +15,7 @@ struct MediaEditorWorkspace: View {
     @State private var inspectorOpen = false
     @State private var mediaOpen = false
     @State private var showMediaSidebar: Bool
-    @State private var showInspector = true
+    @State private var showInspector = false
     @State private var panel: StudioEditTools.Panel
     @State private var reviewRange: StudioCut?
     @State private var scale = 45.0
@@ -36,6 +36,7 @@ struct MediaEditorWorkspace: View {
     }
     private var visibleAssets: [Asset] {
         store.assets.filter { asset in
+            store.pairedScreen(forCameraFile: asset.rel) == nil &&
             (query.isEmpty || asset.url.lastPathComponent.localizedCaseInsensitiveContains(query)) &&
             (filter == .all || filter == .video && asset.kind == .video || filter == .image && asset.kind == .image || filter == .audio && asset.kind == .audio)
         }
@@ -81,7 +82,14 @@ struct MediaEditorWorkspace: View {
         .onDisappear { store.close() }
         .onChange(of: store.project) { reviewRange = nil }
         .onChange(of: panel) { reviewRange = nil }
-        .onChange(of: shown) { _, on in if !on { store.pause(); store.sourcePlayer.pause() } }
+        .onChange(of: shown) { _, on in
+            if on, store.project.clips.isEmpty {
+                let latest = SessionJourney.latestPlayableTake(doc.meta.takes, session: doc.url)?.url
+                Task { await store.openRequestedMedia(fallback: latest) }
+            } else if !on {
+                store.pause(); store.sourcePlayer.pause()
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: TimelineEditorWindow.mediaRequested)) { notification in
             guard notification.object as? URL == doc.url else { return }
             Task { await store.openRequestedMedia() }
@@ -204,6 +212,9 @@ struct MediaEditorWorkspace: View {
                 }.frame(height: 70).clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(store.source?.id == asset.id ? Theme.accent : Theme.border, lineWidth: store.source?.id == asset.id ? 2 : 1))
                 Text(asset.isGIF ? "GIF · " + asset.url.deletingPathExtension().lastPathComponent : asset.url.deletingPathExtension().lastPathComponent).font(Theme.sans(11, .medium)).lineLimit(2).frame(height: 28, alignment: .topLeading)
+                if store.isPairedScreen(asset.rel) {
+                    Label("Screen + Camera", systemImage: "video").font(Theme.sans(10)).foregroundStyle(Theme.muted)
+                }
             }.contentShape(Rectangle())
         }.buttonStyle(.plain).help(asset.name)
             .draggable("asset:" + asset.url.path)
@@ -239,9 +250,14 @@ struct MediaEditorWorkspace: View {
                         VStack(spacing: 14) {
                             Image(systemName: "play.rectangle").font(.system(size: 42))
                             Text("Start an edit").font(Theme.sans(20, .semibold))
-                            Text("Browse recordings or import a video.")
+                            Text("Record a take or add a video to your timeline.")
                                 .font(Theme.sans(13)).foregroundStyle(.white.opacity(0.7)).multilineTextAlignment(.center)
-                            Button("Choose media") { mediaOpen = true }.buttonStyle(AccentButtonStyle(kind: .quiet))
+                            HStack(spacing: 8) {
+                                Button("Go to Record") { SessionMode.set(.record) }
+                                    .buttonStyle(AccentButtonStyle(kind: .quiet))
+                                Button("Choose media") { mediaOpen = true }
+                                    .buttonStyle(AccentButtonStyle(kind: .solid)).disabled(!store.editable)
+                            }
                         }.foregroundStyle(.white).padding(28)
                     }
                 }.frame(width: geometry.size.width, height: geometry.size.height)
@@ -249,16 +265,18 @@ struct MediaEditorWorkspace: View {
             }.padding(.horizontal, 14).padding(.bottom, 8)
             if let asset = store.source {
                 HStack(spacing: 10) {
-                    Button("Previous cuts") { TimelineEditorWindow.shared.openLegacy(video: asset.url, doc: doc, app: app) }
-                        .buttonStyle(.plain).font(Theme.sans(11)).foregroundStyle(Theme.accent)
-                        .opacity(asset.kind == .video ? 1 : 0).disabled(asset.kind != .video)
-                    Text(asset.kind == .audio ? "Listen before adding" : "Preview before adding")
+                    let paired = store.isPairedScreen(asset.rel)
+                    if asset.kind == .video, !paired {
+                        Button("Previous cuts") { TimelineEditorWindow.shared.openLegacy(video: asset.url, doc: doc, app: app) }
+                            .buttonStyle(.plain).font(Theme.sans(11)).foregroundStyle(Theme.accent)
+                    }
+                    Text(paired ? "Screen preview · includes camera when added" : asset.kind == .audio ? "Listen before adding" : "Preview before adding")
                         .font(Theme.sans(11)).foregroundStyle(Theme.muted)
                     Spacer()
-                    if asset.kind != .audio {
+                    if asset.kind != .audio, !paired {
                         Button("Add as overlay") { Task { await store.add(asset, overlay: true) } }.buttonStyle(AccentButtonStyle(kind: .quiet)).disabled(!store.editable || store.project.duration == 0)
                     }
-                    Button(asset.kind == .audio ? "Add audio" : "Add to video") { Task { await store.add(asset) } }
+                    Button(paired ? "Add take" : asset.kind == .audio ? "Add audio" : "Add to video") { Task { await store.add(asset) } }
                         .buttonStyle(AccentButtonStyle(kind: .solid)).disabled(!store.editable)
                 }.padding(.horizontal, 14).frame(height: 48)
             } else {
@@ -301,8 +319,22 @@ struct MediaEditorWorkspace: View {
                     Button("Back to edit") { store.showTimeline() }.buttonStyle(AccentButtonStyle(kind: .quiet))
                 } else if let clip = store.selectedClip {
                     Text(clip.name).font(Theme.sans(14, .semibold)).lineLimit(2)
-                    Text(clip.lane == .video ? "Main video" : clip.lane == .overlay ? "Camera / overlay" : "Audio")
+                    let camera = store.project.linkedCamera(for: clip.id)
+                    Text(camera != nil ? "Screen + Camera" : clip.lane == .video ? "Main video" : clip.lane == .overlay ? "Overlay" : "Audio")
                         .font(Theme.sans(11)).foregroundStyle(Theme.muted)
+                    if let camera, let link = camera.cameraLink {
+                        inspectorSection("Camera") {
+                            overlayLayout(camera)
+                            number("Camera offset", value: link.screenMinusCamera, range: -15...15) {
+                                store.setCameraOffset($0, screen: clip, camera: camera)
+                            }.help("Increase the offset to show later camera frames at the same screen time.")
+                            Button("Sync by microphone") { Task { await store.alignCameraByMicrophone() } }
+                                .buttonStyle(AccentButtonStyle(kind: .quiet))
+                        }
+                    } else if store.canAddPairedCamera {
+                        Button("Link camera") { Task { await store.addPairedCamera() } }
+                            .buttonStyle(AccentButtonStyle(kind: .quiet))
+                    }
                     if clip.lane != .video && clip.offset + clip.duration > store.project.duration {
                         Text("Only the part before the end of the video is exported.").font(Theme.sans(11)).foregroundStyle(Theme.warn)
                     }
@@ -344,10 +376,6 @@ struct MediaEditorWorkspace: View {
                                 setting("Horizontal focus", value: clip.focusX, range: 0...1, format: "%.2f") { v in store.update(clip.id) { $0.focusX = v } }
                                 setting("Vertical focus", value: clip.focusY, range: 0...1, format: "%.2f") { v in store.update(clip.id) { $0.focusY = v } }
                             }
-                            if store.canAddPairedCamera {
-                                Button(store.hasUnlinkedCamera ? "Sync existing camera" : "Add synced camera") { Task { await store.addPairedCamera() } }
-                                    .buttonStyle(AccentButtonStyle(kind: .quiet))
-                            }
                             if store.hasCaptureEvents {
                                 Button { store.update(clip.id) { $0.autoZoom.toggle() } } label: {
                                     Label("Focus on clicks", systemImage: clip.autoZoom ? "checkmark.square.fill" : "square")
@@ -355,11 +383,7 @@ struct MediaEditorWorkspace: View {
                                 Text("Uses recorded clicks. The captured cursor stays in the video.").font(Theme.sans(10)).foregroundStyle(Theme.muted)
                             }
                             if clip.lane == .overlay {
-                                setting("Overlay size", value: clip.overlaySize, range: 0.15...0.65, format: "%.2f") { v in store.update(clip.id) { $0.overlaySize = v } }
-                                HStack {
-                                    Button(clip.overlayLeft ? "Left" : "Right") { store.update(clip.id) { $0.overlayLeft.toggle() } }
-                                    Button(clip.overlayBottom ? "Bottom" : "Top") { store.update(clip.id) { $0.overlayBottom.toggle() } }
-                                }.buttonStyle(AccentButtonStyle(kind: .quiet))
+                                overlayLayout(clip)
                             }
                         }
                     }
@@ -384,6 +408,13 @@ struct MediaEditorWorkspace: View {
                 }
             }.padding(16).frame(maxWidth: .infinity, alignment: .leading).disabled(!store.editable)
         }.background(Theme.paper).id(store.selected)
+    }
+    @ViewBuilder private func overlayLayout(_ clip: MediaEditProject.Clip) -> some View {
+        setting("Size", value: clip.overlaySize, range: 0.15...0.65, format: "%.2f") { v in store.update(clip.id) { $0.overlaySize = v } }
+        HStack {
+            Button(clip.overlayLeft ? "Left" : "Right") { store.update(clip.id) { $0.overlayLeft.toggle() } }
+            Button(clip.overlayBottom ? "Bottom" : "Top") { store.update(clip.id) { $0.overlayBottom.toggle() } }
+        }.buttonStyle(AccentButtonStyle(kind: .quiet))
     }
     private func inspectorSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {

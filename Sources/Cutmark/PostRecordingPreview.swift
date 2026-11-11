@@ -129,8 +129,7 @@ private final class PostRecordingFirstMouseHostingView<Content: View>: NSHosting
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-/// Reelbird-style compact review card. "Saved" is status only: Stop already persisted the take.
-/// Reveal is intentionally the only file action here; Play and Edit work on that same source.
+/// Stop already persisted the take. A paired take goes straight to the combined editor.
 @MainActor
 struct PostRecordingPreviewCard: View {
     @Environment(AppModel.self) private var app
@@ -140,11 +139,9 @@ struct PostRecordingPreviewCard: View {
     @State private var player = AVPlayer()
     @State private var loadedURL: URL?
     @State private var playing = false
-    @State private var selectedKind: TakeKind?
 
     private var visibleSource: (take: Take, url: URL)? {
         guard app.library.current?.meta.id == recent.sessionID else { return nil }
-        if let selectedKind, let selected = recent.source(in: doc, kind: selectedKind) { return selected }
         return recent.source(in: doc)
     }
 
@@ -153,11 +150,8 @@ struct PostRecordingPreviewCard: View {
     }
 
     private var labelForCurrentSource: String {
-        // The card can outlive a missing/removed file. Never claim the other source is saved
-        // unless both independently playable files still exist.
-        guard hasBothSources else { return visibleSource?.take.kind == .screen ? "Screen" : "Camera" }
-        return visibleSource?.take.kind == .camera
-            ? "Camera preview · screen saved" : "Screen preview · camera saved"
+        if hasBothSources { return "Screen + Camera" }
+        return visibleSource?.take.kind == .screen ? "Screen" : "Camera"
     }
 
     private var hasBothSources: Bool {
@@ -180,68 +174,39 @@ struct PostRecordingPreviewCard: View {
                 .help("Dismiss saved-take preview")
             }
 
-            if hasBothSources {
-                HStack(spacing: 6) {
-                    sourceButton(.screen)
-                    sourceButton(.camera)
-                }
-                .accessibilityLabel("Review saved recordings separately")
-            }
-
-            Button { togglePlayback() } label: {
-                ZStack {
-                    Theme.stage
-                    PlayerLayerView(player: player).allowsHitTesting(false)
-                    if !playing {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 42, height: 42)
-                            .background(.black.opacity(0.58), in: Circle())
-                    }
-                }
-                .frame(height: 128)
-                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
-            }
-            .buttonStyle(.plain)
-            .help(playing ? "Pause preview" : "Play saved take")
-
-            HStack(spacing: 8) {
+            if !hasBothSources {
                 Button { togglePlayback() } label: {
-                    Label(playing ? "Pause" : "Play", systemImage: playing ? "pause.fill" : "play.fill")
+                    ZStack {
+                        Theme.stage
+                        PlayerLayerView(player: player).allowsHitTesting(false)
+                        if !playing {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 42, height: 42)
+                                .background(.black.opacity(0.58), in: Circle())
+                        }
+                    }
+                    .frame(height: 128)
+                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.white.opacity(0.08), lineWidth: 0.5))
                 }
                 .buttonStyle(.plain)
+                .help(playing ? "Pause preview" : "Play saved take")
+            }
 
-                Spacer(minLength: 4)
-
+            HStack(spacing: 8) {
                 Label("Saved", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(Theme.muted)
-
-                Button("Review") {
-                    guard let url = sourceURL else { dismiss(); return }
-                    player.pause(); playing = false
-                    // A storyboard shot can return the main UI to its covering tab after
-                    // Stop & Save. Open the Record stage first, or the reviewed movie would
-                    // play invisibly behind that full-window page.
-                    SessionMode.set(.record)
-                    app.jump(to: url, at: nil)
-                    NSApp.activate(ignoringOtherApps: true)
-                    dismissSoon()
-                }
-                    .buttonStyle(.plain)
-                    .help("Open the saved take in Cutmark for full review")
-
-                Button("Open editor") {
+                Spacer(minLength: 4)
+                Button("Edit take") {
                     guard let url = sourceURL else { dismiss(); return }
                     player.pause(); playing = false
                     TimelineEditorWindow.shared.open(video: url, doc: doc, app: app, startEdit: true)
                     NSApp.activate(ignoringOtherApps: true)
                     dismissSoon()
                 }
-                .buttonStyle(.plain)
-                .font(Theme.sans(11, .semibold))
-                .foregroundStyle(Theme.accent)
+                .buttonStyle(AccentButtonStyle(kind: .solid))
             }
             .font(Theme.sans(10.5, .medium))
         }
@@ -278,28 +243,8 @@ struct PostRecordingPreviewCard: View {
         playing = true
     }
 
-    private func sourceButton(_ kind: TakeKind) -> some View {
-        let isSelected = visibleSource?.take.kind == kind
-        return Button {
-            guard recent.source(in: doc, kind: kind) != nil else { return }
-            selectedKind = kind
-            refreshPlayer()
-        } label: {
-            Text(kind == .screen ? "Screen" : "Camera")
-                .font(Theme.sans(10.5, isSelected ? .semibold : .medium))
-                .foregroundStyle(isSelected ? Theme.accent : Theme.muted)
-                .frame(maxWidth: .infinity, minHeight: 24)
-                .background(isSelected ? Theme.accent.opacity(0.12) : Theme.stage,
-                            in: RoundedRectangle(cornerRadius: 6))
-        }
-        .buttonStyle(.plain)
-        .help("Review the saved \(kind.rawValue) file separately; this is not a synchronized composite")
-        .accessibilityLabel("Preview \(kind.rawValue) recording")
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
-    }
-
     private func refreshPlayer() {
-        guard let url = sourceURL else {
+        guard !hasBothSources, let url = sourceURL else {
             player.pause(); player.replaceCurrentItem(with: nil); loadedURL = nil; playing = false
             return
         }

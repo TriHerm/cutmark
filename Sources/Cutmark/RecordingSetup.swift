@@ -101,11 +101,18 @@ struct QuickRecordingInputs: View {
                     permission: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
                     deviceID: camera.audioID, monitoring: true)
             }
-            CutmarkMenuButton(help: "Choose whether to count down before recording") {
-                inputLabel("timer", name: app.countdownOn ? "3-second countdown" : "Start immediately")
+            CutmarkMenuButton(help: "Countdown and camera orientation") {
+                inputLabel("slider.horizontal.3", name: "Recording options")
             } content: {
+                MenuLabel("Countdown")
                 MenuButton("3 seconds", checked: app.countdownOn) { app.countdownOn = true }
-                MenuButton("No countdown", checked: !app.countdownOn) { app.countdownOn = false }
+                MenuButton("Off", checked: !app.countdownOn) { app.countdownOn = false }
+                if mode.recordsCamera {
+                    MenuDivider()
+                    MenuLabel("Camera orientation")
+                    MenuButton("Horizontal", checked: camera.orientation == .horizontal) { camera.orientation = .horizontal }
+                    MenuButton("Vertical", checked: camera.orientation == .vertical) { camera.orientation = .vertical }
+                }
             }
         }.padding(12)
             .background(Theme.canvas, in: RoundedRectangle(cornerRadius: 11))

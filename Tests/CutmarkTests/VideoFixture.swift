@@ -3,15 +3,16 @@ import Foundation
 
 /// Software encoding keeps fixture creation independent of VideoToolbox encoder availability.
 enum VideoFixture {
-    static func makeVideo(_ url: URL, size: CGSize, seconds: Int, fps: Int = 30) async throws {
+    static func makeVideo(_ url: URL, size: CGSize, seconds: Int, fps: Int = 30,
+                          picture: String? = nil, sound: String? = nil, audioFilter: String = "volume=6.4") async throws {
         let process = Process()
         process.executableURL = URL(filePath: "/usr/bin/env")
         process.arguments = [
             "ffmpeg", "-nostdin", "-v", "error",
-            "-f", "lavfi", "-i", "testsrc2=size=\(Int(size.width))x\(Int(size.height)):rate=\(fps):duration=\(seconds)",
-            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=\(seconds)",
+            "-f", "lavfi", "-i", picture ?? "testsrc2=size=\(Int(size.width))x\(Int(size.height)):rate=\(fps):duration=\(seconds)",
+            "-f", "lavfi", "-i", sound ?? "sine=frequency=440:sample_rate=48000:duration=\(seconds)",
             "-c:v", "libx264", "-threads", "1", "-pix_fmt", "yuv420p", "-bf", "0",
-            "-af", "volume=6.4", "-c:a", "aac", "-shortest", url.path,
+            "-af", audioFilter, "-c:a", "aac", "-shortest", url.path,
         ]
         try process.run()
         let deadline = ContinuousClock.now + .seconds(30)

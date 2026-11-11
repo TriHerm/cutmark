@@ -109,13 +109,16 @@ enum MediaEditComposition {
                 }
             }
         }
-        let boundaries = Array(Set([0, project.duration] + visuals.flatMap { [$0.start, $0.end] })).sorted()
+        // Quantize the endpoints before deduplicating. A camera offset can leave two Double
+        // boundaries on the same tick, which otherwise produces a zero-length instruction.
+        let boundaries = Array(Set(([0, project.duration] + visuals.flatMap { [$0.start, $0.end] }).map { time($0).value })).sorted()
         var instructions: [AVVideoCompositionInstructionProtocol] = []
         for (start, end) in zip(boundaries, boundaries.dropFirst()) where end > start {
             let instruction = AVMutableVideoCompositionInstruction()
-            instruction.timeRange = CMTimeRange(start: time(start), duration: time(end - start))
+            let at = CMTime(value: start, timescale: 60_000)
+            instruction.timeRange = CMTimeRange(start: at, end: CMTime(value: end, timescale: at.timescale))
             instruction.backgroundColor = NSColor.black.cgColor
-            let active = visuals.filter { $0.start <= start + 0.00001 && $0.end > start + 0.00001 }
+            let active = visuals.filter { time($0.start) <= at && time($0.end) > at }
             instruction.layerInstructions = active.filter(\.overlay).reversed().map(\.layer) + active.filter { !$0.overlay }.map(\.layer)
             instructions.append(instruction)
         }

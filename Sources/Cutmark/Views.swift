@@ -1086,6 +1086,17 @@ struct KeptTabs: Equatable {
     }
 }
 
+/// A page that replaces the recorder also has a corresponding entry in the mounted page stack.
+enum DetailPage: String, CaseIterable {
+    case write, assets, sounds, broll, post, edit, export
+
+    init?(tab: String, previewing: Bool) {
+        guard let page = Self(rawValue: tab == "storyboard" ? "write" : tab) else { return nil }
+        guard !previewing || (page != .assets && page != .sounds) else { return nil }
+        self = page
+    }
+}
+
 struct DetailView: View {
     @Environment(AppModel.self) var app
     var library: Library
@@ -1185,14 +1196,13 @@ struct DetailView: View {
 
     /// Post always covers the stage. Assets and Sound cover it until you open a file:
     /// then the file plays on the stage and the list sits beside it.
-    private var cover: String? {
+    private var cover: DetailPage? {
         guard !app.isRecording, library.current != nil, !(library.selectedSessions.count > 1) else { return nil }
-        return Self.covers(rightTab, previewing: app.preview != nil)
-            ? (rightTab == "storyboard" ? "write" : rightTab) : nil
+        return DetailPage(tab: rightTab, previewing: app.preview != nil)
     }
 
     nonisolated static func covers(_ tab: String, previewing: Bool) -> Bool {
-        ["post", "storyboard", "broll", "write", "edit", "export"].contains(tab) || (["assets", "sounds"].contains(tab) && !previewing)
+        DetailPage(tab: tab, previewing: previewing) != nil
     }
 
     private var recorder: some View {
@@ -1200,7 +1210,9 @@ struct DetailView: View {
             if let doc = library.current {
                 SessionHeader(doc: doc)
                     .sheet(isPresented: Bindable(app).cleaningUp) { CleanupSheet(doc: doc) }
-                if app.phase == .idle { SessionJourneyBar(doc: doc).environment(app) }
+                if app.phase == .idle, !recordOnly, cover != .edit, cover != .export {
+                    SessionJourneyBar(doc: doc).environment(app)
+                }
             } else {
                 Color.clear.frame(height: Chrome.bar)
             }
@@ -1220,7 +1232,7 @@ struct DetailView: View {
                         VStack(spacing: 0) {
                             // One switch over the three Assets pages, so it stays put when you
                             // change page (2026-10-04: each page drew its own and it jumped).
-                            if let c = cover, AssetsSwitch.pages.contains(c) {
+                            if let c = cover, AssetsSwitch.pages.contains(c.rawValue) {
                                 AssetsSwitch()
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .padding(.horizontal, 28).padding(.top, 20)
@@ -1230,8 +1242,8 @@ struct DetailView: View {
                                 // Under the pages as they cross-fade: never the Record stage and
                                 // its camera between two tabs (2026-10-04).
                                 Theme.canvas
-                                ForEach(["write", "assets", "sounds", "broll", "post"], id: \.self) { k in
-                                    if k == cover || kept.contains(k) { pane(k, doc) }
+                                ForEach(DetailPage.allCases, id: \.self) { page in
+                                    if page == cover || kept.contains(page.rawValue) { pane(page, doc) }
                                 }
                             }
                         }
@@ -1259,8 +1271,17 @@ struct DetailView: View {
             // A hidden tab keeps its views: typing must not go on in its text field.
             NSApp.keyWindow?.makeFirstResponder(nil)
         }
-        .onChange(of: cover) { _, c in if let c { opened.open(c, in: library.current?.url) } }
-        .onChange(of: library.current?.url) { opened = KeptTabs(session: library.current?.url, tabs: cover.map { [$0] } ?? []) }
+        .onChange(of: cover, initial: true) { _, page in
+            guard let page else { return }
+            opened.open(page.rawValue, in: library.current?.url)
+            if page == .edit || page == .export, let doc = library.current,
+               app.chats.existing(doc.url)?.running != true {
+                app.chats.open = false
+            }
+        }
+        .onChange(of: library.current?.url) {
+            opened = KeptTabs(session: library.current?.url, tabs: cover.map { [$0.rawValue] } ?? [])
+        }
         // Nothing extra stays mounted while a take records.
         .onChange(of: app.isRecording) { _, on in if on { opened = KeptTabs() } }
     }
@@ -1271,23 +1292,23 @@ struct DetailView: View {
         return StageLayout(size: stageSize, top: notchReach, clip: app.stageAspect, vertical: camera.orientation == .vertical)
     }
 
-    private func pane(_ k: String, _ doc: SessionDoc) -> some View {
+    private func pane(_ page: DetailPage, _ doc: SessionDoc) -> some View {
         Group {
-            switch k {
-            case "edit": MediaEditorWorkspace(doc: doc).id("edit-" + doc.url.path)
-            case "export": SessionStudio(doc: doc, exporting: true).id("export-" + doc.url.path)
-            case "post": PostPane(doc: doc)
-            case "write": ScriptPage(doc: doc)
-            case "assets": AssetsPane(doc: doc, wide: true)
-            case "broll": BrollPane(doc: doc)
-            default: SoundsPane(doc: doc, wide: true)
+            switch page {
+            case .edit: MediaEditorWorkspace(doc: doc)
+            case .export: SessionStudio(doc: doc, exporting: true)
+            case .post: PostPane(doc: doc)
+            case .write: ScriptPage(doc: doc)
+            case .assets: AssetsPane(doc: doc, wide: true)
+            case .broll: BrollPane(doc: doc)
+            case .sounds: SoundsPane(doc: doc, wide: true)
             }
         }
         .background(Theme.canvas)
-        .pageFade(k == cover)
-        .allowsHitTesting(k == cover)
-        .accessibilityHidden(k != cover)
-        .environment(\.paneShown, k == cover)
+        .pageFade(page == cover)
+        .allowsHitTesting(page == cover)
+        .accessibilityHidden(page != cover)
+        .environment(\.paneShown, page == cover)
     }
 
     private var split: some View {
@@ -1304,14 +1325,22 @@ struct DetailView: View {
                         }
                         // The live preview stays mounted, even under the player or while paused.
                         // Removing its layer while the session stops or starts deadlocks AVFoundation.
-                        CameraCard(camera: camera, doc: library.current, corner: plugged?.camera, accessory: stageButtons)
-                        if screenPreviewWanted {
-                            ScreenPreviewFloating(
-                                feed: screen.preview,
-                                displayName: screen.selectedSourceName,
-                                topInset: max(60, notchReach + 12)
-                            )
-                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
+                        if recordOnly, stageHook == nil, app.mode.captureMode(cameraPaused: camera.paused) == .screen {
+                            ScreenRecordStage(feed: screen.preview, name: screen.selectedSourceName,
+                                              showingPreview: screenPreviewWanted, recording: app.isRecording) {
+                                screenPreviewVisible = true
+                                screen.setPreviewing(true, requestPermission: true)
+                            }
+                        } else {
+                            CameraCard(camera: camera, doc: library.current, corner: plugged?.camera, accessory: stageButtons)
+                            if screenPreviewWanted {
+                                ScreenPreviewFloating(
+                                    feed: screen.preview,
+                                    displayName: screen.selectedSourceName,
+                                    topInset: max(60, notchReach + 12)
+                                )
+                                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .topTrailing)))
+                            }
                         }
                         if app.preview != nil {
                             // Dark at once under a file: the player fades in on the stage, not
@@ -1394,7 +1423,7 @@ struct DetailView: View {
                         }
                     }
                     .overlay {
-                        if app.preview == nil || app.isRecording {
+                        if (!recordOnly || library.current == nil) && (app.preview == nil || app.isRecording) {
                             RecordPill(camera: camera, screen: screen)
                                 .transition(.opacity.combined(with: .offset(y: 10)))
                         }
@@ -1419,10 +1448,7 @@ struct DetailView: View {
                             } else if rightTab == "sounds" && cover == nil && !app.isRecording {
                                 SoundsPane(doc: doc)
                             } else {
-                                if doc.quickTake { QuickTakePane(doc: doc) }
-                                else { ScriptPane(doc: doc) }
-                                Rule()
-                                CutmarkList(doc: doc).fixedSize(horizontal: false, vertical: true)
+                                QuickTakePane(doc: doc).id(doc.url)
                             }
                         }
                         .environment(\.colorScheme, app.lightsDown ? .dark : scheme)
@@ -1453,7 +1479,9 @@ struct DetailView: View {
         case .starting, .finishing:
             ProgressView().controlSize(.large).tint(.white)
         case .idle:
-            if let p = camera.permissionProblem, app.mode.recordsCamera {
+            if recordOnly && library.current != nil {
+                EmptyView()
+            } else if let p = camera.permissionProblem, app.mode.recordsCamera {
                 Text(p).foregroundStyle(.white).padding().background(Theme.stage.opacity(0.9), in: .rect(cornerRadius: Theme.radius))
             } else if let e = app.error {
                 Text(e).foregroundStyle(.white).padding().background(Theme.accent, in: .rect(cornerRadius: Theme.radius))
@@ -1661,6 +1689,40 @@ private struct StageHoverBar: ViewModifier {
                     .transition(.opacity)
                 }
             }
+    }
+}
+
+/// Screen-only takes use the large viewfinder for the chosen display or window.
+private struct ScreenRecordStage: View {
+    @ObservedObject var feed: ScreenPreviewFeed
+    let name: String
+    let showingPreview: Bool
+    let recording: Bool
+    let preview: () -> Void
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Label(name, systemImage: "display").font(Theme.sans(13, .semibold)).foregroundStyle(Theme.muted)
+            ZStack {
+                RoundedRectangle(cornerRadius: 12).fill(Theme.stage)
+                if showingPreview, let frame = feed.image {
+                    Image(decorative: frame, scale: 1).resizable().scaledToFit()
+                        .accessibilityLabel("Preview of \(name)")
+                } else if recording {
+                    Label("Recording screen", systemImage: "record.circle")
+                        .font(Theme.sans(14, .semibold)).foregroundStyle(.white.opacity(0.85))
+                } else {
+                    VStack(spacing: 14) {
+                        Image(systemName: "display").font(.system(size: 32))
+                            .foregroundStyle(.white.opacity(0.65))
+                        Button(showingPreview ? "Refresh preview" : "Preview screen", action: preview)
+                            .buttonStyle(AccentButtonStyle(kind: .quiet))
+                    }.environment(\.colorScheme, .dark)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

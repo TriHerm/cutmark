@@ -11,7 +11,7 @@ struct MediaEditorTimeline: View {
     @FocusState private var focused: Bool
     private let labelWidth: CGFloat = 90
     private var audio: [MediaEditProject.Clip] { store.project.clips.filter { $0.lane == .audio } }
-    private var overlays: [MediaEditProject.Clip] { store.project.visibleClips.filter { $0.lane == .overlay } }
+    private var overlays: [MediaEditProject.Clip] { store.project.timelineClips.filter { $0.lane == .overlay } }
     private var width: CGFloat { max(viewport, CGFloat(max(store.project.duration, 5) * scale) + 90) }
     static func clock(_ time: Double) -> String {
         let t = max(0, time.isFinite ? time : 0)
@@ -62,7 +62,8 @@ struct MediaEditorTimeline: View {
                 Text("Drag clips to move · Drag edges to trim · S to split · Delete to remove")
                     .font(Theme.sans(10)).foregroundStyle(Theme.muted).lineLimit(1)
                 Spacer()
-                Text("\(store.project.visibleClips.count) clips · \(Self.clock(store.project.duration))").font(Theme.mono(10)).foregroundStyle(Theme.muted)
+                let count = store.project.timelineClips.count
+                Text("\(count) \(count == 1 ? "clip" : "clips") · \(Self.clock(store.project.duration))").font(Theme.mono(10)).foregroundStyle(Theme.muted)
             }.padding(.horizontal, 12).frame(height: 24).background(Theme.paper)
         }
         .background(Theme.canvas)
@@ -121,12 +122,12 @@ struct MediaEditorTimeline: View {
             Rectangle().fill(lane == .video ? Theme.surface : Theme.canvas)
                 .contentShape(Rectangle()).gesture(DragGesture(minimumDistance: 0).onChanged { store.seek(Double($0.location.x) / scale) })
             if clips.isEmpty {
-                Text(lane == .video ? "Drop video or images here" : lane == .overlay ? "Drop a camera clip or image overlay" : "Drop music or voiceover here")
+                Text(lane == .video ? "Drop video or images here" : lane == .overlay ? "Drop an image or video overlay" : "Drop music or voiceover here")
                     .font(Theme.sans(11)).foregroundStyle(Theme.muted).padding(.leading, 16).frame(height: height)
                     .allowsHitTesting(false)
             }
             ForEach(clips) { clip in
-                MediaTimelineClip(clip: clip, selected: store.selected == clip.id, scale: scale,
+                MediaTimelineClip(clip: clip, hasCamera: store.project.linkedCamera(for: clip.id) != nil, selected: store.selected == clip.id, scale: scale,
                                   frames: store.strips[clip.id] ?? [], waveform: store.waveforms[clip.id] ?? [],
                                   image: sourceImage(clip), height: height - 8,
                                   select: { store.select(clip.id) }, move: { delta in move(clip, delta: delta) }, trim: { start, delta in trim(clip, start: start, delta: delta) })
@@ -150,7 +151,7 @@ struct MediaEditorTimeline: View {
     private func snap(_ value: Double, excluding id: UUID) -> Double {
         let frame = (max(0, value) * 30).rounded() / 30
         guard snapping else { return frame }
-        let targets: [Double] = [0.0, store.time] + store.project.clips.filter { $0.id != id }.flatMap { [store.project.position($0.id), store.project.position($0.id) + $0.duration] }
+        let targets: [Double] = [0.0, store.time] + store.project.timelineClips.filter { $0.id != id }.flatMap { [store.project.position($0.id), store.project.position($0.id) + $0.duration] }
         return targets.min(by: { abs($0 - frame) < abs($1 - frame) }).flatMap { abs($0 - frame) * scale < 9 ? $0 : nil } ?? frame
     }
     private func move(_ clip: MediaEditProject.Clip, delta: Double) {
@@ -175,6 +176,7 @@ struct MediaEditorTimeline: View {
 
 private struct MediaTimelineClip: View {
     let clip: MediaEditProject.Clip
+    let hasCamera: Bool
     let selected: Bool
     let scale: Double
     let frames: [TimelineThumbnail]
@@ -189,6 +191,7 @@ private struct MediaTimelineClip: View {
     private var baseWidth: CGFloat { max(2, CGFloat(clip.duration * scale)) }
     private var width: CGFloat { max(2, baseWidth + edge.height - edge.width) }
     private var color: Color { clip.lane == .audio ? Theme.live : clip.lane == .overlay ? Theme.warn : Theme.accent }
+    private var title: String { hasCamera ? "\(clip.name) · Screen + Camera" : clip.name }
     var body: some View {
         ZStack(alignment: .topLeading) {
             color.opacity(0.18)
@@ -208,8 +211,8 @@ private struct MediaTimelineClip: View {
             }
             if width > 36 {
                 HStack(spacing: 4) {
-                    if clip.cameraLink != nil { Image(systemName: "link") }
-                    Text(clip.name)
+                    if hasCamera { Image(systemName: "video") }
+                    Text(title)
                 }.font(Theme.sans(10, .medium)).foregroundStyle(clip.kind == .audio ? Theme.ink : .white)
                     .lineLimit(1).padding(.horizontal, 8).padding(.vertical, 3)
                     .frame(maxWidth: .infinity, alignment: .leading).background(clip.kind == .audio ? color.opacity(0.12) : Color.black.opacity(0.65))
@@ -223,8 +226,8 @@ private struct MediaTimelineClip: View {
         .overlay(alignment: .leading) { if selected && clip.cameraLink == nil && width > 32 { handle(start: true) } }
         .overlay(alignment: .trailing) { if selected && clip.cameraLink == nil && width > 32 { handle(start: false) } }
         .offset(x: dragging + edge.width).zIndex(dragging == 0 ? 0 : 10)
-        .help(clip.cameraLink == nil ? "\(clip.name) · \(MediaEditorTimeline.clock(clip.duration))" : "Synced to screen. Edit the screen clip to change timing.")
-        .accessibilityLabel("\(clip.name), \(MediaEditorTimeline.clock(clip.duration)), \(clip.lane.rawValue) track")
+        .help("\(title) · \(MediaEditorTimeline.clock(clip.duration))")
+        .accessibilityLabel("\(title), \(MediaEditorTimeline.clock(clip.duration)), \(clip.lane.rawValue) track")
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
     private func handle(start: Bool) -> some View {

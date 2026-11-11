@@ -121,11 +121,12 @@ struct MediaEditorTests {
         store.undo(redo: true); #expect(store.project.clips.count == 2)
         #expect(try MediaEditProject.load(in: doc.url) == store.project)
     }
-    @Test func cameraOverlayUsesMeasuredTimingAndRefusesCallbackTiming() async throws {
+    @Test func cameraOverlayUsesFrameTimingAndKeepsOlderTakesEditable() async throws {
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
         let app = AppModel(); app.library.setRoot(root)
         let doc = try #require(app.library.createSession())
         try await VideoFixture.makeVideo(doc.url.appending(path: "camera.mov"), size: CGSize(width: 96, height: 64), seconds: 2)
+        try FileManager.default.copyItem(at: doc.url.appending(path: "camera.mov"), to: doc.url.appending(path: "screen.mov"))
         let screen = Take(number: 1, kind: .screen, file: "screen.mov", startedAt: .distantPast, duration: 2, captureHostTime: 100.2, timingQuality: .videoFrame)
         let camera = Take(number: 1, kind: .camera, file: "camera.mov", startedAt: .distantPast, duration: 2, captureHostTime: 100, timingQuality: .videoFrame)
         doc.meta.takes = [screen, camera]; doc.save()
@@ -137,10 +138,12 @@ struct MediaEditorTests {
         #expect(overlay.lane == .overlay && overlay.volume == 0)
         #expect(abs(overlay.start - 0.7) < 0.0001 && abs(overlay.end - 1.7) < 0.0001)
         #expect(overlay.duration == 0.5 && overlay.offset == 0 && overlay.speed == 2)
+        store.undo()
         doc.meta.takes[1].timingQuality = .callback
         store.selected = main.id; await store.addPairedCamera()
         #expect(store.project.clips.count == 2)
-        #expect(store.problem?.contains("no frame timing") == true)
+        #expect(store.project.timelineClips.map(\.id) == [main.id])
+        #expect(store.problem?.contains("timing is estimated") == true)
     }
     @Test func selectingAClipKeepsAPlayheadInsideItAndMalformedProjectsStayUntouched() async throws {
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
@@ -181,6 +184,7 @@ struct MediaEditorTests {
         #expect(store.project.clips.map(\.file) == [screen.lastPathComponent, camera.lastPathComponent])
         #expect(store.project.clips.last?.start == 0.25)
         #expect(store.project.clips.last?.volume == 0)
+        #expect(store.project.timelineClips.map(\.file) == [screen.lastPathComponent])
         #expect(store.source == nil)
         let files = SessionJourney.load(session: doc.url, takes: doc.meta.takes)
         if case .studioDraft = SessionJourney.next(files: files, jobs: []) {} else {
@@ -190,7 +194,67 @@ struct MediaEditorTests {
         TimelineEditorWindow.requested[doc.url] = .init(video: camera, startEdit: true)
         await store.openRequestedMedia()
         #expect(store.project == original)
+        #expect(store.source == nil)
+        TimelineEditorWindow.requested[doc.url] = .init(video: camera, startEdit: false)
+        await store.openRequestedMedia()
         #expect(store.source?.url.standardizedFileURL == camera.standardizedFileURL)
+    }
+
+    @Test func aPairedTakeUsesMicrophoneTimingAndExportsAfterOneSplit() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let app = AppModel(); app.library.setRoot(root)
+        let doc = try #require(app.library.createSession())
+        let screen = doc.url.appending(path: "take-01-screen.mov")
+        let camera = doc.url.appending(path: "take-01-camera.mov")
+        let size = CGSize(width: 96, height: 64)
+        let sound = #"aevalsrc=0.45*sin(2*PI*331*t)*(0.015+0.985*gt(sin(2*PI*2.1*t+3*sin(2*PI*0.3*t))+0.5*sin(2*PI*6.7*t)\,0.4)):s=48000:d=5"#
+        try await VideoFixture.makeVideo(screen, size: size, seconds: 5, picture: "color=blue:s=96x64:d=5:r=30",
+                                         sound: sound, audioFilter: "volume=1")
+        try await VideoFixture.makeVideo(camera, size: size, seconds: 5, picture: "color=red:s=96x64:d=5:r=30",
+                                         sound: sound, audioFilter: "adelay=220,volume=0.6")
+        doc.meta.takes = [
+            Take(number: 1, kind: .screen, file: screen.lastPathComponent, startedAt: .distantPast, duration: 5,
+                 captureHostTime: 100.27, timingQuality: .videoFrame),
+            Take(number: 1, kind: .camera, file: camera.lastPathComponent, startedAt: .distantPast, duration: 5,
+                 captureHostTime: 100, timingQuality: .videoFrame),
+        ]
+        let cameraData = try Data(contentsOf: camera), screenData = try Data(contentsOf: screen)
+        let store = MediaEditorStore(doc: doc); defer { store.close() }
+        await store.open()
+        let take = try #require(store.project.timelineClips.first)
+        let linked = try #require(store.project.linkedCamera(for: take.id))
+        #expect(abs(try #require(linked.cameraLink).screenMinusCamera - 0.22) <= 0.011)
+        let previewDeadline = ContinuousClock.now + .seconds(5)
+        while store.building, ContinuousClock.now < previewDeadline { try await Task.sleep(for: .milliseconds(20)) }
+        try #require(!store.building)
+        store.seek(2)
+        store.split()
+        try #require(store.project.timelineClips.count == 2, "\(store.problem ?? "")")
+        let second = try #require(store.project.timelineClips.last)
+        #expect(abs(try #require(store.project.linkedCamera(for: second.id)).start - 2.22) <= 0.011)
+        store.setCameraOffset(0.25, screen: second, camera: linked)
+        #expect(store.project.clips.compactMap { $0.cameraLink?.screenMinusCamera } == [0.25, 0.25])
+        store.undo()
+        #expect(store.project.clips.compactMap { $0.cameraLink?.screenMinusCamera }.allSatisfy { abs($0 - 0.22) <= 0.011 })
+
+        store.exportVideo()
+        let exportDeadline = ContinuousClock.now + .seconds(20)
+        while store.exporting, ContinuousClock.now < exportDeadline { try await Task.sleep(for: .milliseconds(20)) }
+        let output = try #require(store.exported, "\(store.problem ?? "")")
+        let asset = AVURLAsset(url: output)
+        #expect(try await asset.loadTracks(withMediaType: .audio).count == 1)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        for seconds in [1.0, 3.0] {
+            let frame = try await generator.image(at: MediaEditComposition.time(seconds)).image
+            let bitmap = NSBitmapImageRep(cgImage: frame)
+            let middle = try #require(bitmap.colorAt(x: 960, y: 540)?.usingColorSpace(.deviceRGB))
+            let corner = try #require(bitmap.colorAt(x: 1600, y: 910)?.usingColorSpace(.deviceRGB))
+            #expect(middle.blueComponent > 0.8 && corner.redComponent > 0.8)
+        }
+        #expect(try Data(contentsOf: camera) == cameraData)
+        #expect(try Data(contentsOf: screen) == screenData)
     }
 
     @Test func cutsRippleOverlaysAndAudioAndUndoAsOneEdit() async throws {

@@ -45,19 +45,28 @@ enum SessionJourney {
         return nil
     }
 
+    private static func playableTakes(_ takes: [Take], session: URL) -> [(take: Take, url: URL)] {
+        takes.sorted {
+            $0.number == $1.number ? ($0.kind == .screen && $1.kind != .screen) : $0.number > $1.number
+        }.compactMap { take in
+            guard !take.file.contains("/"), !take.file.contains(".."), (take.duration ?? 0) > 0,
+                  let url = containedVideo(take.file, session: session) else { return nil }
+            return (take, url)
+        }
+    }
+
+    static func latestPlayableTake(_ takes: [Take], session: URL) -> (take: Take, url: URL)? {
+        playableTakes(takes, session: session).first
+    }
+
     static func load(session: URL, takes: [Take]) -> Files {
         let fm = FileManager.default
         var files = Files()
-        let valid = takes.sorted {
-            $0.number == $1.number ? ($0.kind == .screen && $1.kind != .screen) : $0.number > $1.number
-        }.filter {
-            !$0.file.contains("/") && !$0.file.contains("..") && ($0.duration ?? 0) > 0
-                && containedVideo($0.file, session: session) != nil
-        }
+        let valid = playableTakes(takes, session: session)
         files.missingTakes = valid.count < takes.count
-        if let take = valid.first {
-            files.take = session.appending(path: take.file); files.takeNumber = take.number
-            files.latestTakeDate = take.startedAt
+        if let latest = valid.first {
+            files.take = latest.url; files.takeNumber = latest.take.number
+            files.latestTakeDate = latest.take.startedAt
         }
         let edits = ((try? fm.contentsOfDirectory(at: session.appending(path: "edits"),
                            includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
@@ -66,7 +75,7 @@ enum SessionJourney {
         files.edit = edits.first.flatMap { modified($0) >= (files.latestTakeDate ?? .distantPast) ? $0 : nil }
         // Only advertise a resumable draft after replaying its saved operations. A stale, corrupt
         // or empty JSON file must not produce a reassuring "Continue editing" state.
-        files.draft = (valid.map { session.appending(path: $0.file) } + edits).compactMap { video -> (URL, Date)? in
+        files.draft = (valid.map(\.url) + edits).compactMap { video -> (URL, Date)? in
             guard let file = EditTimelineDraft.file(video: video, session: session),
                   let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 1_048_576,
                   let data = try? Data(contentsOf: file), let draft = try? JSONDecoder().decode(EditTimelineDraft.self, from: data),

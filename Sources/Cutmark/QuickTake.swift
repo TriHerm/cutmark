@@ -94,48 +94,99 @@ extension AppModel {
 struct QuickTakePane: View {
     @Environment(AppModel.self) private var app
     var doc: SessionDoc
-    private var latest: Int? { doc.meta.takes.map(\.number).max() }
+    @State private var showScript = false
+    @State private var showTakes = false
+
+    private var latest: (take: Take, url: URL)? {
+        SessionJourney.latestPlayableTake(doc.meta.takes, session: doc.url)
+    }
+
     private var recordTitle: String {
         switch app.phase {
-        case .idle: return "Start recording"
+        case .idle: return latest == nil ? "Start recording" : "Record another take"
         case .warming, .countdown: return "Cancel"
-        case .recording: return "Finish take"
-        case .starting: return "Preparing…"
+        case .recording: return "Stop and save"
+        case .starting: return "Starting…"
         case .finishing: return "Saving…"
         }
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Quick recording")
-                    .font(Theme.display(28)).foregroundStyle(Theme.ink)
-                if app.phase == .idle {
-                    QuickRecordingInputs(camera: app.camera, screen: app.screen)
-                }
-                Button { app.toggleRecord() } label: {
-                    Label(recordTitle, systemImage: app.isRecording ? "stop.fill" : "record.circle")
-                }
-                .buttonStyle(AccentButtonStyle(kind: .solid))
-                .disabled(app.phase == .starting || app.phase == .finishing)
-                if !app.isRecording {
-                    Button("Add a script or notes") { doc.quickTake = false }
-                        .buttonStyle(.plain).font(Theme.sans(12)).foregroundStyle(Theme.muted)
-                    if let latest {
-                        if let take = doc.meta.takes.first(where: { $0.number == latest && $0.kind == .screen })
-                            ?? doc.meta.takes.first(where: { $0.number == latest }),
-                           let url = SessionJourney.containedVideo(take.file, session: doc.url) {
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if app.phase == .idle {
+                        Text("Record").font(Theme.display(24)).foregroundStyle(Theme.ink)
+                        if let latest {
+                            HStack {
+                                Label("Take \(latest.take.number) saved", systemImage: "checkmark.circle")
+                                    .font(Theme.sans(12, .medium)).foregroundStyle(Theme.ink)
+                                Spacer()
+                                if let duration = latest.take.duration {
+                                    Text(SessionDoc.clock(duration)).font(Theme.mono(11)).foregroundStyle(Theme.muted)
+                                }
+                            }
                             Button {
-                                TimelineEditorWindow.shared.open(video: url, doc: doc, app: app, startEdit: true)
+                                app.dismissPostRecordingPreview()
+                                TimelineEditorWindow.shared.open(video: latest.url, doc: doc, app: app, startEdit: true)
                             } label: {
-                                Label("Open latest take in editor", systemImage: "scissors")
-                            }.buttonStyle(AccentButtonStyle(kind: .quiet))
+                                Label("Edit latest take", systemImage: "scissors")
+                            }.buttonStyle(AccentButtonStyle(kind: .solid))
+                            Rule()
                         }
-                        TakePlanCard(doc: doc, number: latest)
+                        QuickRecordingInputs(camera: app.camera, screen: app.screen)
+                        if let problem = app.error ?? (app.mode.recordsCamera ? app.camera.permissionProblem : nil) {
+                            Label(problem, systemImage: "exclamationmark.circle")
+                                .font(Theme.sans(12)).foregroundStyle(Theme.danger)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    } else {
+                        HStack {
+                            Text(phaseTitle).font(Theme.display(24)).foregroundStyle(Theme.ink)
+                            Spacer(minLength: 4)
+                            if case .recording(let started) = app.phase {
+                                TimelineView(.periodic(from: started, by: 1)) { tick in
+                                    Text(SessionDoc.clock(tick.date.timeIntervalSince(started)))
+                                        .font(Theme.mono(13)).foregroundStyle(Theme.ink)
+                                }
+                            }
+                        }
                     }
-                }
-            }.padding(28).frame(maxWidth: 560, alignment: .leading).frame(maxWidth: .infinity)
+                    Button { app.toggleRecord() } label: {
+                        Label(recordTitle, systemImage: app.isRecording ? "stop.fill" : "record.circle")
+                    }
+                    .buttonStyle(AccentButtonStyle(kind: latest != nil && app.phase == .idle ? .quiet : .solid))
+                    .disabled(app.phase == .starting || app.phase == .finishing)
+                    .help("Start or stop recording (⌘R)")
+
+                    if app.phase == .idle {
+                        HStack(spacing: 8) {
+                            Button(showScript ? "Hide script" : "Script & notes") { showScript.toggle() }
+                                .buttonStyle(AccentButtonStyle(kind: .quiet))
+                            if !doc.meta.takes.isEmpty {
+                                Button(showTakes ? "Hide takes" : "All takes") { showTakes.toggle() }
+                                    .buttonStyle(AccentButtonStyle(kind: .quiet))
+                            }
+                        }
+                        if showTakes {
+                            CutmarkList(doc: doc).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }.padding(20).padding(.bottom, 20).frame(maxWidth: 560, alignment: .leading).frame(maxWidth: .infinity)
+            }
+            if showScript {
+                Rule()
+                ScriptPane(doc: doc).frame(minHeight: 220)
+            }
         }.background(Theme.paper)
+    }
+
+    private var phaseTitle: String {
+        switch app.phase {
+        case .recording: return "Recording"
+        case .finishing: return "Saving your take"
+        default: return "Get ready"
+        }
     }
 }
 

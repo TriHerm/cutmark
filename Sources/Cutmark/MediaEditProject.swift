@@ -11,7 +11,7 @@ struct MediaEditProject: Codable, Equatable {
     }
     struct CameraLink: Codable, Equatable {
         var screen: UUID
-        let screenMinusCamera: Double
+        var screenMinusCamera: Double
     }
     struct Clip: Codable, Equatable, Identifiable {
         var id = UUID()
@@ -42,6 +42,8 @@ struct MediaEditProject: Codable, Equatable {
     var format: Format = .landscape
     var clips: [Clip] = []
     var visibleClips: [Clip] { clips.filter { $0.duration > 0 } }
+    var timelineClips: [Clip] { visibleClips.filter { $0.cameraLink == nil } }
+    func linkedCamera(for screen: UUID) -> Clip? { clips.first { $0.cameraLink?.screen == screen } }
     var duration: Double { clips.filter { $0.lane == .video }.reduce(0) { $0 + $1.duration } }
     func position(_ id: UUID) -> Double {
         var at = 0.0

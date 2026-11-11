@@ -17,6 +17,72 @@ struct StudioWorkflowTests {
         #expect(Set(SessionMode.allCases.map(\.shortcut)).count == SessionMode.allCases.count)
     }
 
+    @Test func openingATakeInTheMainWindowMountsItsEditableTimeline() async throws {
+        let defaults = UserDefaults.standard
+        let savedTab = defaults.object(forKey: "rightTab")
+        let savedRoot = defaults.object(forKey: "root")
+        let savedChat = defaults.object(forKey: "chatOpen")
+        let savedMode = defaults.object(forKey: "mode")
+        let root = FileManager.default.temporaryDirectory.appending(path: "record-to-edit-\(UUID())")
+        defer {
+            defaults.set(savedTab, forKey: "rightTab")
+            defaults.set(savedRoot, forKey: "root")
+            defaults.set(savedChat, forKey: "chatOpen")
+            defaults.set(savedMode, forKey: "mode")
+            try? FileManager.default.removeItem(at: root)
+        }
+        _ = NSApplication.shared
+        let app = AppModel()
+        app.library.setRoot(root)
+        app.mode = .screen
+        let doc = try #require(app.library.createSession())
+        doc.meta.title = "Product walkthrough"
+        let movie = doc.url.appending(path: "take-01-screen.mov"), camera = doc.url.appending(path: "take-01-camera.mov")
+        try await VideoFixture.makeVideo(movie, size: CGSize(width: 320, height: 180), seconds: 3)
+        try await VideoFixture.makeVideo(camera, size: CGSize(width: 96, height: 64), seconds: 3,
+                                         picture: "color=0xcf6451:s=96x64:d=3:r=30")
+        doc.meta.takes = [Take(number: 1, kind: .screen, file: movie.lastPathComponent,
+                               startedAt: Date(), duration: 3, captureHostTime: 101, timingQuality: .videoFrame),
+                          Take(number: 1, kind: .camera, file: camera.lastPathComponent,
+                               startedAt: Date(), duration: 3, captureHostTime: 101, timingQuality: .videoFrame)]
+        doc.save()
+        SessionMode.set(.record)
+
+        let host = NSHostingView(rootView: DetailView(library: app.library, camera: app.camera, screen: app.screen)
+            .environment(app))
+        let window = NSWindow(contentRect: NSRect(x: -5000, y: -5000, width: 1000, height: 680),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+        window.contentView = host
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil); window.contentView = nil }
+        host.layoutSubtreeIfNeeded()
+
+        func capture(_ name: String) async throws {
+            guard let directory = ProcessInfo.processInfo.environment["CUTMARK_SNAPSHOT"] else { return }
+            try await Task.sleep(for: .milliseconds(700))
+            host.layoutSubtreeIfNeeded()
+            let rep = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: rep)
+            try #require(rep.representation(using: .png, properties: [:]))
+                .write(to: URL(fileURLWithPath: directory).appending(path: name + ".png"))
+        }
+        try await capture("record-take-saved")
+        TimelineEditorWindow.shared.open(video: movie, doc: doc, app: app, startEdit: true)
+        defer { TimelineEditorWindow.requested.removeValue(forKey: doc.url) }
+        let draft = MediaEditProject.file(in: doc.url)
+        let deadline = ContinuousClock.now + .seconds(10)
+        while !FileManager.default.fileExists(atPath: draft.path), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(30))
+            host.layoutSubtreeIfNeeded()
+        }
+        try #require(FileManager.default.fileExists(atPath: draft.path), "The Edit route must mount the editor.")
+        let project = try MediaEditProject.load(in: doc.url)
+        #expect(project.clips.map(\.file) == [movie.lastPathComponent, camera.lastPathComponent])
+        #expect(project.timelineClips.map(\.file) == [movie.lastPathComponent])
+        #expect(abs(project.duration - 3) < 0.05)
+        try await capture("edit-paired-take")
+    }
+
     @Test func phrasesFollowTrimReorderAndDuplicateOnOutputClock() {
         let a = EditTimelineDraft.Segment(take: 1, kind: "camera", start: 2, end: 5)
         let b = EditTimelineDraft.Segment(take: 2, kind: "screen", start: 0, end: 2)
