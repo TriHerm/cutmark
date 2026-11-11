@@ -19,8 +19,8 @@ CI result rather than repeating the entire test suite. A GitHub release is a dis
 not the place to bypass the reviewed source changes or validation. Do not create a tag to test
 an unfinished candidate.
 
-Only `v0.2.0` and the expressly authorized `v0.3.0` use the legacy ad-hoc distribution job.
-Neither is Apple notarized. All other release tags use the protected production signing and
+Only the explicitly authorized tags `v0.2.0`, `v0.3.0`, and `v0.4.0` use the legacy ad hoc
+distribution job. These versions are distributed without Apple notarization. All other release tags use the protected production signing and
 notarization gate described below. An ad-hoc smoke build is not a substitute for a versioned
 release artifact, and this exception must not automatically extend to future versions.
 

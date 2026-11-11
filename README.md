@@ -29,7 +29,7 @@ The first-run setup can guide you through missing dependencies. No AI provider i
 
 Download `Cutmark.dmg` from the latest GitHub release, open it, and copy `Cutmark.app` to Applications.
 
-Cutmark 0.3.0 uses an explicitly authorized ad-hoc signing channel, like 0.2.0, and is **not notarized**. On first launch, macOS may require **System Settings → Privacy & Security → Open Anyway**. The repository retains a separate, protected Developer ID + Apple notarization path for production-signed releases once Apple credentials are configured.
+Cutmark 0.4.0 uses ad hoc signing without Apple notarization, as do 0.2.0 and 0.3.0. On first launch, macOS may require **System Settings → Privacy & Security → Open Anyway**. The repository retains a separate, protected Developer ID + Apple notarization path for production-signed releases once Apple credentials are configured.
 
 ## Build from source
 
@@ -106,7 +106,7 @@ Provider CLIs continue to own their own login and model configuration.
 
 CI runs the Python MCP suite and Swift tests on macOS. Tags matching `v*` reuse the successful CI result for the same commit, then build `Cutmark.app`, package `Cutmark.dmg`, verify the artifact, and create a GitHub Release. Create the tag after CI on `main` is green; an early tag fails quickly and can be re-run after CI finishes.
 
-The protected production workflow uses the `production-release` GitHub environment with the Apple Developer ID and notarization credentials described in [`docs/releasing.md`](docs/releasing.md). Production signing is fail-closed; it does not fall back to an ad-hoc artifact when credentials or notarization are unavailable. Cutmark 0.2.0 was intentionally published through the legacy ad-hoc channel instead of weakening that production gate.
+The protected production workflow uses the `production-release` GitHub environment with the Apple Developer ID and notarization credentials described in [`docs/releasing.md`](docs/releasing.md). Production signing is fail-closed; it does not fall back to an ad-hoc artifact when credentials or notarization are unavailable. The legacy ad hoc channel is limited to the specifically authorized versions listed in the Release workflow.
 
 The iPhone companion source is branded as Cutmark but is not part of the current macOS release path.
 
