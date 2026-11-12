@@ -265,7 +265,15 @@ final class MediaEditorStore: ObservableObject {
         if selected != clip.id { selected = clip.id }
         if start && clip.lane == .video { time = position }
     }
-    func remove() { guard let selected else { return }; edit { $0.clips.removeAll { $0.id == selected } } }
+    func remove() {
+        guard editable, let clip = selectedClip, clip.cameraLink == nil else { return }
+        let peers = project.timelineClips.filter { $0.lane == clip.lane }
+        guard let index = peers.firstIndex(where: { $0.id == clip.id }) else { return }
+        let neighbor = index + 1 < peers.count ? peers[index + 1].id : (index > 0 ? peers[index - 1].id : nil)
+        edit { $0.clips.removeAll { $0.id == clip.id } }
+        // Keep repeated Delete presses in the same lane (2026-11-12).
+        if !project.clips.contains(where: { $0.id == clip.id }) { selected = neighbor }
+    }
     func duplicate() {
         guard var clip = selectedClip, clip.cameraLink == nil else { return }
         let source = clip.id

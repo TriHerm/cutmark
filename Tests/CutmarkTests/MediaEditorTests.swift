@@ -146,6 +146,30 @@ struct MediaEditorTests {
         #expect(store.selected == first.id)
         #expect(try MediaEditProject.load(in: doc.url) == store.project)
     }
+    @Test func deletionStaysInTheSameLaneAndStopsWhenItIsEmpty() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let app = AppModel(); app.library.setRoot(root)
+        let doc = try #require(app.library.createSession())
+        try image(.blue, at: doc.url.appending(path: "card.png"))
+        let first = MediaEditProject.Clip(file: "card.png", name: "First", kind: .image, lane: .video, sourceDuration: 3600, end: 2)
+        var middle = first; middle.id = UUID()
+        var last = first; last.id = UUID()
+        var overlay = first; overlay.id = UUID(); overlay.lane = .overlay
+        try MediaEditProject(clips: [first, middle, last, overlay]).save(in: doc.url)
+        let store = MediaEditorStore(doc: doc); await store.open(); defer { store.close() }
+        store.selected = middle.id
+        store.remove()
+        #expect(store.selected == last.id)
+        store.selected = last.id
+        store.remove()
+        #expect(store.selected == first.id)
+        store.selected = overlay.id
+        store.remove()
+        #expect(store.selected == nil)
+        store.remove()
+        #expect(store.project.clips.map(\.id) == [first.id])
+        #expect(try MediaEditProject.load(in: doc.url) == store.project)
+    }
     @Test func firstImportStartsTheTimelineAndTrimFollowsThePlayhead() async throws {
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
         let app = AppModel(); app.library.setRoot(root)
