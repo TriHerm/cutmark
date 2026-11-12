@@ -170,6 +170,25 @@ struct MediaEditorTests {
         #expect(store.project.clips.map(\.id) == [first.id])
         #expect(try MediaEditProject.load(in: doc.url) == store.project)
     }
+    @Test func seekingDuringPreviewRebuildKeepsTheLatestPosition() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let app = AppModel(); app.library.setRoot(root)
+        let doc = try #require(app.library.createSession())
+        try image(.blue, at: doc.url.appending(path: "card.png"))
+        let card = MediaEditProject.Clip(file: "card.png", name: "Card", kind: .image, lane: .video, sourceDuration: 3600, end: 3)
+        try MediaEditProject(clips: [card]).save(in: doc.url)
+        let store = MediaEditorStore(doc: doc); await store.open(); defer { store.close() }
+        #expect(store.building)
+        store.seek(0.5)
+        store.seek(1.5)
+        #expect(store.time == 1.5)
+        let deadline = Date().addingTimeInterval(20)
+        while store.building && Date() < deadline { await Task.yield() }
+        #expect(!store.building)
+        #expect(store.problem == nil)
+        #expect(abs(store.time - 1.5) < 0.01)
+        #expect(abs(store.player.currentTime().seconds - 1.5) < 0.01)
+    }
     @Test func firstImportStartsTheTimelineAndTrimFollowsThePlayhead() async throws {
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
         let app = AppModel(); app.library.setRoot(root)

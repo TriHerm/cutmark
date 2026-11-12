@@ -190,11 +190,14 @@ final class MediaEditorStore: ObservableObject {
         else { pause() }
     }
     func seek(_ seconds: Double) {
-        guard !building else { return }
+        guard seconds.isFinite else { return }
         showTimeline(); player.pause(); playing = false
         let target = max(0, min(project.duration, seconds)); time = target
+        seekGeneration += 1; let generation = seekGeneration
+        // The rebuilding preview reads this position when it is ready (2026-11-12).
+        guard !building else { return }
         requestFrame(at: target)
-        seekGeneration += 1; let generation = seekGeneration; seeking = true
+        seeking = true
         player.seek(to: MediaEditComposition.time(target), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, self.seekGeneration == generation else { return }
@@ -557,9 +560,15 @@ final class MediaEditorStore: ObservableObject {
                 try Task.checkCancellation()
                 guard expected == self.revision else { return }
                 self.player.replaceCurrentItem(with: result.item())
-                let at = min(self.time, max(0, snapshot.duration - 1 / 30))
-                await self.player.seek(to: MediaEditComposition.time(at), toleranceBefore: .zero, toleranceAfter: .zero)
-                guard expected == self.revision else { return }
+                var at: Double
+                repeat {
+                    let generation = self.seekGeneration
+                    at = min(self.time, max(0, snapshot.duration - 1 / 30))
+                    await self.player.seek(to: MediaEditComposition.time(at), toleranceBefore: .zero, toleranceAfter: .zero)
+                    try Task.checkCancellation()
+                    guard expected == self.revision else { return }
+                    if generation == self.seekGeneration { break }
+                } while true
                 self.time = at; self.building = false; self.requestFrame(at: at)
                 self.loadSamples(snapshot)
             } catch {
