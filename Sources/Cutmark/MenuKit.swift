@@ -771,6 +771,7 @@ struct CutmarkSwitch<T: Hashable>: View {
                 }
                 .buttonStyle(.plain)
                 .onHover { hover = $0 ? value : (hover == value ? nil : hover) }
+                .accessibilityAddTraits(on ? .isSelected : [])
             }
         }
         .padding(2)

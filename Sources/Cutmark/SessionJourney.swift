@@ -9,6 +9,7 @@ enum SessionJourney {
         var takeNumber: Int?
         var latestTakeDate: Date?
         var edit: URL?
+        var savedVideos: [URL] = []
         var draft: URL?
         var studioDraft = false
         var missingTakes = false
@@ -72,6 +73,7 @@ enum SessionJourney {
                            includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
             .filter { containedVideo("edits/" + $0.lastPathComponent, session: session) != nil }
             .sorted { modified($0) > modified($1) }
+        files.savedVideos = edits
         files.edit = edits.first.flatMap { modified($0) >= (files.latestTakeDate ?? .distantPast) ? $0 : nil }
         // Only advertise a resumable draft after replaying its saved operations. A stale, corrupt
         // or empty JSON file must not produce a reassuring "Continue editing" state.

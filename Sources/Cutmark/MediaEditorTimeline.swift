@@ -12,6 +12,7 @@ struct MediaEditorTimeline: View {
     private let labelWidth: CGFloat = 90
     private var audio: [MediaEditProject.Clip] { store.project.clips.filter { $0.lane == .audio } }
     private var overlays: [MediaEditProject.Clip] { store.project.timelineClips.filter { $0.lane == .overlay } }
+    private let emptyTrackHeight: CGFloat = 34
     private var width: CGFloat { max(viewport, CGFloat(max(store.project.duration, 5) * scale) + 90) }
     static func clock(_ time: Double) -> String {
         let t = max(0, time.isFinite ? time : 0)
@@ -28,9 +29,9 @@ struct MediaEditorTimeline: View {
                             VStack(spacing: 0) {
                                 ruler
                                 lane(.video, clips: store.project.clips.filter { $0.lane == .video }, height: 82)
-                                if overlays.isEmpty { lane(.overlay, clips: [], height: 56) }
+                                if overlays.isEmpty { lane(.overlay, clips: [], height: emptyTrackHeight) }
                                 else { ForEach(overlays) { lane(.overlay, clips: [$0], height: 56) } }
-                                if audio.isEmpty { lane(.audio, clips: [], height: 58) }
+                                if audio.isEmpty { lane(.audio, clips: [], height: emptyTrackHeight) }
                                 else { ForEach(audio) { lane(.audio, clips: [$0], height: 58) } }
                             }
                             .frame(width: width, alignment: .leading)
@@ -53,13 +54,13 @@ struct MediaEditorTimeline: View {
                                     .allowsHitTesting(false)
                             }
                         }
-                        .onAppear { viewport = max(100, geometry.size.width - labelWidth); fitScale() }
+                        .onAppear { viewport = max(100, geometry.size.width - labelWidth); if fit { fitScale() } }
                         .onChange(of: geometry.size.width) { _, w in viewport = max(100, w - labelWidth); if fit { fitScale() } }
                     }
                 }
             }
             HStack {
-                Text("Drag clips to move · Drag edges to trim · S to split · Delete to remove")
+                Text("Click the ruler to move the playhead · Space to play · S to split")
                     .font(Theme.sans(10)).foregroundStyle(Theme.muted).lineLimit(1)
                 Spacer()
                 let count = store.project.timelineClips.count
@@ -67,10 +68,10 @@ struct MediaEditorTimeline: View {
             }.padding(.horizontal, 12).frame(height: 24).background(Theme.paper)
         }
         .background(Theme.canvas)
-        .focusable().focusEffectDisabled().focused($focused)
+        .focusable().focused($focused)
         .simultaneousGesture(TapGesture().onEnded { focused = true })
         .onKeyPress(.space) { guard focused else { return .ignored }; store.toggle(); return .handled }
-        .onKeyPress("s") { guard focused, store.editable else { return .ignored }; store.split(); return .handled }
+        .onKeyPress("s") { guard focused, store.canCutAtPlayhead else { return .ignored }; store.split(); return .handled }
         .onKeyPress(.delete) { guard focused, store.editable else { return .ignored }; store.remove(); return .handled }
         .onKeyPress(.leftArrow) { guard focused else { return .ignored }; store.seek(store.time - 1 / 30); return .handled }
         .onKeyPress(.rightArrow) { guard focused else { return .ignored }; store.seek(store.time + 1 / 30); return .handled }
@@ -81,28 +82,56 @@ struct MediaEditorTimeline: View {
         .onChange(of: store.project.duration) { if fit { fitScale() } }
     }
     private var toolbar: some View {
-        HStack(spacing: 14) {
-            Button { store.split() } label: { Label("Split", systemImage: "scissors") }.disabled(store.selected == nil || store.selectedClip?.cameraLink != nil || !store.editable || store.building)
-            Button { store.remove() } label: { Label("Delete", systemImage: "trash") }.disabled(store.selected == nil || !store.editable)
+        ViewThatFits(in: .horizontal) {
+            toolbarItems(compact: false)
+            toolbarItems(compact: true)
+        }
+        .buttonStyle(.plain).font(Theme.sans(12, .medium))
+        .padding(.horizontal, 14).frame(height: 38).background(Theme.paper)
+    }
+    private func toolbarItems(compact: Bool) -> some View {
+        HStack(spacing: compact ? 9 : 14) {
+            Button { store.split() } label: { toolbarLabel("Split", icon: "scissors", compact: compact) }
+                .disabled(!store.canCutAtPlayhead).help("Split at the playhead (S)").accessibilityLabel("Split")
+            CutmarkMenuButton(help: "Trim at the playhead") {
+                toolbarLabel("Trim", icon: "crop", compact: compact)
+            } content: {
+                MenuButton("Trim start to playhead", icon: "arrow.right.to.line") { store.trimToPlayhead(start: true) }
+                MenuButton("Trim end to playhead", icon: "arrow.left.to.line") { store.trimToPlayhead(start: false) }
+            }.disabled(!store.canCutAtPlayhead).accessibilityLabel("Trim")
+            Button { store.remove() } label: { toolbarLabel("Delete", icon: "trash", compact: compact) }
+                .disabled(store.selected == nil || !store.editable).help("Delete the selected clip").accessibilityLabel("Delete clip")
             Divider().frame(height: 18)
             Button { store.undo() } label: { Image(systemName: "arrow.uturn.backward") }.disabled(store.history.isEmpty || !store.editable).help("Undo · ⌘Z")
             Button { store.undo(redo: true) } label: { Image(systemName: "arrow.uturn.forward") }.disabled(store.future.isEmpty || !store.editable).help("Redo · ⇧⌘Z")
             Spacer(minLength: 6)
-            Button { snapping.toggle() } label: { Label("Snap", systemImage: snapping ? "magnet.fill" : "magnet") }.foregroundStyle(snapping ? Theme.accent : Theme.muted).help("Snap to cuts and the playhead")
+            Button { snapping.toggle() } label: { toolbarLabel("Snap", icon: snapping ? "magnet.fill" : "magnet", compact: compact) }
+                .foregroundStyle(snapping ? Theme.accent : Theme.muted)
+                .accessibilityAddTraits(snapping ? .isSelected : []).help("Snap to cuts and the playhead").accessibilityLabel("Snap")
             Button("Fit") { fit = true; fitScale() }.foregroundStyle(fit ? Theme.accent : Theme.muted)
-            Slider(value: Binding(get: { log10(scale) }, set: { fit = false; scale = pow(10, $0) }), in: -1...2.7).frame(width: 100).accessibilityLabel("Timeline zoom")
-        }.buttonStyle(.plain).font(Theme.sans(12, .medium)).padding(.horizontal, 14).frame(height: 38).background(Theme.paper)
+                .help("Fit the whole edit in the timeline")
+            Slider(value: Binding(get: { log10(scale) }, set: { fit = false; scale = pow(10, $0) }), in: -1...2.7)
+                .frame(width: compact ? 56 : 100).accessibilityLabel("Timeline zoom")
+        }
+    }
+    @ViewBuilder private func toolbarLabel(_ title: String, icon: String, compact: Bool) -> some View {
+        if compact { Image(systemName: icon) }
+        else { Label(title, systemImage: icon).fixedSize() }
     }
     private var labels: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Tracks").font(Theme.sans(10, .medium)).foregroundStyle(Theme.muted).frame(height: 28)
             label("Video", icon: "film", height: 82)
-            ForEach(0..<max(1, overlays.count), id: \.self) { i in label(overlays.count > 1 ? "Overlay \(i + 1)" : "Overlay", icon: "rectangle.on.rectangle", height: 56) }
-            ForEach(0..<max(1, audio.count), id: \.self) { i in label(audio.count > 1 ? "Audio \(i + 1)" : "Audio", icon: "waveform", height: 58) }
+            ForEach(0..<max(1, overlays.count), id: \.self) { i in
+                label(overlays.count > 1 ? "Overlay \(i + 1)" : "Overlay", icon: "rectangle.on.rectangle", height: overlays.isEmpty ? emptyTrackHeight : 56)
+            }
+            ForEach(0..<max(1, audio.count), id: \.self) { i in
+                label(audio.count > 1 ? "Audio \(i + 1)" : "Audio", icon: "waveform", height: audio.isEmpty ? emptyTrackHeight : 58)
+            }
         }.padding(.leading, 12).frame(maxWidth: .infinity, alignment: .leading).background(Theme.paper)
     }
     private func label(_ title: String, icon: String, height: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 6) { Image(systemName: icon).foregroundStyle(Theme.muted); Text(title).font(Theme.sans(10, .medium)) }
+        Label(title, systemImage: icon).font(Theme.sans(10, .medium))
             .frame(maxWidth: .infinity, minHeight: height, maxHeight: height, alignment: .leading)
     }
     private var ruler: some View {
@@ -228,6 +257,8 @@ private struct MediaTimelineClip: View {
         .offset(x: dragging + edge.width).zIndex(dragging == 0 ? 0 : 10)
         .help("\(title) · \(MediaEditorTimeline.clock(clip.duration))")
         .accessibilityLabel("\(title), \(MediaEditorTimeline.clock(clip.duration)), \(clip.lane.rawValue) track")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { select() }
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
     private func handle(start: Bool) -> some View {

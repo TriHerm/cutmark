@@ -121,6 +121,39 @@ struct MediaEditorTests {
         store.undo(redo: true); #expect(store.project.clips.count == 2)
         #expect(try MediaEditProject.load(in: doc.url) == store.project)
     }
+    @Test func firstImportStartsTheTimelineAndTrimFollowsThePlayhead() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let app = AppModel(); app.library.setRoot(root)
+        let doc = try #require(app.library.createSession())
+        let source = root.appending(path: "Import.mov")
+        try await VideoFixture.makeVideo(source, size: CGSize(width: 96, height: 64), seconds: 4)
+        let store = MediaEditorStore(doc: doc); await store.open(); defer { store.close() }
+        await store.importFiles([source], startsTimeline: true)
+
+        func waitForPreview() async throws {
+            let deadline = ContinuousClock.now + .seconds(5)
+            while store.building, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            try #require(!store.building)
+            #expect(store.problem == nil)
+        }
+        try await waitForPreview()
+        let original = try #require(store.project.timelineClips.first)
+        #expect(original.file == "assets/Import.mov")
+        #expect(!store.canCutAtPlayhead)
+        store.seek(2); store.split()
+        try await waitForPreview()
+        let split = store.project
+        try #require(split.timelineClips.count == 2)
+        #expect(store.selected == original.id)
+        store.seek(3)
+        store.trimToPlayhead(start: true)
+        #expect(store.project.timelineClips.map(\.start) == [0, 3])
+        #expect(abs(store.project.duration - 3) < 0.05)
+        #expect(store.selected == split.timelineClips.last?.id)
+        store.undo()
+        #expect(store.project == split)
+        #expect(try MediaEditProject.load(in: doc.url) == split)
+    }
     @Test func cameraOverlayUsesFrameTimingAndKeepsOlderTakesEditable() async throws {
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
         let app = AppModel(); app.library.setRoot(root)
@@ -237,11 +270,19 @@ struct MediaEditorTests {
         store.undo()
         #expect(store.project.clips.compactMap { $0.cameraLink?.screenMinusCamera }.allSatisfy { abs($0 - 0.22) <= 0.011 })
 
-        store.exportVideo()
+        let destination = root.appending(path: "Delivered video.mp4")
+        store.exportVideo(to: doc.url.appending(path: "Forbidden.mp4"))
+        #expect(!store.exporting && store.problem == VideoExport.Failure.sessionDestination.localizedDescription)
+        store.exportVideo(to: destination)
         let exportDeadline = ContinuousClock.now + .seconds(20)
         while store.exporting, ContinuousClock.now < exportDeadline { try await Task.sleep(for: .milliseconds(20)) }
         let output = try #require(store.exported, "\(store.problem ?? "")")
-        let asset = AVURLAsset(url: output)
+        #expect(store.exportDestination == destination)
+        #expect(try Data(contentsOf: output) == Data(contentsOf: destination))
+        #expect(SessionJourney.load(session: doc.url, takes: doc.meta.takes).savedVideos.contains {
+            $0.resolvingSymlinksInPath() == output.resolvingSymlinksInPath()
+        })
+        let asset = AVURLAsset(url: destination)
         #expect(try await asset.loadTracks(withMediaType: .audio).count == 1)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.requestedTimeToleranceBefore = .zero

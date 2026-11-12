@@ -40,7 +40,7 @@ struct TimelineResultReview: View {
                 Button("Pause") { player.pause() }
                 Spacer()
                 if saved {
-                    Button { export() } label: { Label("Export video…", systemImage: "square.and.arrow.up") }
+                    Button { export() } label: { Label("Save a copy…", systemImage: "square.and.arrow.up") }
                         .buttonStyle(AccentButtonStyle(kind: .solid)).disabled(video == nil || busy)
                 } else {
                     Button(busy ? "Saving…" : "Save version") { save() }
@@ -84,11 +84,8 @@ struct TimelineResultReview: View {
     private func export() {
         guard let video else { return }
         player.pause()
-        let panel = NSSavePanel()
-        panel.title = "Export video"
-        panel.allowedContentTypes = [UTType(filenameExtension: video.pathExtension) ?? .mpeg4Movie]
-        panel.nameFieldStringValue = video.lastPathComponent
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        guard let destination = VideoExport.chooseDestination(name: video.lastPathComponent,
+            type: UTType(filenameExtension: video.pathExtension) ?? .mpeg4Movie) else { return }
         busy = true; problem = nil
         Task {
             defer { busy = false }
@@ -113,12 +110,25 @@ enum VideoExport {
             }
         }
     }
-    /// Copy first, then atomically install the complete export in the chosen folder. A failed
-    /// copy leaves any existing destination intact. Never let Export replace session content.
-    static func copy(_ source: URL, to destination: URL, session: URL) throws {
+    @MainActor static func chooseDestination(name: String, type: UTType) -> URL? {
+        let panel = NSSavePanel()
+        panel.title = "Export video"
+        panel.allowedContentTypes = [type]
+        panel.nameFieldStringValue = name
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    static func destinationURL(_ destination: URL, session: URL) throws -> URL {
         let root = session.resolvingSymlinksInPath().standardizedFileURL.path
         let target = destination.resolvingSymlinksInPath().standardizedFileURL
         guard target.path != root, !target.path.hasPrefix(root + "/") else { throw Failure.sessionDestination }
+        return target
+    }
+
+    /// Copy first, then atomically install the complete export in the chosen folder. A failed
+    /// copy leaves any existing destination intact. Never let Export replace session content.
+    static func copy(_ source: URL, to destination: URL, session: URL) throws {
+        let target = try destinationURL(destination, session: session)
         let temporary = target.deletingLastPathComponent().appending(path: ".cutmark-export-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: temporary) }
         do {

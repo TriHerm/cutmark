@@ -22,7 +22,9 @@ final class MediaEditorStore: ObservableObject {
     @Published private(set) var progress: Float = 0
     @Published var problem: String?
     @Published private(set) var loadFailed = false
+    @Published private(set) var loading = false
     @Published private(set) var exported: URL?
+    @Published private(set) var exportDestination: URL?
     @Published private(set) var history: [MediaEditProject] = []
     @Published private(set) var future: [MediaEditProject] = []
     let player = AVPlayer()
@@ -51,6 +53,8 @@ final class MediaEditorStore: ObservableObject {
     init(doc: SessionDoc) { self.doc = doc; session = doc.url }
     func open(initial: URL? = nil) async {
         guard !opened else { return }; opened = true
+        loading = true
+        defer { loading = false }
         do { project = try MediaEditProject.load(in: session); selected = project.timelineClips.first?.id; loadFailed = false }
         catch { loadFailed = true; problem = "Couldn’t open your saved edit. \(error.localizedDescription)" }
         observer = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.05, preferredTimescale: 600), queue: .main) { [weak self] _ in
@@ -177,7 +181,7 @@ final class MediaEditorStore: ObservableObject {
     }
     func seek(_ seconds: Double) {
         guard !building else { return }
-        showTimeline(); pause()
+        showTimeline(); player.pause(); playing = false
         let target = max(0, min(project.duration, seconds)); time = target
         requestFrame(at: target)
         seekGeneration += 1; let generation = seekGeneration; seeking = true
@@ -196,7 +200,7 @@ final class MediaEditorStore: ObservableObject {
         do {
             try next.save(in: session)
             history.append(project); if history.count > 80 { history.removeFirst() }; future = []
-            project = next; problem = nil; exported = nil
+            project = next; problem = nil; exported = nil; exportDestination = nil
             if !project.timelineClips.contains(where: { $0.id == selected }) { selected = project.timelineClips.first?.id }
             refreshPreview()
         } catch { problem = "Couldn’t save this change. \(error.localizedDescription)" }
@@ -209,16 +213,44 @@ final class MediaEditorStore: ObservableObject {
         do {
             try next.save(in: session)
             if redo { future.removeLast(); history.append(project) } else { history.removeLast(); future.append(project) }
-            project = next; selected = project.timelineClips.first?.id; problem = nil; exported = nil; refreshPreview()
+            project = next; selected = project.timelineClips.first?.id
+            problem = nil; exported = nil; exportDestination = nil; refreshPreview()
         } catch { problem = error.localizedDescription }
     }
-    func split() {
-        guard let selected else { return }
+    private var cutTime: Double {
         let sample = player.currentTime().seconds
-        let at = playing && sample.isFinite && !seeking ? sample : time
+        return playing && sample.isFinite && !seeking ? sample : time
+    }
+    private func clipToCut(at time: Double) -> MediaEditProject.Clip? {
+        func containsCut(_ clip: MediaEditProject.Clip) -> Bool {
+            let local = time - project.position(clip.id)
+            return clip.cameraLink == nil && local >= 1 / 30 && clip.duration - local >= 1 / 30
+        }
+        if let clip = selectedClip, containsCut(clip) { return clip }
+        return project.clips.first { $0.lane == .video && containsCut($0) }
+    }
+    var canCutAtPlayhead: Bool {
+        editable && !building && source == nil && clipToCut(at: cutTime) != nil
+    }
+    func split() {
+        guard editable, !building, source == nil else { return }
+        let at = cutTime
+        guard let clip = clipToCut(at: at) else { return }
         var candidate = project
-        guard candidate.split(selected, at: at) else { problem = "Place the playhead inside the selected clip to split it."; return }
+        guard candidate.split(clip.id, at: at) else { return }
         edit { $0 = candidate }
+    }
+    func trimToPlayhead(start: Bool) {
+        guard editable, !building, source == nil else { return }
+        let at = cutTime
+        guard let clip = clipToCut(at: at) else { return }
+        let position = project.position(clip.id)
+        let boundary = clip.start + (at - position) * clip.speed
+        let previous = project
+        edit { $0.trim(clip.id, start: start ? boundary : clip.start, end: start ? clip.end : boundary) }
+        guard previous != project else { return }
+        if selected != clip.id { selected = clip.id }
+        if start && clip.lane == .video { time = position }
     }
     func remove() { guard let selected else { return }; edit { $0.clips.removeAll { $0.id == selected } } }
     func duplicate() {
@@ -419,9 +451,10 @@ final class MediaEditorStore: ObservableObject {
         } catch { problem = error.localizedDescription }
     }
 
-    func importFiles(_ urls: [URL]) async {
+    func importFiles(_ urls: [URL], startsTimeline: Bool = false) async {
         guard editable else { return }; busy = true; defer { busy = false }
         let directory = session.appending(path: "assets")
+        var firstVisual: URL?
         do {
             guard directory.resolvingSymlinksInPath().path.hasPrefix(session.resolvingSymlinksInPath().path + "/") else { throw MediaEditProject.Failure.invalid("The assets folder is outside this session.") }
             _ = try MediaEditProject.directory("assets", in: session)
@@ -430,18 +463,24 @@ final class MediaEditorStore: ObservableObject {
                 let granted = url.startAccessingSecurityScopedResource(); defer { if granted { url.stopAccessingSecurityScopedResource() } }
                 let target = AssetStore.free(directory.appending(path: url.lastPathComponent))
                 try await Task.detached(priority: .utility) { try FileManager.default.copyItem(at: url, to: target) }.value
+                if Asset.kind(of: target) != .audio { firstVisual = firstVisual ?? target }
             }
             await scan()
+            if startsTimeline, !Task.isCancelled, urls.count == 1, project.duration == 0, let firstVisual,
+               let asset = assets.first(where: { $0.url.standardizedFileURL == firstVisual.standardizedFileURL }) {
+                busy = false
+                await add(asset)
+            }
         } catch { problem = "Some files could not be imported. \(error.localizedDescription)"; await scan() }
     }
-    func chooseFiles(allowed: [UTType] = [.movie, .image, .audio]) {
+    func chooseFiles(allowed: [UTType] = [.movie, .image, .audio], startsTimeline: Bool = false) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = allowed
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.begin { [weak self] response in
             guard response == .OK else { return }
-            Task { @MainActor [weak self] in await self?.importFiles(panel.urls) }
+            Task { @MainActor [weak self] in await self?.importFiles(panel.urls, startsTimeline: startsTimeline) }
         }
     }
     private func refreshPreview() {
@@ -490,8 +529,13 @@ final class MediaEditorStore: ObservableObject {
             self.strips = self.strips.filter { ids.contains($0.key) }; self.waveforms = self.waveforms.filter { ids.contains($0.key) }
         }
     }
-    func exportVideo() {
+    func exportVideo(to destination: URL? = nil) {
         guard editable, project.duration > 0 else { return }
+        if let destination {
+            do { _ = try VideoExport.destinationURL(destination, session: session) }
+            catch { problem = error.localizedDescription; return }
+        }
+        exported = nil; exportDestination = nil
         exporting = true; progress = 0; problem = nil; pause(); sourcePlayer.pause()
         let snapshot = project
         exportTask = Task {
@@ -512,12 +556,20 @@ final class MediaEditorStore: ObservableObject {
                 }
                 await exporter.export()
                 guard exporter.status == .completed else { throw exporter.error ?? MediaEditProject.Failure.invalid(exporter.status == .cancelled ? "Export cancelled. Your edit is saved." : "Export did not finish. Your edit is saved.") }
+                try Task.checkCancellation()
                 guard folder.resolvingSymlinksInPath().path.hasPrefix(session.resolvingSymlinksInPath().path + "/") else { throw MediaEditProject.Failure.invalid("The export folder is outside this session.") }
                 _ = try MediaEditProject.directory("edits", in: session)
                 let final = AssetStore.free(folder.appending(path: "studio-edit.mp4"))
                 try FileManager.default.moveItem(at: temporary, to: final)
                 exported = final; progress = 1
+                progressTask?.cancel()
                 NotificationCenter.default.post(name: .cutmarkFilesChanged, object: session)
+                if let destination {
+                    try await Task.detached(priority: .userInitiated) { [session] in
+                        try VideoExport.copy(final, to: destination, session: session)
+                    }.value
+                    exportDestination = destination
+                }
                 await scan()
             } catch { problem = Task.isCancelled ? "Export cancelled. Your edit is saved." : error.localizedDescription }
         }

@@ -38,15 +38,8 @@ struct StudioWorkflowTests {
         let doc = try #require(app.library.createSession())
         doc.meta.title = "Product walkthrough"
         let movie = doc.url.appending(path: "take-01-screen.mov"), camera = doc.url.appending(path: "take-01-camera.mov")
-        try await VideoFixture.makeVideo(movie, size: CGSize(width: 320, height: 180), seconds: 3)
-        try await VideoFixture.makeVideo(camera, size: CGSize(width: 96, height: 64), seconds: 3,
-                                         picture: "color=0xcf6451:s=96x64:d=3:r=30")
-        doc.meta.takes = [Take(number: 1, kind: .screen, file: movie.lastPathComponent,
-                               startedAt: Date(), duration: 3, captureHostTime: 101, timingQuality: .videoFrame),
-                          Take(number: 1, kind: .camera, file: camera.lastPathComponent,
-                               startedAt: Date(), duration: 3, captureHostTime: 101, timingQuality: .videoFrame)]
-        doc.save()
-        SessionMode.set(.record)
+        let captureEmpty = ProcessInfo.processInfo.environment["CUTMARK_SNAPSHOT"] != nil
+        SessionMode.set(captureEmpty ? .edit : .record)
 
         let host = NSHostingView(rootView: DetailView(library: app.library, camera: app.camera, screen: app.screen)
             .environment(app))
@@ -66,6 +59,16 @@ struct StudioWorkflowTests {
             try #require(rep.representation(using: .png, properties: [:]))
                 .write(to: URL(fileURLWithPath: directory).appending(path: name + ".png"))
         }
+        try await capture("edit-empty")
+        SessionMode.set(.record)
+        try await VideoFixture.makeVideo(movie, size: CGSize(width: 320, height: 180), seconds: 3)
+        try await VideoFixture.makeVideo(camera, size: CGSize(width: 96, height: 64), seconds: 3,
+                                         picture: "color=0xcf6451:s=96x64:d=3:r=30")
+        doc.meta.takes = [Take(number: 1, kind: .screen, file: movie.lastPathComponent,
+                               startedAt: Date(), duration: 3, captureHostTime: 101, timingQuality: .videoFrame),
+                          Take(number: 1, kind: .camera, file: camera.lastPathComponent,
+                               startedAt: Date(), duration: 3, captureHostTime: 101, timingQuality: .videoFrame)]
+        doc.save()
         try await capture("record-take-saved")
         TimelineEditorWindow.shared.open(video: movie, doc: doc, app: app, startEdit: true)
         defer { TimelineEditorWindow.requested.removeValue(forKey: doc.url) }
@@ -81,6 +84,12 @@ struct StudioWorkflowTests {
         #expect(project.timelineClips.map(\.file) == [movie.lastPathComponent])
         #expect(abs(project.duration - 3) < 0.05)
         try await capture("edit-paired-take")
+        SessionMode.set(.export)
+        try await capture("export-paired-take")
+        window.setContentSize(NSSize(width: 650, height: 640))
+        try await capture("export-compact")
+        SessionMode.set(.edit)
+        try await capture("edit-compact")
     }
 
     @Test func phrasesFollowTrimReorderAndDuplicateOnOutputClock() {

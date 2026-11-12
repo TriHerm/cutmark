@@ -26,7 +26,7 @@ enum SessionMode: String, CaseIterable, Identifiable {
     var help: String {
         switch self {
         case .edit: return "Cut your takes and continue your draft (⌘8)"
-        case .export: return "Review a finished version and export a copy (⌘9)"
+        case .export: return "Preview your edit and export an MP4 (⌘9)"
         case .storyboard: return "Open visual previews inside Plan (⌘5)"
         case .write: return "Your full script, scenes and filming directions together (⌘7)"
         case .record: return "Camera, prompter and takes (⌘1)"
@@ -436,13 +436,16 @@ struct SessionHeader: View {
     }
 
     private var meta: some View {
-        HStack(spacing: 7) {
-            Text(doc.projectName)
-            dot
-            let n = doc.takeGroups.count
-            Text("\(n) take\(n == 1 ? "" : "s")")
-            dot
-            Text(SessionList.when(doc.meta.createdAt))
+        let n = doc.takeGroups.count
+        let takes = "\(n) take\(n == 1 ? "" : "s")"
+        let details = "\(doc.projectName) · \(takes) · \(SessionList.when(doc.meta.createdAt))"
+        return HStack(spacing: 7) {
+            ViewThatFits(in: .horizontal) {
+                Text(details).fixedSize()
+                Text(takes).fixedSize()
+                Color.clear.frame(width: 0, height: 0)
+            }
+            .help(details)
             if doc.isPublished {
                 dot
                 PublishMenu(doc: doc)

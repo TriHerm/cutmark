@@ -1090,6 +1090,8 @@ struct KeptTabs: Equatable {
 enum DetailPage: String, CaseIterable {
     case write, assets, sounds, broll, post, edit, export
 
+    var mountedPage: Self { self == .export ? .edit : self }
+
     init?(tab: String, previewing: Bool) {
         guard let page = Self(rawValue: tab == "storyboard" ? "write" : tab) else { return nil }
         guard !previewing || (page != .assets && page != .sounds) else { return nil }
@@ -1242,8 +1244,8 @@ struct DetailView: View {
                                 // Under the pages as they cross-fade: never the Record stage and
                                 // its camera between two tabs (2026-10-04).
                                 Theme.canvas
-                                ForEach(DetailPage.allCases, id: \.self) { page in
-                                    if page == cover || kept.contains(page.rawValue) { pane(page, doc) }
+                                ForEach(DetailPage.allCases.filter { $0 == $0.mountedPage }, id: \.self) { page in
+                                    if page == cover?.mountedPage || kept.contains(page.rawValue) { pane(page, doc) }
                                 }
                             }
                         }
@@ -1273,14 +1275,14 @@ struct DetailView: View {
         }
         .onChange(of: cover, initial: true) { _, page in
             guard let page else { return }
-            opened.open(page.rawValue, in: library.current?.url)
+            opened.open(page.mountedPage.rawValue, in: library.current?.url)
             if page == .edit || page == .export, let doc = library.current,
                app.chats.existing(doc.url)?.running != true {
                 app.chats.open = false
             }
         }
         .onChange(of: library.current?.url) {
-            opened = KeptTabs(session: library.current?.url, tabs: cover.map { [$0.rawValue] } ?? [])
+            opened = KeptTabs(session: library.current?.url, tabs: cover.map { [$0.mountedPage.rawValue] } ?? [])
         }
         // Nothing extra stays mounted while a take records.
         .onChange(of: app.isRecording) { _, on in if on { opened = KeptTabs() } }
@@ -1293,10 +1295,10 @@ struct DetailView: View {
     }
 
     private func pane(_ page: DetailPage, _ doc: SessionDoc) -> some View {
-        Group {
+        let visible = page == cover?.mountedPage
+        return Group {
             switch page {
-            case .edit: MediaEditorWorkspace(doc: doc)
-            case .export: SessionStudio(doc: doc, exporting: true)
+            case .edit, .export: MediaEditorWorkspace(doc: doc, showingExport: cover == .export)
             case .post: PostPane(doc: doc)
             case .write: ScriptPage(doc: doc)
             case .assets: AssetsPane(doc: doc, wide: true)
@@ -1305,10 +1307,10 @@ struct DetailView: View {
             }
         }
         .background(Theme.canvas)
-        .pageFade(page == cover)
-        .allowsHitTesting(page == cover)
-        .accessibilityHidden(page != cover)
-        .environment(\.paneShown, page == cover)
+        .pageFade(visible)
+        .allowsHitTesting(visible)
+        .accessibilityHidden(!visible)
+        .environment(\.paneShown, visible)
     }
 
     private var split: some View {

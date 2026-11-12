@@ -5,14 +5,15 @@ struct SessionStudio: View {
     @Environment(AppModel.self) private var app
     let doc: SessionDoc
     let exporting: Bool
+    var onReview: ((Job) -> Void)? = nil
     @State private var files = SessionJourney.Files()
     @State private var version = 0
     @State private var loaded = false
     @State private var review: Job?
     private var jobs: [Job] { app.jobs.bySession[doc.url.standardizedFileURL] ?? [] }
-    private var result: Job? {
+    private var completedEdit: Job? {
         if case .result(let job) = SessionJourney.next(files: files, jobs: jobs) { return job }
-        return files.edit.map { TimelineResultReview.savedJob(video: $0, session: doc.url) }
+        return nil
     }
 
     var body: some View {
@@ -20,10 +21,12 @@ struct SessionStudio: View {
             VStack(alignment: .leading, spacing: 24) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(exporting ? "Ready for the final watch?" : "Make your best take.")
+                        Text(exporting ? "Saved videos" : "Make your best take.")
                             .font(Theme.display(30))
-                        Text(exporting ? "Review the finished video, save a version, then export a copy." : "Cut mistakes, keep the good parts, and shape your video.")
-                            .font(Theme.sans(14)).foregroundStyle(Theme.muted)
+                        if !exporting {
+                            Text("Cut mistakes, keep the good parts, and shape your video.")
+                                .font(Theme.sans(14)).foregroundStyle(Theme.muted)
+                        }
                     }
                     Spacer()
                     Button { SessionMode.set(exporting ? .post : .assets) } label: {
@@ -92,18 +95,30 @@ struct SessionStudio: View {
 
     private var delivery: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Label(result == nil ? "Create your video in the editor" : "Your video is ready to review", systemImage: "play.rectangle")
-                .font(Theme.sans(19, .semibold))
-            Text(result == nil ? "Choose Create video when your cuts are ready. The finished version will appear here." : "Watch the full video and check the sound before exporting.")
-                .font(Theme.sans(13)).foregroundStyle(Theme.muted)
-            if let result {
-                Button("Review & export…") { review = result }.buttonStyle(AccentButtonStyle(kind: .solid))
-            } else {
-                Button("Go to editor") { SessionMode.set(.edit) }.buttonStyle(AccentButtonStyle(kind: .solid))
+            if let completedEdit {
+                Button("Review completed edit…") { reviewVideo(completedEdit) }
+                    .buttonStyle(AccentButtonStyle(kind: .solid))
+            } else if files.savedVideos.isEmpty {
+                Text("No saved videos yet").font(Theme.sans(17, .semibold))
+                Text("Export an edit and it will appear here.").font(Theme.sans(13)).foregroundStyle(Theme.muted)
             }
             JobsRow(session: doc.url).environment(app)
+            ForEach(files.savedVideos, id: \.self) { video in
+                HStack(spacing: 10) {
+                    Label(video.deletingPathExtension().lastPathComponent, systemImage: "film")
+                        .font(Theme.sans(13, .medium)).lineLimit(1).help(video.lastPathComponent)
+                    Spacer()
+                    Button("Review…") { reviewVideo(TimelineResultReview.savedJob(video: video, session: doc.url)) }
+                        .buttonStyle(AccentButtonStyle(kind: .quiet))
+                        .accessibilityLabel("Review \(video.lastPathComponent)")
+                }
+            }
         }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
             .background(Theme.paper, in: RoundedRectangle(cornerRadius: 18))
+    }
+    private func reviewVideo(_ job: Job) {
+        if let onReview { onReview(job) }
+        else { review = job }
     }
     private func open(_ video: URL) { TimelineEditorWindow.shared.open(video: video, doc: doc, app: app) }
 }

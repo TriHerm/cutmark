@@ -38,7 +38,7 @@ struct QuickRecordingInputs: View {
                 app.mode = value
                 if value.recordsCamera { camera.setPaused(false) }
                 if !value.recordsScreen { previewVisible = false; screen.setPreviewing(false) }
-            }), options: [(.camera, "Camera"), (.screen, "Screen"), (.cameraScreen, "Both")], fill: true)
+            }), options: [(.camera, "Camera"), (.screen, "Screen"), (.cameraScreen, "Screen + Camera")], fill: true)
             if mode.recordsScreen {
                 Button {
                     sourcesOpen = true
