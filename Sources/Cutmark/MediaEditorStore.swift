@@ -35,6 +35,7 @@ final class MediaEditorStore: ObservableObject {
     private var rebuild: Task<Void, Never>?
     private var thumbnailsTask: Task<Void, Never>?
     private var samplesTask: Task<Void, Never>?
+    private var sampledClips: [UUID: ClipSampleKey] = [:]
     private var frameTask: Task<Void, Never>?
     private var gifPreviewTask: Task<Void, Never>?
     private var frameGenerator: AVAssetImageGenerator?
@@ -44,6 +45,15 @@ final class MediaEditorStore: ObservableObject {
     private var seekGeneration = 0
     private var seeking = false
     private var exportTask: Task<Void, Never>?
+
+    private struct ClipSampleKey: Equatable {
+        let url: URL
+        let start: Double
+        let end: Double
+        let thumbnails: Int
+        let modified: Date?
+        let bytes: Int?
+    }
     var selectedClip: MediaEditProject.Clip? { project.clips.first { $0.id == selected } }
     var editable: Bool { opened && !loadFailed && !busy && !exporting }
     var hasCaptureEvents: Bool {
@@ -265,7 +275,8 @@ final class MediaEditorStore: ObservableObject {
         }
         if project.clips.contains(where: { $0.id == clip.id }) { selected = clip.id }
     }
-    func add(_ asset: Asset, overlay: Bool = false, at insertion: Double? = nil, startDraft: Bool = false) async {
+    func add(_ asset: Asset, overlay: Bool = false, at insertion: Double? = nil, startDraft: Bool = false,
+             displayName: String? = nil) async {
         guard editable else { return }; busy = true; defer { busy = false }
         do {
             let root = session.standardizedFileURL.resolvingSymlinksInPath().path + "/"
@@ -284,7 +295,7 @@ final class MediaEditorStore: ObservableObject {
                 seconds = try await AVURLAsset(url: url).load(.duration).seconds
             }
             guard seconds.isFinite, seconds >= 1 / 30 else { throw MediaEditProject.Failure.invalid("This file has no usable duration.") }
-            var clip = MediaEditProject.Clip(file: String(url.path.dropFirst(root.count)), name: url.deletingPathExtension().lastPathComponent,
+            var clip = MediaEditProject.Clip(file: String(url.path.dropFirst(root.count)), name: displayName ?? url.deletingPathExtension().lastPathComponent,
                 kind: kind, lane: kind == .audio ? .audio : overlay ? .overlay : .video, sourceDuration: seconds, end: kind == .image ? 5 : seconds)
             if clip.lane != .video { clip.offset = max(0, insertion ?? time) }
             // A camera overlay should not double the main recording's soundtrack.
@@ -483,16 +494,54 @@ final class MediaEditorStore: ObservableObject {
             Task { @MainActor [weak self] in await self?.importFiles(panel.urls, startsTimeline: startsTimeline) }
         }
     }
+
+    func addCatalogGIF(_ item: CommonsGIFCatalog.Item, data: Data) async throws {
+        guard editable else { throw MediaEditProject.Failure.invalid("Wait for the current edit to finish and try again.") }
+        busy = true
+        defer { busy = false }
+        let folder = try MediaEditProject.directory("assets", in: session)
+        let sources = try MediaEditProject.directory("_edit/studio/gif-sources", in: session)
+        let title = Library.slug(item.title)
+        let file = AssetStore.free(folder.appending(path: "\(title.isEmpty ? "gif" : title)-\(item.id).gif"))
+        let provenance = sources.appending(path: file.lastPathComponent + ".json")
+        var added = false
+        defer {
+            if !added {
+                try? FileManager.default.removeItem(at: file)
+                try? FileManager.default.removeItem(at: provenance)
+                assets.removeAll { $0.url.resolvingSymlinksInPath() == file }
+            }
+        }
+        try Task.checkCancellation()
+        try data.write(to: file, options: .atomic)
+        let animation = try GIFTiming(url: file)
+        try JSONEncoder().encode(item).write(to: provenance, options: .atomic)
+        await scan()
+        try Task.checkCancellation()
+        guard let asset = assets.first(where: { $0.url.resolvingSymlinksInPath() == file.resolvingSymlinksInPath() }) else {
+            throw MediaEditProject.Failure.invalid("The GIF couldn’t be added to Media. Try again.")
+        }
+        let at = time < project.duration - 1 / 30 ? time : max(0, project.duration - animation.duration)
+        busy = false
+        await add(asset, overlay: project.duration > 0, at: at, displayName: item.title)
+        added = project.clips.contains { $0.file == asset.rel }
+        if !added { throw MediaEditProject.Failure.invalid(problem ?? "The GIF couldn’t be added to the timeline. Try again.") }
+    }
     private func refreshPreview() {
         seekGeneration += 1; seeking = false
         revision += 1; let expected = revision, snapshot = project
-        rebuild?.cancel(); pause(); player.replaceCurrentItem(with: nil)
-        guard !snapshot.clips.isEmpty, snapshot.duration > 0 else { building = false; time = 0; return }
+        rebuild?.cancel(); frameTask?.cancel(); frameGenerator?.cancelAllCGImageGeneration()
+        player.pause(); playing = false
+        guard snapshot.duration > 0 else {
+            player.replaceCurrentItem(with: nil)
+            previewFrame = nil; building = false; time = 0
+            return
+        }
         building = true
         rebuild = Task { [weak self] in
             guard let self else { return }
             do {
-                try await Task.sleep(for: .milliseconds(120))
+                try await Task.sleep(for: .milliseconds(50))
                 let result = try await MediaEditComposition.build(snapshot, session: self.session)
                 try Task.checkCancellation()
                 guard expected == self.revision else { return }
@@ -504,6 +553,8 @@ final class MediaEditorStore: ObservableObject {
                 self.loadSamples(snapshot)
             } catch {
                 guard !Task.isCancelled, expected == self.revision else { return }
+                self.player.replaceCurrentItem(with: nil)
+                self.previewFrame = nil
                 self.building = false; self.problem = "Preview unavailable. \(error.localizedDescription)"
             }
         }
@@ -513,20 +564,31 @@ final class MediaEditorStore: ObservableObject {
         samplesTask = Task { [weak self] in
             guard let self else { return }
             let clips = project.timelineClips
+            let thumbnailCount = min(8, max(2, 96 / max(1, clips.count)))
             for clip in clips {
                 guard !Task.isCancelled else { return }
+                guard clip.kind == .video || clip.kind == .audio else { continue }
                 guard let url = try? MediaEditProject.source(clip.file, session: self.session) else { continue }
+                let metadata = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+                let key = ClipSampleKey(url: url, start: clip.start, end: clip.end,
+                                        thumbnails: clip.kind == .video ? thumbnailCount : 0,
+                                        modified: metadata?.contentModificationDate, bytes: metadata?.fileSize)
+                guard self.sampledClips[clip.id] != key else { continue }
+                var strip: [TimelineThumbnail] = []
                 if clip.kind == .video {
-                    let frames = try? await TimelineMedia.thumbnails(url: url, start: clip.start, end: clip.end, imageCount: min(8, max(2, 96 / max(1, clips.count))))
-                    guard !Task.isCancelled else { return }; self.strips[clip.id] = frames ?? []
+                    strip = (try? await TimelineMedia.thumbnails(url: url, start: clip.start, end: clip.end, imageCount: thumbnailCount)) ?? []
                 }
-                if clip.kind == .video || clip.kind == .audio {
-                    let samples = try? await TimelineMedia.waveform(url: url, start: clip.start, end: clip.end, sampleCount: 192)
-                    guard !Task.isCancelled else { return }; self.waveforms[clip.id] = samples ?? []
-                }
+                guard !Task.isCancelled else { return }
+                let samples = try? await TimelineMedia.waveform(url: url, start: clip.start, end: clip.end, sampleCount: 192)
+                guard !Task.isCancelled else { return }
+                if clip.kind == .video { self.strips[clip.id] = strip }
+                self.waveforms[clip.id] = samples ?? []
+                if samples != nil && (clip.kind == .audio || !strip.isEmpty) { self.sampledClips[clip.id] = key }
             }
             let ids = Set(clips.map(\.id))
-            self.strips = self.strips.filter { ids.contains($0.key) }; self.waveforms = self.waveforms.filter { ids.contains($0.key) }
+            if self.strips.keys.contains(where: { !ids.contains($0) }) { self.strips = self.strips.filter { ids.contains($0.key) } }
+            if self.waveforms.keys.contains(where: { !ids.contains($0) }) { self.waveforms = self.waveforms.filter { ids.contains($0.key) } }
+            self.sampledClips = self.sampledClips.filter { ids.contains($0.key) }
         }
     }
     func exportVideo(to destination: URL? = nil) {

@@ -15,6 +15,7 @@ struct MediaEditorWorkspace: View {
     @State private var filter = MediaFilter.all
     @State private var inspectorOpen = false
     @State private var mediaOpen = false
+    @State private var gifBrowserOpen = false
     @State private var showMediaSidebar: Bool
     @State private var showInspector = false
     @State private var panel: StudioEditTools.Panel
@@ -106,6 +107,9 @@ struct MediaEditorWorkspace: View {
         .cutmarkPopover(isPresented: $inspectorOpen) { tools.frame(width: 310, height: 495) }
         .cutmarkPopover(isPresented: $versionsOpen) { savedVideos.frame(width: 490, height: 370) }
         .sheet(item: $exportReview) { TimelineResultReview(job: $0).environment(app) }
+        .sheet(isPresented: $gifBrowserOpen) {
+            GIFBrowser { item, data in try await store.addCatalogGIF(item, data: data) }
+        }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             guard !showingExport else { return false }
             Task { @MainActor in
@@ -278,9 +282,14 @@ struct MediaEditorWorkspace: View {
             }
             Divider()
             HStack {
-                Link(destination: URL(string: "https://giphy.com/")!) {
-                    Label("Browse GIPHY", systemImage: "arrow.up.right")
-                }.help("Browse in your browser. Import a GIF from your Mac to use it in an edit.")
+                Button {
+                    mediaOpen = false
+                    store.pause(); store.showTimeline()
+                    gifBrowserOpen = true
+                } label: {
+                    Label("Find GIFs", systemImage: "film")
+                }.buttonStyle(.plain).disabled(!store.editable)
+                    .help("Browse animated GIFs and add them to the timeline")
                 Spacer(minLength: 4)
                 Button("Import GIF…") { store.chooseFiles(allowed: [.gif]) }
                     .buttonStyle(.plain).disabled(!store.editable)

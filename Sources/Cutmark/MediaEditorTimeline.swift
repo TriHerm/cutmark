@@ -156,11 +156,13 @@ struct MediaEditorTimeline: View {
                     .allowsHitTesting(false)
             }
             ForEach(clips) { clip in
+                let position = store.project.position(clip.id)
                 MediaTimelineClip(clip: clip, hasCamera: store.project.linkedCamera(for: clip.id) != nil, selected: store.selected == clip.id, scale: scale,
                                   frames: store.strips[clip.id] ?? [], waveform: store.waveforms[clip.id] ?? [],
-                                  image: sourceImage(clip), height: height - 8,
+                                  image: sourceImage(clip), height: height - 8, leading: position * scale,
+                                  canMove: store.editable && (lane != .video || clips.count > 1),
                                   select: { store.select(clip.id) }, move: { delta in move(clip, delta: delta) }, trim: { start, delta in trim(clip, start: start, delta: delta) })
-                    .offset(x: CGFloat(store.project.position(clip.id) * scale), y: 4)
+                    .offset(x: position * scale, y: 4)
             }
         }.frame(height: height).overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
             .dropDestination(for: String.self) { values, location in
@@ -188,7 +190,12 @@ struct MediaEditorTimeline: View {
         store.selected = clip.id
         let desired = snap(store.project.position(clip.id) + delta, excluding: clip.id)
         if clip.lane == .video {
-            let target = store.project.clips.first { $0.lane == .video && $0.id != clip.id && store.project.position($0.id) + $0.duration / 2 > desired }
+            let videos = store.project.clips.filter { $0.lane == .video }
+            guard let index = videos.firstIndex(where: { $0.id == clip.id }) else { return }
+            let following = videos.dropFirst(index + 1).first
+            let center = desired + clip.duration / 2
+            let target = videos.first { $0.id != clip.id && store.project.position($0.id) + $0.duration / 2 > center }
+            guard target?.id != following?.id else { return }
             store.edit { $0.move(clip.id, before: target?.id) }
         } else { store.update(clip.id) { $0.offset = desired } }
     }
@@ -212,6 +219,8 @@ private struct MediaTimelineClip: View {
     let waveform: [CGFloat]
     let image: NSImage?
     let height: CGFloat
+    let leading: CGFloat
+    let canMove: Bool
     let select: () -> Void
     let move: (Double) -> Void
     let trim: (Bool, Double) -> Void
@@ -222,38 +231,19 @@ private struct MediaTimelineClip: View {
     private var color: Color { clip.lane == .audio ? Theme.live : clip.lane == .overlay ? Theme.warn : Theme.accent }
     private var title: String { hasCamera ? "\(clip.name) · Screen + Camera" : clip.name }
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            color.opacity(0.18)
-            if clip.kind != .audio {
-                HStack(spacing: 1) {
-                    if frames.isEmpty, let image { Image(nsImage: image).resizable().scaledToFill().frame(width: width, height: height).clipped() }
-                    ForEach(frames.indices, id: \.self) { index in
-                        Image(decorative: frames[index].image, scale: 1).resizable().scaledToFill()
-                            .frame(width: max(1, width / CGFloat(frames.count)), height: height).clipped()
-                    }
-                }.opacity(0.7)
-            }
-            if !waveform.isEmpty {
-                TimelineWaveformBar(amplitudes: waveform, tint: color)
-                    .frame(width: width, height: clip.kind == .audio ? height - 21 : 18)
-                    .frame(maxHeight: .infinity, alignment: .bottom).background(clip.kind == .audio ? Color.clear : Color.black.opacity(0.1))
-            }
-            if width > 36 {
-                HStack(spacing: 4) {
-                    if hasCamera { Image(systemName: "video") }
-                    Text(title)
-                }.font(Theme.sans(10, .medium)).foregroundStyle(clip.kind == .audio ? Theme.ink : .white)
-                    .lineLimit(1).padding(.horizontal, 8).padding(.vertical, 3)
-                    .frame(maxWidth: .infinity, alignment: .leading).background(clip.kind == .audio ? color.opacity(0.12) : Color.black.opacity(0.65))
-            }
-        }
-        .frame(width: width, height: height).clipShape(RoundedRectangle(cornerRadius: 5))
-        .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(selected ? color : color.opacity(0.4), lineWidth: selected ? 2 : 1))
+        TimelineClipArtwork(lane: clip.lane, title: title, hasCamera: hasCamera, selected: selected,
+                            width: width, height: height, frames: frames, waveform: waveform, image: image)
+        .equatable()
         .contentShape(Rectangle()).onTapGesture(perform: select)
-        .gesture(DragGesture(minimumDistance: 6).updating($dragging) { value, state, _ in if clip.cameraLink == nil { state = value.translation.width } }
-            .onEnded { move(Double($0.translation.width) / scale) })
-        .overlay(alignment: .leading) { if selected && clip.cameraLink == nil && width > 32 { handle(start: true) } }
-        .overlay(alignment: .trailing) { if selected && clip.cameraLink == nil && width > 32 { handle(start: false) } }
+        .gesture(DragGesture(minimumDistance: 6, coordinateSpace: .global)
+            .updating($dragging) { value, state, transaction in
+                guard canMove else { return }
+                transaction.disablesAnimations = true
+                state = max(-leading, value.translation.width)
+            }
+            .onEnded { if canMove { move(Double($0.translation.width) / scale) } })
+        .overlay(alignment: .leading) { if selected && width > 32 { handle(start: true) } }
+        .overlay(alignment: .trailing) { if selected && width > 32 { handle(start: false) } }
         .offset(x: dragging + edge.width).zIndex(dragging == 0 ? 0 : 10)
         .help("\(title) · \(MediaEditorTimeline.clock(clip.duration))")
         .accessibilityLabel("\(title), \(MediaEditorTimeline.clock(clip.duration)), \(clip.lane.rawValue) track")
@@ -265,12 +255,64 @@ private struct MediaTimelineClip: View {
         ZStack { color; Capsule().fill(.white.opacity(0.9)).frame(width: 2, height: 20) }
             .frame(width: 10, height: height).contentShape(Rectangle())
             .onHover { if $0 { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
-            .gesture(DragGesture(minimumDistance: 0).updating($edge) { value, state, _ in
+            .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global).updating($edge) { value, state, transaction in
+                transaction.disablesAnimations = true
                 let raw = Double(value.translation.width) / scale
                 if start { state.width = CGFloat(min(clip.duration - 1 / 30, max(-clip.start / clip.speed, raw)) * scale) }
                 else { state.height = CGFloat(max(-clip.duration + 1 / 30, min((clip.sourceDuration - clip.end) / clip.speed, raw)) * scale) }
             }
                 .onEnded { trim(start, Double($0.translation.width) / scale) })
             .help(start ? "Drag to trim the beginning" : "Drag to trim the end")
+    }
+}
+
+/// Keep filmstrips and waveforms out of the clip's per-event drag updates.
+private struct TimelineClipArtwork: View, Equatable {
+    let lane: MediaEditProject.Lane
+    let title: String
+    let hasCamera: Bool
+    let selected: Bool
+    let width: CGFloat
+    let height: CGFloat
+    let frames: [TimelineThumbnail]
+    let waveform: [CGFloat]
+    let image: NSImage?
+    private var color: Color { lane == .audio ? Theme.live : lane == .overlay ? Theme.warn : Theme.accent }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.lane == rhs.lane && lhs.title == rhs.title && lhs.hasCamera == rhs.hasCamera &&
+        lhs.selected == rhs.selected && lhs.width == rhs.width && lhs.height == rhs.height &&
+        lhs.image === rhs.image && lhs.waveform == rhs.waveform &&
+        lhs.frames.elementsEqual(rhs.frames) { $0.image === $1.image }
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            color.opacity(0.18)
+            if lane != .audio {
+                HStack(spacing: 1) {
+                    if frames.isEmpty, let image { Image(nsImage: image).resizable().scaledToFill().frame(width: width, height: height).clipped() }
+                    ForEach(frames.indices, id: \.self) { index in
+                        Image(decorative: frames[index].image, scale: 1).resizable().scaledToFill()
+                            .frame(width: max(1, width / CGFloat(frames.count)), height: height).clipped()
+                    }
+                }.opacity(0.7)
+            }
+            if !waveform.isEmpty {
+                TimelineWaveformBar(amplitudes: waveform, tint: color)
+                    .frame(width: width, height: lane == .audio ? height - 21 : 18)
+                    .frame(maxHeight: .infinity, alignment: .bottom).background(lane == .audio ? Color.clear : Color.black.opacity(0.1))
+            }
+            if width > 36 {
+                HStack(spacing: 4) {
+                    if hasCamera { Image(systemName: "video") }
+                    Text(title)
+                }.font(Theme.sans(10, .medium)).foregroundStyle(lane == .audio ? Theme.ink : .white)
+                    .lineLimit(1).padding(.horizontal, 8).padding(.vertical, 3)
+                    .frame(maxWidth: .infinity, alignment: .leading).background(lane == .audio ? color.opacity(0.12) : Color.black.opacity(0.65))
+            }
+        }
+        .frame(width: width, height: height).clipShape(RoundedRectangle(cornerRadius: 5))
+        .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(selected ? color : color.opacity(0.4), lineWidth: selected ? 2 : 1))
     }
 }

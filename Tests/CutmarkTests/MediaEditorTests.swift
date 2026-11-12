@@ -402,7 +402,8 @@ struct MediaEditorTests {
         #expect(project.clips.last?.duration == 2)
     }
 
-    @Test func gifAnimatesWithTransparencyInPreviewAndExport() async throws {
+    @Test(arguments: [false, true])
+    func gifAnimatesWithTransparencyInPreviewAndExport(fromCatalog: Bool) async throws {
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
         let gif = root.appending(path: "sticker.gif")
         let app = AppModel(); app.library.setRoot(root)
@@ -418,11 +419,25 @@ struct MediaEditorTests {
         try MediaEditProject(clips: [back]).save(in: doc.url)
         let store = MediaEditorStore(doc: doc); defer { store.close() }
         await store.open()
-        await store.importFiles([gif])
+        if fromCatalog {
+            let item = CommonsGIFCatalog.Item(id: 123, title: "Sticker", license: "CC0",
+                source: URL(string: "https://commons.wikimedia.org/wiki/File:Sticker.gif")!,
+                original: URL(string: "https://upload.wikimedia.org/wikipedia/commons/sticker.gif")!,
+                thumbnail: URL(string: "https://thumb.wikimedia.org/wikipedia/commons/sticker.gif")!)
+            let deadline = ContinuousClock.now + .seconds(5)
+            while store.building, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(15)) }
+            store.seek(0.5)
+            try await store.addCatalogGIF(item, data: original)
+            let sidecar = doc.url.appending(path: "_edit/studio/gif-sources/sticker-123.gif.json")
+            #expect(try JSONDecoder().decode(CommonsGIFCatalog.Item.self, from: Data(contentsOf: sidecar)) == item)
+        } else {
+            await store.importFiles([gif])
+            let imported = try #require(store.assets.first { $0.isGIF })
+            await store.add(imported, overlay: true, at: 0.5)
+        }
         let imported = try #require(store.assets.first { $0.isGIF })
-        await store.add(imported, overlay: true, at: 0.5)
         #expect(store.project.clips.last?.kind == .gif)
-        #expect(store.project.clips.last?.file == "assets/sticker.gif")
+        #expect(store.project.clips.last?.file == (fromCatalog ? "assets/sticker-123.gif" : "assets/sticker.gif"))
         #expect(store.project.clips.last?.duration == 1)
         #expect(store.project.clips.last?.offset == 0.5)
         // Export and AVPlayer use this same composition.
