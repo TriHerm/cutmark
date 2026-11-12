@@ -121,6 +121,31 @@ struct MediaEditorTests {
         store.undo(redo: true); #expect(store.project.clips.count == 2)
         #expect(try MediaEditProject.load(in: doc.url) == store.project)
     }
+    @Test func undoAndRedoKeepTheSelectedClipWhenItStillExists() async throws {
+        let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
+        let app = AppModel(); app.library.setRoot(root)
+        let doc = try #require(app.library.createSession())
+        try image(.blue, at: doc.url.appending(path: "card.png"))
+        let first = MediaEditProject.Clip(file: "card.png", name: "First", kind: .image, lane: .video, sourceDuration: 3600, end: 2)
+        var second = first; second.id = UUID(); second.name = "Second"
+        try MediaEditProject(clips: [first, second]).save(in: doc.url)
+        let store = MediaEditorStore(doc: doc); await store.open(); defer { store.close() }
+        store.selected = second.id
+        store.update(second.id) { $0.zoom = 1.5 }
+        store.undo()
+        #expect(store.selected == second.id)
+        #expect(store.selectedClip?.zoom == 1)
+        store.undo(redo: true)
+        #expect(store.selected == second.id)
+        #expect(store.selectedClip?.zoom == 1.5)
+        store.selected = second.id
+        store.remove()
+        store.undo()
+        store.selected = second.id
+        store.undo(redo: true)
+        #expect(store.selected == first.id)
+        #expect(try MediaEditProject.load(in: doc.url) == store.project)
+    }
     @Test func firstImportStartsTheTimelineAndTrimFollowsThePlayhead() async throws {
         let root = try folder(); defer { try? FileManager.default.removeItem(at: root) }
         let app = AppModel(); app.library.setRoot(root)

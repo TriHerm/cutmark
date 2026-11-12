@@ -223,7 +223,10 @@ final class MediaEditorStore: ObservableObject {
         do {
             try next.save(in: session)
             if redo { future.removeLast(); history.append(project) } else { history.removeLast(); future.append(project) }
-            project = next; selected = project.timelineClips.first?.id
+            project = next
+            if !project.timelineClips.contains(where: { $0.id == selected }) {
+                selected = project.timelineClips.first?.id
+            }
             problem = nil; exported = nil; exportDestination = nil; refreshPreview()
         } catch { problem = error.localizedDescription }
     }
